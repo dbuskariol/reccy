@@ -66,17 +66,17 @@ Example.reccyproject/
 
 ## UI
 
-The application uses SwiftUI scenes, `NavigationSplitView`, native toolbars, AppKit file panels, AVKit playback, a menu-bar extra, standard materials, semantic colors, SF Symbols, and system content sharing. This keeps typography, input behavior, accessibility semantics, window chrome, and macOS 26 visual treatment aligned with the platform.
+The application uses SwiftUI scenes, an app-owned fixed-width workspace sidebar, native toolbars, AppKit file panels, AVKit rendering surfaces, a menu-bar extra, standard materials, semantic colors, SF Symbols, and system content sharing. Owning the root split geometry keeps every section aligned even when detail toolbars change, while the controls and window chrome still inherit the native macOS treatment.
 
 ## Privacy and distribution
 
-Capture and editing are local; the application currently has no networking layer. Hardened Runtime is enabled. App Sandbox is intentionally disabled in this engineering build so default Movies-folder capture and persisted custom output directories work while the distribution model is undecided.
+Capture and editing are local. The only network surface is Sparkle's signed update feed. Hardened Runtime is enabled. App Sandbox is intentionally disabled for direct distribution so ScreenCaptureKit, the default Movies folder, persisted custom output directories, and imported media remain first-class without broad security-scoped-bookmark plumbing.
 
-For a sandboxed release, add audio-input, Movies-folder, and user-selected read/write entitlements, then persist custom folders and imported assets as security-scoped bookmarks. For direct distribution, complete Developer ID signing, notarization, Sparkle-or-App-Store update strategy review, and a least-privilege entitlement audit.
+Release builds are universal, Developer ID-signed, notarized, stapled, and checked by Gatekeeper. Sparkle archives are independently EdDSA-signed and published with a phased appcast through GitHub Releases. The release scripts fail closed when the app is missing either architecture, the embedded updater, a matching version, a valid archive signature, or the notarization ticket.
 
 ## Testing strategy
 
-The current tests cover Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent clip splitting, ripple deletion, and codec bitrate policy. Production testing should add:
+The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, and codec bitrate policy. Installed-app Computer Use QA exercises the main navigation, library transport, timeline seeking, movement, reorder, trimming, gap fills, voiceover sources, and zoom. Remaining release acceptance includes:
 
 - signed capture runs for every source and audio combination;
 - long-duration A/V drift measurements;

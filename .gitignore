@@ -5,3 +5,5 @@ build/
 *.xcuserstate
 xcuserdata/
 *.reccyproject/
+*.profraw
+dist/

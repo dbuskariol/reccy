@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Sign, notarize, and publish
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Validate tag version
+        run: |
+          VERSION="$(xcodebuild -project Reccy.xcodeproj -scheme Reccy -configuration Release -showBuildSettings | awk '/MARKETING_VERSION =/{print $3; exit}')"
+          test "${GITHUB_REF_NAME}" = "v${VERSION}"
+
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/reccy-signing.keychain-db"
+          CERTIFICATE="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERTIFICATE" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/Developer ID Application/{print $2; exit}')"
+          test -n "$SIGNING_IDENTITY"
+          echo "RECCY_CODESIGN_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Materialize private release keys
+        env:
+          NOTARY_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_KEY_P8_BASE64 }}
+          SPARKLE_KEY_BASE64: ${{ secrets.SPARKLE_PRIVATE_KEY_BASE64 }}
+        run: |
+          printf '%s' "$NOTARY_KEY_BASE64" | base64 -D > "$RUNNER_TEMP/AuthKey_${{ secrets.APP_STORE_CONNECT_KEY_ID }}.p8"
+          printf '%s' "$SPARKLE_KEY_BASE64" | base64 -D > "$RUNNER_TEMP/reccy-sparkle-key"
+          chmod 600 "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/reccy-sparkle-key"
+
+      - name: Build Developer ID release
+        env:
+          RECCY_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          RECCY_REQUIRE_DEVELOPER_ID: '1'
+        run: Scripts/build-release.sh
+
+      - name: Notarize, staple, and generate Sparkle feed
+        env:
+          RECCY_NOTARY_KEY_PATH: ${{ runner.temp }}/AuthKey_${{ secrets.APP_STORE_CONNECT_KEY_ID }}.p8
+          RECCY_NOTARY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          RECCY_NOTARY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          RECCY_SPARKLE_PRIVATE_KEY_FILE: ${{ runner.temp }}/reccy-sparkle-key
+          RECCY_GITHUB_REPOSITORY: ${{ github.repository }}
+        run: Scripts/notarize-release.sh
+
+      - name: Verify release artifacts
+        env:
+          RECCY_GITHUB_REPOSITORY: ${{ github.repository }}
+          RECCY_REQUIRE_DEVELOPER_ID: '1'
+        run: Scripts/verify-sparkle-update.sh
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/updates/appcast.xml \
+            dist/updates/Reccy-*.zip \
+            dist/updates/Reccy-*.md \
+            --title "Reccy ${GITHUB_REF_NAME#v}" \
+            --notes-file Documentation/RELEASE_NOTES.md \
+            --verify-tag \
+            --latest
