@@ -5,55 +5,84 @@ struct RootView: View {
     @EnvironmentObject private var editor: TimelineEditorController
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var preferences: AppPreferences
+    @State private var isSidebarVisible = true
+
+    private let sidebarWidth: CGFloat = 218
 
     var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 0) {
-                VStack(spacing: 3) {
-                    ForEach(primarySections) { section in
-                        sidebarButton(section)
-                    }
+        NavigationStack {
+            HStack(spacing: 0) {
+                if isSidebarVisible {
+                    sidebar
+                        .frame(width: sidebarWidth)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+
+                    Divider()
                 }
-                .padding(.horizontal, 9)
-                // A NavigationSplitView sidebar can extend beneath the unified
-                // titlebar when the detail view changes its toolbar contents.
-                // Keep navigation in the window safe area so switching pages
-                // never moves the first row underneath the traffic lights.
-                .safeAreaPadding(.top, 8)
 
-                Spacer(minLength: 12)
-
-                Divider()
-                sidebarButton(.settings)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 9)
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationSplitViewColumnWidth(min: 180, ideal: 210)
-        } detail: {
-            switch navigation.section {
-            case .record:
-                RecordView()
-            case .monitor:
-                MonitorView()
-            case .library:
-                LibraryView(library: coordinator.library) { item in
-                    navigation.section = .editor
-                    Task { await editor.open(item) }
+            .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) {
+                            isSidebarVisible.toggle()
+                        }
+                    } label: {
+                        Image(systemName: "sidebar.left")
+                    }
+                    .accessibilityLabel(isSidebarVisible ? "Hide Sidebar" : "Show Sidebar")
+                    .reccyTooltip(isSidebarVisible ? "Hide sidebar" : "Show sidebar")
                 }
-            case .editor:
-                EditorView()
-            case .settings:
-                SettingsView()
             }
         }
-        .navigationSplitViewStyle(.balanced)
         .onChange(of: coordinator.state) { oldState, newState in
             if newState.isRecording, !oldState.isRecording {
                 navigation.section = .monitor
             } else if oldState.isRecording, !newState.isRecording {
                 handleRecordingCompletion(newState)
             }
+        }
+    }
+
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 3) {
+                ForEach(primarySections) { section in
+                    sidebarButton(section)
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.top, 8)
+
+            Spacer(minLength: 12)
+
+            Divider()
+            sidebarButton(.settings)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 9)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.ultraThinMaterial)
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch navigation.section {
+        case .record:
+            RecordView()
+        case .monitor:
+            MonitorView()
+        case .library:
+            LibraryView(library: coordinator.library) { item in
+                navigation.section = .editor
+                Task { await editor.open(item) }
+            }
+        case .editor:
+            EditorView()
+        case .settings:
+            SettingsView()
         }
     }
 
