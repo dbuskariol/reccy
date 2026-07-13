@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RecordView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
+    @EnvironmentObject private var navigation: AppNavigationModel
 
     private let threeColumnLayout = Array(
         repeating: GridItem(.flexible(minimum: 180), spacing: 18, alignment: .topLeading),
@@ -25,7 +26,9 @@ struct RecordView: View {
                     if coordinator.state.isRecording {
                         activeRecordingCard
                     } else {
-                        permissionsCard
+                        if needsPermissionAttention {
+                            permissionWarning
+                        }
                         sourceCard
                         optionsCard
                         outputCard
@@ -70,12 +73,7 @@ struct RecordView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Text("⌘⇧R")
-                .font(.caption.monospaced().weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
+            CapabilityBadge(text: "macOS 26")
         }
     }
 
@@ -95,7 +93,8 @@ struct RecordView: View {
                     }
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                } else if let message = coordinator.sourceSelectionMessage {
+                } else if coordinator.screenCapturePermission.isGranted,
+                          let message = coordinator.sourceSelectionMessage {
                     Label(
                         message,
                         systemImage: coordinator.hasSelectedSource
@@ -151,140 +150,44 @@ struct RecordView: View {
         .disabled(!coordinator.screenCapturePermission.isGranted)
     }
 
-    private var permissionsCard: some View {
-        CardContainer {
-            VStack(alignment: .leading, spacing: 16) {
-                SectionHeading(
-                    "Permissions",
-                    subtitle: "Reccy checks access before opening the source picker, so capture never fails silently."
-                )
-
-                permissionDividerRow(
-                    systemImage: "rectangle.inset.filled.and.person.filled",
-                    title: "Screen & System Audio Recording",
-                    detail: "Authorizes the source you approve in Apple’s picker and its ScreenCaptureKit audio."
-                ) {
-                    screenPermissionControls
-                }
-
-                Divider()
-
-                permissionDividerRow(
-                    systemImage: "speaker.wave.2.fill",
-                    title: "System Audio",
-                    detail: coordinator.settings.includeSystemAudio
-                        ? "Enabled for this recording and covered by the source access above."
-                        : "Optional and currently disabled for this recording."
-                ) {
-                    if coordinator.settings.includeSystemAudio {
-                        if coordinator.screenCapturePermission.isGranted {
-                            Label("Covered", systemImage: "checkmark.circle.fill")
-                                .font(.callout.weight(.medium))
-                                .foregroundStyle(.green)
-                        } else {
-                            Label("Needs access above", systemImage: "arrow.up.circle.fill")
-                                .font(.callout.weight(.medium))
-                                .foregroundStyle(.orange)
-                        }
-                    } else {
-                        Label("Off", systemImage: "minus.circle")
-                            .font(.callout.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Divider()
-
-                permissionDividerRow(
-                    systemImage: "mic.fill",
-                    title: "Microphone",
-                    detail: coordinator.settings.includeMicrophone
-                        ? "Required because microphone recording is enabled."
-                        : "Optional until you enable microphone recording."
-                ) {
-                    microphonePermissionControls
-                }
-
-                Label(
-                    "‘System Audio Recording Only’ is for audio-only Core Audio taps. Reccy records system audio with the approved ScreenCaptureKit video source, so it does not require that separate entry.",
-                    systemImage: "info.circle"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-        }
+    private var needsPermissionAttention: Bool {
+        !coordinator.screenCapturePermission.isGranted
+            || (coordinator.settings.includeMicrophone && coordinator.microphonePermission != .authorized)
     }
 
-    private func permissionDividerRow<Controls: View>(
-        systemImage: String,
-        title: String,
-        detail: String,
-        @ViewBuilder controls: () -> Controls
-    ) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: systemImage)
+    private var permissionWarning: some View {
+        HStack(spacing: 13) {
+            Image(systemName: "exclamationmark.triangle.fill")
                 .font(.title3)
-                .foregroundStyle(.tint)
+                .foregroundStyle(.orange)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 3) {
-                Text(title)
+                Text("Capture access needs attention")
                     .font(.headline)
-                Text(detail)
+                Text(permissionAttentionDetail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 8) {
-                controls()
+            Button("Review Permissions") {
+                navigation.openSettings(.permissions)
             }
-            .frame(minWidth: 210, alignment: .trailing)
+        }
+        .padding(16)
+        .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(.orange.opacity(0.25), lineWidth: 0.5)
         }
     }
 
-    @ViewBuilder
-    private var screenPermissionControls: some View {
-        switch coordinator.screenCapturePermission {
-        case .granted:
-            permissionReadyLabel
-        case .restartRequired:
-            Label("Restart required", systemImage: "arrow.clockwise.circle.fill")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.orange)
-            Button("Quit Reccy") { coordinator.quitForPermissionRestart() }
-        case .notGranted:
-            Button("System Settings") { coordinator.openScreenCapturePrivacySettings() }
-            Button("Allow…") { coordinator.requestScreenCapturePermission() }
-                .buttonStyle(.borderedProminent)
+    private var permissionAttentionDetail: String {
+        if !coordinator.screenCapturePermission.isGranted {
+            return coordinator.screenCapturePermission == .restartRequired
+                ? "Quit and reopen Reccy once to finish enabling Screen & System Audio Recording."
+                : "Allow Screen & System Audio Recording before choosing a capture source."
         }
-    }
-
-    @ViewBuilder
-    private var microphonePermissionControls: some View {
-        switch coordinator.microphonePermission {
-        case .authorized:
-            permissionReadyLabel
-        case .notDetermined:
-            if coordinator.settings.includeMicrophone {
-                Button("Allow…") { coordinator.requestMicrophonePermission() }
-                    .buttonStyle(.borderedProminent)
-            } else {
-                Button("Allow…") { coordinator.requestMicrophonePermission() }
-                    .buttonStyle(.bordered)
-            }
-        case .denied, .restricted:
-            Label("Not allowed", systemImage: "exclamationmark.circle.fill")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.orange)
-            Button("System Settings") { coordinator.openMicrophonePrivacySettings() }
-        @unknown default:
-            Button("Check Again") { coordinator.refreshPermissionStatus() }
-        }
-    }
-
-    private var permissionReadyLabel: some View {
-        Label("Ready", systemImage: "checkmark.circle.fill")
-            .font(.callout.weight(.medium))
-            .foregroundStyle(.green)
+        return "Microphone access is required because microphone recording is enabled."
     }
 
     private var optionsCard: some View {
@@ -514,13 +417,11 @@ struct RecordView: View {
     private var recordControls: some View {
         HStack(spacing: 14) {
             Label(
-                coordinator.hasSelectedSource
-                    ? "\(coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title) selected"
-                    : "1. Choose a source above",
-                systemImage: coordinator.hasSelectedSource ? "checkmark.circle.fill" : "1.circle"
+                recordControlStatus,
+                systemImage: recordControlStatusImage
             )
             .font(.callout.weight(.medium))
-            .foregroundStyle(coordinator.hasSelectedSource ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+            .foregroundStyle(recordControlStatusStyle)
 
             if let url = coordinator.lastRecordingURL {
                 ShareLink(item: url) {
@@ -543,11 +444,11 @@ struct RecordView: View {
             Spacer()
 
             Button {
-                coordinator.startRecording()
+                performPrimaryRecordAction()
             } label: {
                 Label(
-                    coordinator.hasSelectedSource ? "2. Start Recording" : "Choose Source",
-                    systemImage: coordinator.hasSelectedSource ? "record.circle.fill" : "rectangle.dashed.badge.record"
+                    primaryRecordActionTitle,
+                    systemImage: primaryRecordActionImage
                 )
                 .frame(minWidth: 160)
             }
@@ -556,6 +457,46 @@ struct RecordView: View {
             .tint(.red)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var recordControlStatus: String {
+        if !coordinator.screenCapturePermission.isGranted {
+            return "Capture permission required"
+        }
+        if coordinator.hasSelectedSource {
+            return "\(coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title) selected"
+        }
+        return "1. Choose a source above"
+    }
+
+    private var recordControlStatusImage: String {
+        if !coordinator.screenCapturePermission.isGranted { return "exclamationmark.circle.fill" }
+        return coordinator.hasSelectedSource ? "checkmark.circle.fill" : "1.circle"
+    }
+
+    private var recordControlStatusStyle: AnyShapeStyle {
+        if !coordinator.screenCapturePermission.isGranted { return AnyShapeStyle(.orange) }
+        return coordinator.hasSelectedSource ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary)
+    }
+
+    private var primaryRecordActionTitle: String {
+        if !coordinator.screenCapturePermission.isGranted { return "Review Permissions" }
+        return coordinator.hasSelectedSource ? "2. Start Recording" : "Choose Source"
+    }
+
+    private var primaryRecordActionImage: String {
+        if !coordinator.screenCapturePermission.isGranted { return "hand.raised.fill" }
+        return coordinator.hasSelectedSource ? "record.circle.fill" : "rectangle.dashed.badge.record"
+    }
+
+    private func performPrimaryRecordAction() {
+        if !coordinator.screenCapturePermission.isGranted {
+            navigation.openSettings(.permissions)
+        } else if coordinator.hasSelectedSource {
+            coordinator.startRecording()
+        } else {
+            coordinator.chooseSource(coordinator.selectedSourceKind)
+        }
     }
 
     private var activeRecordingCard: some View {

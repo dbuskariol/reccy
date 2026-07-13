@@ -4,12 +4,18 @@ import SwiftUI
 struct ReccyApp: App {
     @StateObject private var coordinator = CaptureCoordinator()
     @StateObject private var editor = TimelineEditorController()
+    @StateObject private var navigation = AppNavigationModel()
+    @StateObject private var preferences = AppPreferences()
+    @StateObject private var softwareUpdates = SoftwareUpdateController()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(coordinator)
                 .environmentObject(editor)
+                .environmentObject(navigation)
+                .environmentObject(preferences)
+                .environmentObject(softwareUpdates)
                 .frame(minWidth: 940, minHeight: 680)
         }
         .defaultSize(width: 1080, height: 760)
@@ -48,9 +54,11 @@ struct ReccyApp: App {
             }
         }
 
-        MenuBarExtra {
+        MenuBarExtra(isInserted: menuBarExtraInsertion) {
             MenuBarRecorderView()
                 .environmentObject(coordinator)
+                .environmentObject(navigation)
+                .environmentObject(softwareUpdates)
         } label: {
             Label("Reccy", systemImage: coordinator.state.isRecording ? "record.circle.fill" : "record.circle")
         }
@@ -58,8 +66,21 @@ struct ReccyApp: App {
         Settings {
             SettingsView()
                 .environmentObject(coordinator)
-                .frame(width: 620, height: 570)
+                .environmentObject(navigation)
+                .environmentObject(preferences)
+                .environmentObject(softwareUpdates)
+                .frame(width: 720, height: 620)
         }
+    }
+
+    private var menuBarExtraInsertion: Binding<Bool> {
+        Binding(
+            get: { preferences.showMenuBarExtra },
+            set: { isInserted in
+                guard preferences.showMenuBarExtra != isInserted else { return }
+                preferences.showMenuBarExtra = isInserted
+            }
+        )
     }
 }
 

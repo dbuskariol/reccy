@@ -1,80 +1,103 @@
 import SwiftUI
 
-enum AppSection: String, CaseIterable, Identifiable {
-    case record
-    case monitor
-    case library
-    case editor
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .record: "Record"
-        case .monitor: "Monitor"
-        case .library: "Library"
-        case .editor: "Editor"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .record: "record.circle"
-        case .monitor: "waveform.path.ecg.rectangle"
-        case .library: "rectangle.stack"
-        case .editor: "timeline.selection"
-        }
-    }
-}
-
 struct RootView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
     @EnvironmentObject private var editor: TimelineEditorController
-    @State private var selection: AppSection? = .record
+    @EnvironmentObject private var navigation: AppNavigationModel
+    @EnvironmentObject private var preferences: AppPreferences
 
     var body: some View {
         NavigationSplitView {
-            List(AppSection.allCases, selection: $selection) { section in
-                HStack {
-                    Label(section.title, systemImage: section.systemImage)
-                    Spacer()
-                    if section == .monitor, coordinator.state.isRecording {
-                        Circle()
-                            .fill(.red)
-                            .frame(width: 7, height: 7)
-                            .shadow(color: .red.opacity(0.55), radius: 3)
-                            .accessibilityLabel("Recording in progress")
+            VStack(spacing: 0) {
+                List(primarySections, selection: $navigation.section) { section in
+                    HStack {
+                        Label(section.title, systemImage: section.systemImage)
+                        Spacer()
+                        if section == .monitor, coordinator.state.isRecording {
+                            Circle()
+                                .fill(.red)
+                                .frame(width: 7, height: 7)
+                                .shadow(color: .red.opacity(0.55), radius: 3)
+                                .accessibilityLabel("Recording in progress")
+                        }
                     }
-                }
                     .tag(section)
+                }
+                .scrollContentBackground(.hidden)
+
+                Divider()
+
+                Button {
+                    navigation.section = .settings
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .frame(height: 32)
+                        .background(
+                            navigation.section == .settings ? Color.accentColor.opacity(0.18) : .clear,
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 9)
+                .accessibilityAddTraits(navigation.section == .settings ? .isSelected : [])
             }
             .navigationTitle("Reccy")
             .navigationSplitViewColumnWidth(min: 180, ideal: 210)
         } detail: {
-            switch selection ?? .record {
+            switch navigation.section {
             case .record:
                 RecordView()
             case .monitor:
                 MonitorView()
             case .library:
                 LibraryView(library: coordinator.library) { item in
-                    selection = .editor
+                    navigation.section = .editor
                     Task { await editor.open(item) }
                 }
             case .editor:
                 EditorView()
+            case .settings:
+                SettingsView()
             }
         }
         .onChange(of: coordinator.state) { oldState, newState in
             if newState.isRecording, !oldState.isRecording {
-                selection = .monitor
+                navigation.section = .monitor
             } else if oldState.isRecording, !newState.isRecording {
-                if case .failed = newState {
-                    selection = .record
-                } else {
-                    selection = .library
-                }
+                handleRecordingCompletion(newState)
             }
+        }
+    }
+
+    private var primarySections: [AppSection] {
+        AppSection.allCases.filter { $0 != .settings }
+    }
+
+    private func handleRecordingCompletion(_ state: CaptureState) {
+        if case .failed = state {
+            navigation.section = .record
+            return
+        }
+
+        switch preferences.completionDestination {
+        case .library:
+            navigation.section = .library
+        case .record:
+            navigation.section = .record
+        case .editor:
+            coordinator.library.refresh()
+            guard
+                let url = coordinator.lastRecordingURL,
+                let item = coordinator.library.recordings.first(where: { $0.url == url })
+            else {
+                navigation.section = .library
+                return
+            }
+            navigation.section = .editor
+            Task { await editor.open(item) }
         }
     }
 }

@@ -4,6 +4,7 @@ import Combine
 import CoreMedia
 import CoreVideo
 import Foundation
+import KeyboardShortcuts
 @preconcurrency import ScreenCaptureKit
 
 enum CaptureState: Equatable, Sendable {
@@ -86,6 +87,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         picker.isActive = true
         refreshAudioInputDevices()
         refreshPermissionStatus()
+        registerGlobalShortcuts()
         activationCancellable = NotificationCenter.default
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in
@@ -106,6 +108,34 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     var selectedMicrophoneName: String {
         guard let id = settings.selectedMicrophoneID else { return "System Default" }
         return audioInputDevices.first(where: { $0.id == id })?.name ?? "System Default"
+    }
+
+    private func registerGlobalShortcuts() {
+        KeyboardShortcuts.onKeyUp(for: .toggleRecording) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.state.isRecording {
+                    self.stopRecording()
+                } else {
+                    self.startRecording()
+                }
+            }
+        }
+        KeyboardShortcuts.onKeyUp(for: .chooseDisplay) { [weak self] in
+            Task { @MainActor in self?.chooseSource(.display) }
+        }
+        KeyboardShortcuts.onKeyUp(for: .choosePortion) { [weak self] in
+            Task { @MainActor in self?.chooseSource(.region) }
+        }
+        KeyboardShortcuts.onKeyUp(for: .chooseApplication) { [weak self] in
+            Task { @MainActor in self?.chooseSource(.application) }
+        }
+        KeyboardShortcuts.onKeyUp(for: .chooseWindow) { [weak self] in
+            Task { @MainActor in self?.chooseSource(.window) }
+        }
+        KeyboardShortcuts.onKeyUp(for: .captureScreenshot) { [weak self] in
+            Task { @MainActor in self?.captureScreenshot() }
+        }
     }
 
     func chooseSource(_ kind: CaptureSourceKind) {

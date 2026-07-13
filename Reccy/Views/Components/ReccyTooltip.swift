@@ -2,12 +2,17 @@ import AppKit
 import SwiftUI
 
 private struct ReccyTooltipModifier: ViewModifier {
+    @AppStorage(ReccyPreferenceKeys.showTooltips) private var showsTooltips = true
     let text: String
 
     func body(content: Content) -> some View {
         content
             .accessibilityHint(Text(text))
-            .background(ReccyTooltipAnchor(text: text))
+            .background {
+                if showsTooltips {
+                    ReccyTooltipAnchor(text: text)
+                }
+            }
     }
 }
 
