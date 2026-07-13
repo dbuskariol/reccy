@@ -39,16 +39,3 @@ struct SectionHeading: View {
         }
     }
 }
-
-struct CapabilityBadge: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(.tint)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(.tint.opacity(0.12), in: Capsule())
-    }
-}

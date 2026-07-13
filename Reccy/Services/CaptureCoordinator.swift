@@ -428,7 +428,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     private func makeStreamConfiguration(for filter: SCContentFilter) -> SCStreamConfiguration {
         let configuration: SCStreamConfiguration
-        if settings.useHDR, #available(macOS 26.0, *) {
+        if settings.useHDR {
             configuration = SCStreamConfiguration(preset: .captureHDRRecordingPreservedSDRHDR10)
         } else {
             configuration = SCStreamConfiguration()

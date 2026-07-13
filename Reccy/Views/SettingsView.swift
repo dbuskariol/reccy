@@ -218,7 +218,7 @@ struct SettingsView: View {
                 SettingsDivider()
                 SettingsToggleRow(
                     title: "HDR10 recording",
-                    detail: "Use the macOS 26 ScreenCaptureKit HDR preset with SDR-compatible playback.",
+                    detail: "Use ScreenCaptureKit’s HDR preset with SDR-compatible playback.",
                     systemImage: "sun.max.trianglebadge.exclamationmark",
                     isOn: $coordinator.settings.useHDR
                 )

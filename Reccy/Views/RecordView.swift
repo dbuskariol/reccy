@@ -32,7 +32,7 @@ struct RecordView: View {
                         sourceCard
                         optionsCard
                         outputCard
-                        macOS26Card
+                        nativeMediaCard
                     }
                 }
                 .padding(28)
@@ -64,16 +64,12 @@ struct RecordView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Capture your Mac")
-                    .font(.largeTitle.weight(.bold))
-                Text("Native, private, and tuned for excellent quality at sensible file sizes.")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            CapabilityBadge(text: "macOS 26")
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Capture your Mac")
+                .font(.largeTitle.weight(.bold))
+            Text("Native, private, and tuned for excellent quality at sensible file sizes.")
+                .font(.title3)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -339,7 +335,7 @@ struct RecordView: View {
     }
 
     @ViewBuilder
-    private var macOS26Card: some View {
+    private var nativeMediaCard: some View {
         CardContainer {
             VStack(spacing: 16) {
                 HStack(alignment: .center, spacing: 16) {
@@ -348,11 +344,8 @@ struct RecordView: View {
                         .foregroundStyle(.tint)
                         .frame(width: 38)
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("HDR10 recording")
-                                .font(.headline)
-                            CapabilityBadge(text: "macOS 26")
-                        }
+                        Text("HDR10 recording")
+                            .font(.headline)
                         Text("Preserves highlights and color while maintaining a useful SDR playback range.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
