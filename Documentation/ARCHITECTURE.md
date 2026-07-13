@@ -1,0 +1,98 @@
+# Reccy architecture
+
+## Product boundary
+
+Reccy deploys exclusively to macOS 26. This removes availability branching from the core product and lets macOS 26 capture, screenshot, Swift concurrency, and SwiftUI behaviors shape the architecture from day one.
+
+## Media pipeline
+
+```text
+SCContentSharingPicker
+        │ approved SCContentFilter
+        ▼
+     SCStream
+        ├── screen CMSampleBuffer ───────► HEVC/H.264 AVAssetWriterInput
+        ├── system-audio CMSampleBuffer ─► AAC “System Audio” input
+        └── microphone CMSampleBuffer ───► AAC “Microphone” input
+                                                │
+                                                ▼
+                                    MP4 or MOV multitrack recording
+                                                │
+                                                ▼
+                           TimelineProject + AVMutableComposition
+                              ├── video lane
+                              ├── system-audio lane
+                              ├── microphone lane
+                              └── voiceover lane(s)
+                                                │
+                                                ▼
+                                      AVAssetExportSession
+```
+
+## Capture
+
+`CaptureCoordinator` owns user-visible state, persisted settings, the system content picker, privacy authorization, output naming, and the transition into the library.
+
+`MultitrackRecorder` consumes ScreenCaptureKit sample buffers on one serial, user-interactive queue. The first complete video frame establishes the asset-writer session time. Early audio is buffered briefly and flushed from that same timestamp, preventing microphone or system-audio lead-in from shifting sync.
+
+The writer creates separate, titled tracks for screen, system audio, and microphone. A five-second movie-fragment interval limits how much unwritten media is exposed during an interruption. HEVC is the default because it gives markedly better screen-content size efficiency; H.264 remains available for compatibility, and MOV is available for editing-oriented masters.
+
+HDR recording begins with ScreenCaptureKit's `.captureHDRRecordingPreservedSDRHDR10` configuration. Reccy then writes HEVC Main 10 with PQ transfer, Rec. 2020 primaries/matrix, and VideoToolbox's SDR-range-preservation metadata request. Mouse-click highlighting is disabled in HDR because ScreenCaptureKit currently supports that overlay for BGRA SDR capture.
+
+## Screenshots
+
+On macOS 26, `SCScreenshotConfiguration` captures the already-approved content filter. The UI exposes HEIC, JPEG, PNG, SDR, HDR, and cursor inclusion. Files are written under the selected Reccy output directory in `Screenshots`.
+
+## Timeline
+
+`TimelineProject` is the serializable, non-destructive edit decision list. A clip points to a source URL, source track ID, source range, and timeline range; source media is never rewritten by an edit.
+
+`TimelineEditorController` materializes that model as an `AVMutableComposition` for AVPlayer preview and export. Video, system audio, microphone, and voiceover remain independent lanes. A user can split only the selected clip or split every lane at the playhead, delete one clip, or ripple-delete a range across the project. Lane mute and volume are represented by `AVAudioMix` parameters.
+
+Voiceover uses `AVAudioRecorder` to write AAC into the project's `Media` directory. Each take becomes an independent audio clip at the current playhead, so it can be split, muted, deleted, or replaced without altering the screen recording.
+
+Project packages use this shape:
+
+```text
+Example.reccyproject/
+├── project.json
+└── Media/
+    └── Voiceover <UUID>.m4a
+```
+
+## Export
+
+`ExportService` centralizes delivery presets and delegates transcoding to `AVAssetExportSession`. Current outputs include source-resolution and scaled HEVC/H.264 MP4, ProRes 422/4444 MOV, and audio-only M4A. The capture presets and export presets are intentionally distinct: capture prioritizes a reliable real-time encode, while export can prioritize delivery size, compatibility, or finishing quality.
+
+## UI
+
+The application uses SwiftUI scenes, `NavigationSplitView`, native toolbars, AppKit file panels, AVKit playback, a menu-bar extra, standard materials, semantic colors, SF Symbols, and system content sharing. This keeps typography, input behavior, accessibility semantics, window chrome, and macOS 26 visual treatment aligned with the platform.
+
+## Privacy and distribution
+
+Capture and editing are local; the application currently has no networking layer. Hardened Runtime is enabled. App Sandbox is intentionally disabled in this engineering build so default Movies-folder capture and persisted custom output directories work while the distribution model is undecided.
+
+For a sandboxed release, add audio-input, Movies-folder, and user-selected read/write entitlements, then persist custom folders and imported assets as security-scoped bookmarks. For direct distribution, complete Developer ID signing, notarization, Sparkle-or-App-Store update strategy review, and a least-privilege entitlement audit.
+
+## Testing strategy
+
+The current tests cover Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent clip splitting, ripple deletion, and codec bitrate policy. Production testing should add:
+
+- signed capture runs for every source and audio combination;
+- long-duration A/V drift measurements;
+- HDR metadata and playback validation on SDR and HDR displays;
+- encoder fallback and low-disk behavior;
+- interrupted-capture recovery;
+- multichannel and external microphone fixtures;
+- export matrix tests across Intel and Apple silicon;
+- UI automation for picker, timeline, VoiceOver, and keyboard navigation.
+
+## Primary Apple technologies
+
+- [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit)
+- [SCScreenshotConfiguration](https://developer.apple.com/documentation/screencapturekit/scscreenshotconfiguration)
+- [AVMutableComposition](https://developer.apple.com/documentation/avfoundation/avmutablecomposition)
+- [AVAssetExportSession](https://developer.apple.com/documentation/avfoundation/avassetexportsession)
+- [AVAudioRecorder](https://developer.apple.com/documentation/avfaudio/avaudiorecorder)
+- [VideoToolbox](https://developer.apple.com/documentation/videotoolbox)
+- [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)
