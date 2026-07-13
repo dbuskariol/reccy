@@ -8,6 +8,7 @@ struct MenuBarRecorderView: View {
     @EnvironmentObject private var editor: TimelineEditorController
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var softwareUpdates: SoftwareUpdateController
+    @State private var menuContentHeight: CGFloat = 300
 
     private let sourceColumns = [
         GridItem(.flexible(), spacing: 8),
@@ -21,26 +22,43 @@ struct MenuBarRecorderView: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if coordinator.state.isRecording {
-                        activeRecording
-                    } else {
-                        idleRecorder
+                menuContent
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: MenuContentHeightPreferenceKey.self,
+                                value: geometry.size.height
+                            )
+                        }
                     }
-
-                    if !coordinator.library.recordings.isEmpty {
-                        recentRecordings
-                    }
-                }
-                .padding(14)
             }
-            .frame(maxHeight: 520)
+            .scrollIndicators(menuContentHeight > 520 ? .visible : .hidden)
+            .frame(height: min(menuContentHeight, 520))
+            .onPreferenceChange(MenuContentHeightPreferenceKey.self) { height in
+                guard height > 0, abs(menuContentHeight - height) > 0.5 else { return }
+                menuContentHeight = height
+            }
 
             Divider()
             footer
         }
         .frame(width: 370)
         .background(.regularMaterial)
+    }
+
+    private var menuContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if coordinator.state.isRecording {
+                activeRecording
+            } else {
+                idleRecorder
+            }
+
+            if !coordinator.library.recordings.isEmpty {
+                recentRecordings
+            }
+        }
+        .padding(14)
     }
 
     private var header: some View {
@@ -193,7 +211,7 @@ struct MenuBarRecorderView: View {
         }
         .buttonStyle(.plain)
         .disabled(!coordinator.screenCapturePermission.isGranted)
-        .accessibilityLabel("Choose (kind.title)")
+        .accessibilityLabel("Choose \(kind.title)")
     }
 
     private func selectedSourceCard(_ source: CaptureSourceDescriptor) -> some View {
@@ -523,5 +541,13 @@ struct MenuBarRecorderView: View {
     private func levelText(_ level: Double) -> String {
         guard level > 0.001 else { return "−∞ dB" }
         return String(format: "%+.0f dB", level * 60 - 60)
+    }
+}
+
+private struct MenuContentHeightPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 300
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }

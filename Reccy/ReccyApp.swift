@@ -8,17 +8,21 @@ struct ReccyApp: App {
     @StateObject private var preferences = AppPreferences()
     @StateObject private var softwareUpdates = SoftwareUpdateController()
 
+#if DEBUG
+    private let presentsMenuBarQAHarness = CommandLine.arguments.contains("-ReccyMenuBarQA")
+#endif
+
     var body: some Scene {
         Window("Reccy", id: "main") {
-            RootView()
+            mainWindowContent
                 .environmentObject(coordinator)
                 .environmentObject(editor)
                 .environmentObject(navigation)
                 .environmentObject(preferences)
                 .environmentObject(softwareUpdates)
-                .frame(minWidth: 940, minHeight: 680)
+                .frame(minWidth: minimumWindowWidth, minHeight: minimumWindowHeight)
         }
-        .defaultSize(width: 1080, height: 760)
+        .defaultSize(width: defaultWindowWidth, height: defaultWindowHeight)
         .commands {
             CommandMenu("Recording") {
                 Button("Choose Display…") {
@@ -95,5 +99,52 @@ struct ReccyApp: App {
                 preferences.showMenuBarExtra = isInserted
             }
         )
+    }
+
+    @ViewBuilder
+    private var mainWindowContent: some View {
+#if DEBUG
+        if presentsMenuBarQAHarness {
+            MenuBarRecorderView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .background(Color(nsColor: .windowBackgroundColor))
+        } else {
+            RootView()
+        }
+#else
+        RootView()
+#endif
+    }
+
+    private var minimumWindowWidth: CGFloat {
+#if DEBUG
+        presentsMenuBarQAHarness ? 400 : 940
+#else
+        940
+#endif
+    }
+
+    private var minimumWindowHeight: CGFloat {
+#if DEBUG
+        presentsMenuBarQAHarness ? 560 : 680
+#else
+        680
+#endif
+    }
+
+    private var defaultWindowWidth: CGFloat {
+#if DEBUG
+        presentsMenuBarQAHarness ? 400 : 1080
+#else
+        1080
+#endif
+    }
+
+    private var defaultWindowHeight: CGFloat {
+#if DEBUG
+        presentsMenuBarQAHarness ? 620 : 760
+#else
+        760
+#endif
     }
 }
