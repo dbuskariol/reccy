@@ -39,17 +39,21 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
-    var pickerMode: SCContentSharingPickerMode {
+    /// Portion capture uses Reccy's direct, display-spanning selection overlay.
+    /// The remaining source kinds are delegated to macOS's privacy-preserving picker.
+    var pickerMode: SCContentSharingPickerMode? {
         switch self {
-        case .display, .region: .singleDisplay
+        case .display: .singleDisplay
+        case .region: nil
         case .application: .singleApplication
         case .window: .singleWindow
         }
     }
 
-    var contentStyle: SCShareableContentStyle {
+    var contentStyle: SCShareableContentStyle? {
         switch self {
-        case .display, .region: .display
+        case .display: .display
+        case .region: nil
         case .application: .application
         case .window: .window
         }

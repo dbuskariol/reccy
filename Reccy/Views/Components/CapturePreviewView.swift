@@ -1,5 +1,6 @@
 import AppKit
-@preconcurrency import AVFoundation
+import CoreVideo
+import IOSurface
 import SwiftUI
 
 struct CapturePreviewView: NSViewRepresentable {
@@ -9,39 +10,56 @@ struct CapturePreviewView: NSViewRepresentable {
         Coordinator(pipeline: pipeline)
     }
 
-    func makeNSView(context: Context) -> SampleBufferPreviewNSView {
-        let view = SampleBufferPreviewNSView()
-        pipeline.attach(view.displayLayer.sampleBufferRenderer)
+    func makeNSView(context: Context) -> CaptureSurfacePreviewNSView {
+        let view = CaptureSurfacePreviewNSView()
+        context.coordinator.attach(to: view)
         return view
     }
 
-    func updateNSView(_ view: SampleBufferPreviewNSView, context: Context) {
-        pipeline.attach(view.displayLayer.sampleBufferRenderer)
+    func updateNSView(_ view: CaptureSurfacePreviewNSView, context: Context) {
+        context.coordinator.attach(to: view)
     }
 
-    static func dismantleNSView(_ view: SampleBufferPreviewNSView, coordinator: Coordinator) {
-        coordinator.pipeline.detach(view.displayLayer.sampleBufferRenderer)
+    static func dismantleNSView(_ view: CaptureSurfacePreviewNSView, coordinator: Coordinator) {
+        coordinator.detach()
     }
 
     final class Coordinator {
-        let pipeline: CapturePreviewPipeline
+        private let pipeline: CapturePreviewPipeline
+        private var attachmentID: UUID?
+        private weak var attachedView: CaptureSurfacePreviewNSView?
 
         init(pipeline: CapturePreviewPipeline) {
             self.pipeline = pipeline
         }
+
+        @MainActor
+        func attach(to view: CaptureSurfacePreviewNSView) {
+            guard attachedView !== view else { return }
+            detach()
+            attachedView = view
+            attachmentID = pipeline.attach { [weak view] pixelBuffer in
+                view?.display(pixelBuffer)
+            }
+        }
+
+        func detach() {
+            guard let attachmentID else { return }
+            self.attachmentID = nil
+            attachedView = nil
+            pipeline.detach(attachmentID)
+        }
     }
 }
 
-final class SampleBufferPreviewNSView: NSView {
-    let displayLayer = AVSampleBufferDisplayLayer()
-
+final class CaptureSurfacePreviewNSView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer = displayLayer
-        displayLayer.videoGravity = .resizeAspect
-        displayLayer.backgroundColor = NSColor.black.cgColor
-        displayLayer.masksToBounds = true
+        layer = CALayer()
+        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.contentsGravity = .resizeAspect
+        layer?.masksToBounds = true
     }
 
     @available(*, unavailable)
@@ -49,8 +67,15 @@ final class SampleBufferPreviewNSView: NSView {
         nil
     }
 
-    override func layout() {
-        super.layout()
-        displayLayer.frame = bounds
+    @MainActor
+    func display(_ pixelBuffer: CVPixelBuffer?) {
+        guard let pixelBuffer,
+              let surfaceReference = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue()
+        else {
+            layer?.contents = nil
+            return
+        }
+        let surface = unsafeBitCast(surfaceReference, to: IOSurface.self)
+        layer?.contents = surface
     }
 }

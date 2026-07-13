@@ -321,7 +321,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
         switch type {
         case .screen:
-            guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil else { return }
+            guard Self.isCompleteVideoFrame(sampleBuffer) else { return }
             onVideoFrame?(sampleBuffer)
         case .audio:
             systemAudioLevel = Self.smoothedLevel(
@@ -369,6 +369,20 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         if writer?.status == .failed {
             notifyFailure(MultitrackRecorderError.writerFailed(writer?.error))
         }
+    }
+
+    /// ScreenCaptureKit also emits idle, blank, suspended, and stopped status
+    /// buffers. They are stream state, not recordable video frames.
+    static func isCompleteVideoFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil,
+              let attachments = CMSampleBufferGetSampleAttachmentsArray(
+                sampleBuffer,
+                createIfNecessary: false
+              ) as? [[SCStreamFrameInfo: Any]],
+              let rawStatus = attachments.first?[.status] as? Int,
+              let status = SCFrameStatus(rawValue: rawStatus)
+        else { return false }
+        return status == .complete
     }
 
     private func startSessionIfNeeded(at time: CMTime) {

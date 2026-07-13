@@ -1,84 +1,141 @@
 import AppKit
 import ScreenCaptureKit
 
+struct RegionSelection: Equatable, Sendable {
+    let displayID: CGDirectDisplayID
+    let sourceRect: CGRect
+}
+
 @MainActor
 final class RegionSelectionController {
-    private var panel: RegionSelectionPanel?
-    private var continuation: CheckedContinuation<CGRect?, Never>?
-    private var selectedScreen: NSScreen?
+    private var panels: [RegionSelectionPanel] = []
+    private var continuation: CheckedContinuation<RegionSelection?, Never>?
 
-    func selectRegion(on display: SCDisplay) async -> CGRect? {
+    /// Presents one coordinated overlay per connected display. A selection is
+    /// intentionally constrained to one display because ScreenCaptureKit's
+    /// source rectangle is expressed in a single display's coordinate space.
+    func selectRegion(across displays: [SCDisplay]) async -> RegionSelection? {
+        let availableDisplays = displays.compactMap { display -> (SCDisplay, NSScreen)? in
+            guard let screen = NSScreen.screen(displayID: display.displayID) else { return nil }
+            return (display, screen)
+        }.map { display, screen in
+            RegionSelectionDisplay(
+                displayID: display.displayID,
+                screen: screen,
+                pixelWidth: CGFloat(display.width)
+            )
+        }
+        return await selectRegion(across: availableDisplays)
+    }
+
+#if DEBUG
+    func selectRegionForVisualQA() async -> RegionSelection? {
+        let displays = NSScreen.screens.compactMap { screen -> RegionSelectionDisplay? in
+            guard let displayID = screen.displayID else { return nil }
+            return RegionSelectionDisplay(
+                displayID: displayID,
+                screen: screen,
+                pixelWidth: screen.frame.width * screen.backingScaleFactor
+            )
+        }
+        return await selectRegion(across: displays)
+    }
+#endif
+
+    private func selectRegion(across displays: [RegionSelectionDisplay]) async -> RegionSelection? {
         finish(with: nil)
-        guard let screen = NSScreen.screen(displayID: display.displayID) else { return nil }
-        selectedScreen = screen
+        let availableDisplays = displays.filter { $0.screen.frame.width > 0 && $0.screen.frame.height > 0 }
+        guard !availableDisplays.isEmpty else { return nil }
 
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
-
-            let panel = RegionSelectionPanel(
-                contentRect: screen.frame,
-                styleMask: [.borderless],
-                backing: .buffered,
-                defer: false,
-                screen: screen
-            )
-            panel.setFrame(screen.frame, display: false)
-            panel.level = .screenSaver
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            panel.backgroundColor = .clear
-            panel.isOpaque = false
-            panel.hasShadow = false
-            panel.hidesOnDeactivate = false
-            panel.ignoresMouseEvents = false
-            panel.sharingType = .none
-            panel.isReleasedWhenClosed = false
-
-            let pointPixelScale = screen.frame.width > 0
-                ? CGFloat(display.width) / screen.frame.width
-                : 1
-            let selectionView = RegionSelectionView(
-                frame: CGRect(origin: .zero, size: screen.frame.size),
-                pointPixelScale: pointPixelScale
-            )
-            selectionView.onComplete = { [weak self] selection in
-                self?.finish(with: selection)
+            self.panels = availableDisplays.map { display in
+                self.makePanel(for: display)
             }
-            panel.contentView = selectionView
-            self.panel = panel
-            panel.orderFrontRegardless()
-            panel.makeKey()
-            panel.makeFirstResponder(selectionView)
+            for panel in self.panels { panel.orderFrontRegardless() }
+            if let panel = self.panels.first,
+               let selectionView = panel.contentView as? RegionSelectionView {
+                panel.makeKey()
+                panel.makeFirstResponder(selectionView)
+            }
             NSCursor.crosshair.set()
         }
     }
 
-    private func finish(with selection: CGRect?) {
+    static func sourceRect(from appKitRect: CGRect, screenSize: CGSize) -> CGRect {
+        CGRect(
+            x: appKitRect.minX,
+            y: screenSize.height - appKitRect.maxY,
+            width: appKitRect.width,
+            height: appKitRect.height
+        ).integral
+    }
+
+    private func makePanel(for display: RegionSelectionDisplay) -> RegionSelectionPanel {
+        let screen = display.screen
+        let panel = RegionSelectionPanel(
+            contentRect: screen.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false,
+            screen: screen
+        )
+        panel.setFrame(screen.frame, display: false)
+        panel.level = .screenSaver
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = false
+        panel.sharingType = .none
+        panel.isReleasedWhenClosed = false
+
+        let pointPixelScale = screen.frame.width > 0
+            ? display.pixelWidth / screen.frame.width
+            : 1
+        let selectionView = RegionSelectionView(
+            frame: CGRect(origin: .zero, size: screen.frame.size),
+            pointPixelScale: pointPixelScale
+        )
+        selectionView.onComplete = { [weak self] selection in
+            guard let selection else {
+                self?.finish(with: nil)
+                return
+            }
+            self?.finish(with: RegionSelection(
+                displayID: display.displayID,
+                sourceRect: Self.sourceRect(
+                    from: selection,
+                    screenSize: screen.frame.size
+                )
+            ))
+        }
+        panel.contentView = selectionView
+        return panel
+    }
+
+    private func finish(with selection: RegionSelection?) {
         guard let continuation else {
-            panel?.orderOut(nil)
-            panel = nil
-            selectedScreen = nil
+            closePanels()
             return
         }
-
-        let converted: CGRect?
-        if let selection, let screen = selectedScreen {
-            converted = CGRect(
-                x: selection.minX,
-                y: screen.frame.height - selection.maxY,
-                width: selection.width,
-                height: selection.height
-            ).integral
-        } else {
-            converted = nil
-        }
-
         self.continuation = nil
-        panel?.orderOut(nil)
-        panel = nil
-        selectedScreen = nil
+        closePanels()
         NSCursor.arrow.set()
-        continuation.resume(returning: converted)
+        continuation.resume(returning: selection)
     }
+
+    private func closePanels() {
+        for panel in panels { panel.orderOut(nil) }
+        panels.removeAll()
+    }
+}
+
+private struct RegionSelectionDisplay {
+    let displayID: CGDirectDisplayID
+    let screen: NSScreen
+    let pixelWidth: CGFloat
 }
 
 private final class RegionSelectionPanel: NSPanel {
@@ -196,10 +253,6 @@ private final class RegionSelectionView: NSView {
         if let edges = resizeEdges(at: point, in: selection), !edges.isEmpty {
             dragMode = .resize(original: selection, origin: point, edges: edges)
         } else if selection.contains(point) {
-            if event.clickCount == 2 {
-                acceptSelection()
-                return
-            }
             dragMode = .move(original: selection, origin: point)
         } else {
             dragMode = .create(origin: point)
@@ -282,10 +335,12 @@ private final class RegionSelectionView: NSView {
 
     private func updateControls() {
         guard let selection else {
+            instructions.stringValue = "Drag to select a recording area"
             dimensions.stringValue = ""
             useButton.isEnabled = false
             return
         }
+        instructions.stringValue = "Drag to move or resize the area"
         let pixelWidth = Int((selection.width * pointPixelScale).rounded())
         let pixelHeight = Int((selection.height * pointPixelScale).rounded())
         dimensions.stringValue = "\(pixelWidth) × \(pixelHeight) px"

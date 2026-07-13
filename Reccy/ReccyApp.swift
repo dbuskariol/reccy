@@ -161,7 +161,13 @@ struct ReccyApp: App {
 #if DEBUG
     @MainActor
     private func installMainWindowQAScenario() async {
-        if CommandLine.arguments.contains("-ReccyRecordReadyQA") {
+        if CommandLine.arguments.contains("-ReccyPortionSelectionQA") {
+            coordinator.installPortionSelectionQAScenario()
+            navigation.section = .record
+        } else if CommandLine.arguments.contains("-ReccyMonitorActiveQA") {
+            coordinator.installActiveMonitorQAScenario()
+            navigation.section = .monitor
+        } else if CommandLine.arguments.contains("-ReccyRecordReadyQA") {
             coordinator.installRecordReadyQAScenario()
             navigation.section = .record
         } else if CommandLine.arguments.contains("-ReccyLibraryQA") {

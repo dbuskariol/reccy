@@ -1,4 +1,5 @@
 import AVKit
+import CoreMedia
 import CoreGraphics
 import CoreImage
 import CoreVideo
@@ -8,6 +9,59 @@ import Testing
 
 @Suite("Reccy")
 struct ReccyTests {
+    @Test func portionCaptureBypassesTheWholeDisplayPicker() {
+        #expect(CaptureSourceKind.region.pickerMode == nil)
+        #expect(CaptureSourceKind.region.contentStyle == nil)
+        #expect(CaptureSourceKind.display.pickerMode == .singleDisplay)
+    }
+
+    @Test func regionSelectionConvertsFromAppKitToCaptureCoordinates() {
+        let converted = RegionSelectionController.sourceRect(
+            from: CGRect(x: 100, y: 200, width: 640, height: 360),
+            screenSize: CGSize(width: 1920, height: 1080)
+        )
+
+        #expect(converted == CGRect(x: 100, y: 520, width: 640, height: 360))
+    }
+
+    @Test func livePreviewRoutesTheWritersPixelBufferWithoutCopyingIt() throws {
+        var pixelBuffer: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            16,
+            16,
+            kCVPixelFormatType_32BGRA,
+            nil,
+            &pixelBuffer
+        ) == kCVReturnSuccess)
+        let imageBuffer = try #require(pixelBuffer)
+
+        var formatDescription: CMVideoFormatDescription?
+        #expect(CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: imageBuffer,
+            formatDescriptionOut: &formatDescription
+        ) == noErr)
+        let description = try #require(formatDescription)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: 30),
+            presentationTimeStamp: CMTime(seconds: 42, preferredTimescale: 600),
+            decodeTimeStamp: .invalid
+        )
+        var sourceBuffer: CMSampleBuffer?
+        #expect(CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: imageBuffer,
+            formatDescription: description,
+            sampleTiming: &timing,
+            sampleBufferOut: &sourceBuffer
+        ) == noErr)
+
+        let source = try #require(sourceBuffer)
+        let previewPixelBuffer = try #require(CapturePreviewPipeline.pixelBuffer(from: source))
+        #expect(previewPixelBuffer === imageBuffer)
+    }
+
     @Test func nativeEditorPlayerViewCanBeCreated() {
         let player = AVPlayer()
         let playerView = AVPlayerView()

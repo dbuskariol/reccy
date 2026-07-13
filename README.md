@@ -6,7 +6,7 @@ Reccy is a native screen recorder and non-destructive multitrack editor for macO
 
 ## Capture the right thing
 
-Choose an entire display, a custom portion, every window from one application, or one specific window through Apple's private system picker. Reccy keeps the approved source obvious in the workspace and draws a local capture boundary that never appears in the recorded video.
+Choose an entire display, every window from one application, or one specific window through Apple's private system picker. Portion capture uses a direct QuickTime-style overlay across connected displays. Reccy keeps the approved source obvious in the workspace and draws a local capture boundary that never appears in the recorded video.
 
 - Record system audio and a chosen microphone as separate editable tracks.
 - Monitor the live picture, elapsed time, file size, and detailed audio levels from another display.
@@ -64,10 +64,10 @@ Reccy intentionally targets macOS 26 only. There are no availability branches or
 
 | Layer | Technology |
 | --- | --- |
-| Source approval | `SCContentSharingPicker` and `SCContentFilter` |
+| Source approval | `SCContentSharingPicker`; direct multi-display portion overlay; `SCContentFilter` |
 | Capture | `SCStream` video, system-audio, and microphone sample buffers |
 | Recording | `AVAssetWriter`, AAC, HEVC/H.264, VideoToolbox color metadata |
-| Live monitor | Existing capture buffers through `AVSampleBufferVideoRenderer` |
+| Live monitor | Coalesced zero-copy IOSurface preview from the existing capture buffers |
 | Timeline | Serializable project model materialized as `AVMutableComposition` |
 | Playback and export | AVKit, `AVAudioMix`, and `AVAssetExportSession` |
 | Waveforms | Shared Reccy rendering backed by [DSWaveformImage](https://github.com/dmrschmidt/DSWaveformImage) |
@@ -94,6 +94,14 @@ The current suite exercises resolution policy, portrait and Retina sources, inde
 ### Permission identity matters
 
 macOS privacy grants are tied to the installed app's signing identity. Ad-hoc development builds are suitable for compilation, unit tests, and interface QA, but rebuilding them can invalidate Screen & System Audio Recording or Microphone grants. Reliable end-to-end capture testing requires a stable Apple Development or Developer ID signature.
+
+After adding an Apple Account and Apple Development certificate in Xcode, use the guarded development installer:
+
+```sh
+Scripts/install-development.sh
+```
+
+It automatically selects an Apple Development or Developer ID identity, verifies the team identifier, refuses accidental ad-hoc installation, prevents replacing an install from a different team, and installs to `/Applications/Reccy.app`. Grant capture permissions once after the first stable-signed install; later local builds and signed Sparkle updates retain the same app identity. This machine currently has no valid signing identity, so end-to-end TCC persistence requires that one-time Xcode account setup.
 
 ## Release
 

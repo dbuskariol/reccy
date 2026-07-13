@@ -56,7 +56,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var isCapturingScreenshot = false
     @Published private(set) var screenCapturePermission: CapturePermissionStatus = .notGranted
     @Published private(set) var microphonePermission: AVAuthorizationStatus = .notDetermined
-    @Published private(set) var isPresentingSourcePicker = false
+    @Published private(set) var isSelectingSource = false
     @Published private(set) var sourceSelectionMessage: String?
     @Published private(set) var selectedSource: CaptureSourceDescriptor?
     @Published private(set) var systemAudioLevel: Double = 0
@@ -79,6 +79,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private let boundaryController = CaptureBoundaryController()
 #if DEBUG
     private var suppressesPermissionRefreshForQA = false
+    private var isSimulatingRecordingForQA = false
 #endif
 
     override init() {
@@ -147,7 +148,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     func chooseSource(_ kind: CaptureSourceKind) {
-        guard state.canChangeSettings else { return }
+        guard state.canChangeSettings, !isSelectingSource else { return }
         guard screenCapturePermission.isGranted else {
             sourceSelectionMessage = "Allow Screen & System Audio Recording before choosing a source."
             return
@@ -159,13 +160,23 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         hasSelectedSource = false
         boundaryController.hide()
         state = .idle
-        isPresentingSourcePicker = true
-        sourceSelectionMessage = kind == .region
-            ? "Choose a display in the macOS picker, then drag out the portion to record."
-            : "Choose a \(kind.title.lowercased()) in the macOS picker."
+        isSelectingSource = true
+
+        if kind == .region {
+            sourceSelectionMessage = "Drag anywhere on a display to select the recording area. Press Escape to cancel."
+            Task { await chooseRegion() }
+            return
+        }
+
+        guard let pickerMode = kind.pickerMode, let contentStyle = kind.contentStyle else {
+            isSelectingSource = false
+            handleFailure(CaptureError.sourceUnavailable)
+            return
+        }
+        sourceSelectionMessage = "Choose a \(kind.title.lowercased()) in the macOS picker."
 
         var pickerConfiguration = SCContentSharingPickerConfiguration()
-        pickerConfiguration.allowedPickerModes = kind.pickerMode
+        pickerConfiguration.allowedPickerModes = pickerMode
         pickerConfiguration.allowsChangingSelectedContent = true
         if let bundleID = Bundle.main.bundleIdentifier {
             pickerConfiguration.excludedBundleIDs = [bundleID]
@@ -174,7 +185,31 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         let picker = SCContentSharingPicker.shared
         picker.defaultConfiguration = pickerConfiguration
         picker.isActive = true
-        picker.present(using: kind.contentStyle)
+        picker.present(using: contentStyle)
+    }
+
+    private func chooseRegion() async {
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+            guard let selection = await regionSelectionController.selectRegion(across: content.displays),
+                  let display = content.displays.first(where: { $0.displayID == selection.displayID })
+            else {
+                isSelectingSource = false
+                state = .idle
+                sourceSelectionMessage = "Portion selection was cancelled."
+                return
+            }
+
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            isSelectingSource = false
+            completeSourceSelection(filter: filter, sourceRect: selection.sourceRect)
+        } catch {
+            isSelectingSource = false
+            handleFailure(error)
+        }
     }
 
     func requestScreenCapturePermission() {
@@ -262,6 +297,17 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     func stopRecording() {
+#if DEBUG
+        if isSimulatingRecordingForQA {
+            isSimulatingRecordingForQA = false
+            previewPipeline.clear()
+            clearSourceSelection()
+            recordedDuration = 0
+            recordedFileSize = 0
+            state = .idle
+            return
+        }
+#endif
         if case .countingDown = state {
             cancelCountdown()
             return
@@ -281,6 +327,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     func toggleRecordingPause() {
+#if DEBUG
+        if isSimulatingRecordingForQA {
+            state = state == .paused ? .recording : .paused
+            return
+        }
+#endif
         guard let multitrackRecorder else { return }
         switch state {
         case .recording:
@@ -582,10 +634,24 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
         activeOutputURL = nil
         activeRecordingManifest = nil
-        boundaryController.setRecording(false)
-        state = hasSelectedSource ? .sourceSelected : .idle
+        clearSourceSelection()
+        state = .idle
         library.refresh()
         NSApp.requestUserAttention(.informationalRequest)
+    }
+
+    /// Ends the privacy-sensitive capture session as one atomic lifecycle
+    /// operation. Successful recordings never leave a stale filter, source
+    /// badge, crop rectangle, or non-recorded boundary visible in the app.
+    private func clearSourceSelection() {
+        selectedFilter = nil
+        selectedSourceRect = nil
+        selectedSource = nil
+        selectedSourceKind = .display
+        hasSelectedSource = false
+        isSelectingSource = false
+        sourceSelectionMessage = nil
+        boundaryController.hide()
     }
 
     private func handleFailure(_ error: Error) {
@@ -627,7 +693,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         selectedSource = descriptor
         hasSelectedSource = true
         state = .sourceSelected
-        sourceSelectionMessage = "\(descriptor.name) selected. Reccy is ready to record."
+        if let region = descriptor.region {
+            let rect = region.cgRect
+            sourceSelectionMessage = "\(descriptor.name) selected · \(Int(rect.width)) × \(Int(rect.height)). Reccy is ready to record."
+        } else {
+            sourceSelectionMessage = "\(descriptor.name) selected. Reccy is ready to record."
+        }
         if let target = makeBoundaryTarget(from: descriptor) {
             boundaryController.show(target: target, sourceName: descriptor.name)
         }
@@ -706,6 +777,50 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
 #if DEBUG
+    func installPortionSelectionQAScenario() {
+        suppressesPermissionRefreshForQA = true
+        screenCapturePermission = .granted
+        selectedSourceKind = .region
+        isSelectingSource = true
+        sourceSelectionMessage = "Drag anywhere on a display to select the recording area. Press Escape to cancel."
+        Task { [weak self] in
+            _ = await self?.regionSelectionController.selectRegionForVisualQA()
+            guard let self else { return }
+            isSelectingSource = false
+            sourceSelectionMessage = "Portion selection was cancelled."
+        }
+    }
+
+    func installActiveMonitorQAScenario() {
+        suppressesPermissionRefreshForQA = true
+        screenCapturePermission = .granted
+        installActiveMenuBarQAScenario()
+        recordedDuration = 9
+        recordedFileSize = 8_400_000
+        selectedSource = CaptureSourceDescriptor(
+            kind: .application,
+            name: "Preview Pipeline",
+            applicationName: "Preview Pipeline",
+            applicationBundleIdentifier: "com.reccy.preview-qa",
+            windowName: nil,
+            windowIDs: [101],
+            displayID: nil,
+            displayName: nil,
+            region: nil
+        )
+        isSimulatingRecordingForQA = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(350))
+            for _ in 0..<60 {
+                guard !Task.isCancelled,
+                      let sampleBuffer = Self.makePreviewQASampleBuffer()
+                else { return }
+                self?.previewPipeline.enqueue(sampleBuffer)
+                try? await Task.sleep(for: .milliseconds(33))
+            }
+        }
+    }
+
     func installRecordReadyQAScenario() {
         suppressesPermissionRefreshForQA = true
         screenCapturePermission = .granted
@@ -756,6 +871,55 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             return min(1, 0.08 + (carrier * 0.76 + detail) * amplitude)
         }
     }
+
+    private nonisolated static func makePreviewQASampleBuffer() -> CMSampleBuffer? {
+        let width = 960
+        let height = 540
+        var pixelBuffer: CVPixelBuffer?
+        guard CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+            &pixelBuffer
+        ) == kCVReturnSuccess, let pixelBuffer else { return nil }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+        let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        for y in 0..<height {
+            let row = baseAddress.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt32.self)
+            for x in 0..<width {
+                let red = UInt32(36 + (180 * x / width))
+                let green = UInt32(45 + (130 * y / height))
+                let blue = UInt32(150 + (90 * (width - x) / width))
+                row[x] = 0xFF00_0000 | (red << 16) | (green << 8) | blue
+            }
+        }
+
+        var formatDescription: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            formatDescriptionOut: &formatDescription
+        ) == noErr, let formatDescription else { return nil }
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: 30),
+            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+            decodeTimeStamp: .invalid
+        )
+        var sampleBuffer: CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            formatDescription: formatDescription,
+            sampleTiming: &timing,
+            sampleBufferOut: &sampleBuffer
+        ) == noErr else { return nil }
+        return sampleBuffer
+    }
 #endif
 }
 
@@ -766,7 +930,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
     ) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            isPresentingSourcePicker = false
+            isSelectingSource = false
             if !hasSelectedSource {
                 state = .idle
                 sourceSelectionMessage = "Source selection was cancelled."
@@ -781,25 +945,8 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
     ) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            isPresentingSourcePicker = false
-            if selectedSourceKind == .region {
-                guard let display = filter.includedDisplays.first else {
-                    handleFailure(CaptureError.sourceUnavailable)
-                    return
-                }
-                isPresentingSourcePicker = true
-                sourceSelectionMessage = "Drag to select the portion to record, then choose Use Area."
-                if let region = await regionSelectionController.selectRegion(on: display) {
-                    isPresentingSourcePicker = false
-                    completeSourceSelection(filter: filter, sourceRect: region)
-                } else {
-                    isPresentingSourcePicker = false
-                    state = .idle
-                    sourceSelectionMessage = "Portion selection was cancelled."
-                }
-            } else {
-                completeSourceSelection(filter: filter)
-            }
+            isSelectingSource = false
+            completeSourceSelection(filter: filter)
         }
     }
 
@@ -807,7 +954,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         let message = error.localizedDescription
         Task { @MainActor [weak self] in
             guard let self else { return }
-            isPresentingSourcePicker = false
+            isSelectingSource = false
             handleFailure(CaptureError.sourcePickerFailed(message))
         }
     }

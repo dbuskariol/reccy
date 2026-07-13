@@ -78,10 +78,10 @@ struct RecordView: View {
             VStack(alignment: .leading, spacing: 16) {
                 SectionHeading(
                     "What do you want to record?",
-                    subtitle: "macOS shows the system picker, so Reccy only sees what you approve."
+                    subtitle: "Reccy only sees the source or area you explicitly approve."
                 )
 
-                if coordinator.isPresentingSourcePicker {
+                if coordinator.isSelectingSource {
                     HStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
@@ -143,7 +143,7 @@ struct RecordView: View {
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         }
         .buttonStyle(.plain)
-        .disabled(!coordinator.screenCapturePermission.isGranted)
+        .disabled(!coordinator.screenCapturePermission.isGranted || coordinator.isSelectingSource)
     }
 
     private var needsPermissionAttention: Bool {

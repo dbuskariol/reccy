@@ -7,8 +7,9 @@ Reccy deploys exclusively to macOS 26. This removes availability branching from 
 ## Media pipeline
 
 ```text
-SCContentSharingPicker
-        │ approved SCContentFilter
+SCContentSharingPicker ─┐
+Region selection overlay ├── approved SCContentFilter
+                        │
         ▼
      SCStream
         ├── screen CMSampleBuffer ───────► HEVC/H.264 AVAssetWriterInput
@@ -31,11 +32,13 @@ SCContentSharingPicker
 
 ## Capture
 
-`CaptureCoordinator` owns user-visible state, persisted settings, the system content picker, privacy authorization, output naming, and the transition into the library.
+`CaptureCoordinator` owns user-visible state, persisted settings, privacy authorization, output naming, and the transition into the library. Display, application, and window approval use `SCContentSharingPicker`. Portion capture bypasses the whole-display picker and presents one coordinated, non-capturable selection panel per connected display; the accepted rectangle becomes the `sourceRect` of a display `SCContentFilter`.
 
 `MultitrackRecorder` consumes ScreenCaptureKit sample buffers on one serial, user-interactive queue. The first complete video frame establishes the asset-writer session time. Early audio is buffered briefly and flushed from that same timestamp, preventing microphone or system-audio lead-in from shifting sync.
 
 The writer creates separate, titled tracks for screen, system audio, and microphone. A five-second movie-fragment interval limits how much unwritten media is exposed during an interruption. HEVC is the default because it gives markedly better screen-content size efficiency; H.264 remains available for compatibility, and MOV is available for editing-oriented masters.
+
+The live monitor does not start a second stream. Complete ScreenCaptureKit frames feed the writer and a shared preview pipeline. That pipeline coalesces UI backpressure to the newest pixel buffer and assigns its IOSurface directly to the monitor layer on the main actor, matching Apple's zero-copy ScreenCaptureKit preview model without disturbing writer timestamps.
 
 HDR recording begins with ScreenCaptureKit's `.captureHDRRecordingPreservedSDRHDR10` configuration. Reccy then writes HEVC Main 10 with PQ transfer, Rec. 2020 primaries/matrix, and VideoToolbox's SDR-range-preservation metadata request. Mouse-click highlighting is disabled in HDR because ScreenCaptureKit currently supports that overlay for BGRA SDR capture.
 
@@ -73,6 +76,8 @@ The application uses SwiftUI scenes, an app-owned fixed-width workspace sidebar,
 Capture and editing are local. The only network surface is Sparkle's signed update feed. Hardened Runtime is enabled. App Sandbox is intentionally disabled for direct distribution so ScreenCaptureKit, the default Movies folder, persisted custom output directories, and imported media remain first-class without broad security-scoped-bookmark plumbing.
 
 Release builds are universal, Developer ID-signed, notarized, stapled, and checked by Gatekeeper. Sparkle archives are independently EdDSA-signed and published with a phased appcast through GitHub Releases. The release scripts fail closed when the app is missing either architecture, the embedded updater, a matching version, a valid archive signature, or the notarization ticket.
+
+Local capture builds use the same identity principle. `Scripts/install-development.sh` refuses ad-hoc signing and requires a stable Apple Development or Developer ID certificate, ensuring macOS TCC sees rebuilt `/Applications/Reccy.app` bundles as the same application. It also rejects an installed Reccy signed by a different team.
 
 ## Testing strategy
 
