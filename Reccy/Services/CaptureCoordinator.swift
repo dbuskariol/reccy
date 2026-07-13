@@ -77,6 +77,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var activationCancellable: AnyCancellable?
     private let regionSelectionController = RegionSelectionController()
     private let boundaryController = CaptureBoundaryController()
+#if DEBUG
+    private var suppressesPermissionRefreshForQA = false
+#endif
 
     override init() {
         let savedSettings = CaptureSettings.load()
@@ -215,6 +218,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     func refreshPermissionStatus() {
+#if DEBUG
+        if suppressesPermissionRefreshForQA {
+            screenCapturePermission = .granted
+            return
+        }
+#endif
         if screenCapturePermission != .restartRequired {
             screenCapturePermission = CGPreflightScreenCaptureAccess() ? .granted : .notGranted
         }
@@ -697,22 +706,23 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
 #if DEBUG
+    func installRecordReadyQAScenario() {
+        suppressesPermissionRefreshForQA = true
+        screenCapturePermission = .granted
+        microphonePermission = .authorized
+        selectedSourceKind = .application
+        hasSelectedSource = true
+        selectedSource = Self.qaApplicationSource
+        sourceSelectionMessage = nil
+        state = .sourceSelected
+    }
+
     /// Drives the exact production menu-bar view during installed-app visual QA.
     /// This state is compiled out of Release and never starts a capture stream.
     func installActiveMenuBarQAScenario() {
         selectedSourceKind = .application
         hasSelectedSource = true
-        selectedSource = CaptureSourceDescriptor(
-            kind: .application,
-            name: "Safari · Research",
-            applicationName: "Safari",
-            applicationBundleIdentifier: "com.apple.Safari",
-            windowName: nil,
-            windowIDs: [101, 102],
-            displayID: nil,
-            displayName: nil,
-            region: nil
-        )
+        selectedSource = Self.qaApplicationSource
         recordedDuration = 222.4
         recordedFileSize = 48_721_920
         systemAudioLevel = 0.74
@@ -721,6 +731,18 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         microphoneAudioHistory = Self.qaWaveformSamples(count: 120, amplitude: 0.58, phase: 1.1)
         state = .recording
     }
+
+    private static let qaApplicationSource = CaptureSourceDescriptor(
+        kind: .application,
+        name: "Safari · Research",
+        applicationName: "Safari",
+        applicationBundleIdentifier: "com.apple.Safari",
+        windowName: nil,
+        windowIDs: [101, 102],
+        displayID: nil,
+        displayName: nil,
+        region: nil
+    )
 
     private static func qaWaveformSamples(
         count: Int,

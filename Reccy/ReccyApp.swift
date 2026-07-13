@@ -117,6 +117,9 @@ struct ReccyApp: App {
                 }
         } else {
             RootView()
+                .task {
+                    await installMainWindowQAScenario()
+                }
         }
 #else
         RootView()
@@ -133,7 +136,7 @@ struct ReccyApp: App {
 
     private var minimumWindowHeight: CGFloat {
 #if DEBUG
-        presentsMenuBarQAHarness ? 560 : 680
+        presentsMenuBarQAHarness ? 430 : 680
 #else
         680
 #endif
@@ -149,9 +152,32 @@ struct ReccyApp: App {
 
     private var defaultWindowHeight: CGFloat {
 #if DEBUG
-        presentsMenuBarQAHarness ? 620 : 760
+        presentsMenuBarQAHarness ? 470 : 760
 #else
         760
 #endif
     }
+
+#if DEBUG
+    @MainActor
+    private func installMainWindowQAScenario() async {
+        if CommandLine.arguments.contains("-ReccyRecordReadyQA") {
+            coordinator.installRecordReadyQAScenario()
+            navigation.section = .record
+        } else if CommandLine.arguments.contains("-ReccyLibraryQA") {
+            coordinator.library.refresh()
+            navigation.section = .library
+        } else if CommandLine.arguments.contains("-ReccyEditorQA") {
+            coordinator.library.refresh()
+            guard let recording = coordinator.library.recordings.first else {
+                navigation.section = .editor
+                return
+            }
+            await editor.open(recording)
+            navigation.section = .editor
+        } else if CommandLine.arguments.contains("-ReccyPermissionsQA") {
+            navigation.openSettings(.permissions)
+        }
+    }
+#endif
 }
