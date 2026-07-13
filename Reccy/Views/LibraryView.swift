@@ -7,11 +7,15 @@ import UniformTypeIdentifiers
 struct LibraryView: View {
     @ObservedObject var library: RecordingLibrary
     let onEdit: (RecordingItem) -> Void
+
     @State private var exportItem: RecordingItem?
     @State private var selectedID: URL?
     @State private var pendingDelete: RecordingItem?
     @State private var player = AVPlayer()
     @State private var isPreviewPlaying = false
+    @State private var playbackTime: TimeInterval = 0
+
+    private let playbackTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
@@ -23,15 +27,11 @@ struct LibraryView: View {
                 )
             } else {
                 HSplitView {
-                    List(library.recordings, selection: $selectedID) { item in
-                        recordingRow(item)
-                            .tag(item.id)
-                            .listRowInsets(EdgeInsets(top: 9, leading: 12, bottom: 9, trailing: 12))
-                    }
-                    .frame(minWidth: 410, idealWidth: 510)
+                    recordingBrowser
+                        .frame(minWidth: 280, idealWidth: 320, maxWidth: 380)
 
                     previewPane
-                        .frame(minWidth: 330, idealWidth: 420)
+                        .frame(minWidth: 390)
                 }
             }
         }
@@ -43,11 +43,14 @@ struct LibraryView: View {
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .reccyTooltip("Refresh recordings")
+
                 Button {
                     library.revealDirectory()
                 } label: {
                     Label("Open Folder", systemImage: "folder")
                 }
+                .reccyTooltip("Open recording folder")
             }
         }
         .sheet(item: $exportItem) { item in
@@ -76,40 +79,51 @@ struct LibraryView: View {
         .onReceive(player.publisher(for: \.timeControlStatus)) { status in
             isPreviewPlaying = status == .playing
         }
+        .onReceive(playbackTimer) { _ in
+            let seconds = player.currentTime().seconds
+            if seconds.isFinite {
+                playbackTime = max(0, seconds)
+            }
+        }
         .onDisappear {
             player.pause()
             isPreviewPlaying = false
         }
     }
 
-    private func recordingRow(_ item: RecordingItem) -> some View {
-        HStack(spacing: 14) {
-            recordingThumbnail(item)
-                .frame(width: 126, height: 72)
+    private var recordingBrowser: some View {
+        List(library.recordings, selection: $selectedID) { item in
+            recordingRow(item)
+                .tag(item.id)
+                .listRowInsets(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
+        }
+        .listStyle(.sidebar)
+    }
 
-            VStack(alignment: .leading, spacing: 6) {
+    private func recordingRow(_ item: RecordingItem) -> some View {
+        HStack(spacing: 11) {
+            recordingThumbnail(item)
+                .frame(width: 96, height: 54)
+
+            VStack(alignment: .leading, spacing: 5) {
                 Text(item.name)
                     .font(.headline)
                     .lineLimit(1)
-                HStack(spacing: 8) {
-                    Text(item.formattedDuration)
-                    Text("·")
-                    Text(item.formattedSize)
-                    if let resolution = item.formattedResolution {
-                        Text("·")
-                        Text(resolution)
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
-                HStack(spacing: 6) {
-                    metadataBadge(item.sourceKindTitle, systemImage: item.manifest.source.kind.systemImage)
-                    metadataBadge(item.audioSummary, systemImage: "waveform")
+                Text([item.formattedDuration, item.formattedSize, item.formattedResolution]
+                    .compactMap { $0 }
+                    .joined(separator: " · "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                HStack(spacing: 5) {
+                    compactBadge(item.sourceKindTitle, systemImage: item.manifest.source.kind.systemImage)
+                    compactBadge(item.audioSummary, systemImage: "waveform")
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { load(item, autoplay: true) }
@@ -125,7 +139,7 @@ struct LibraryView: View {
 
     private func recordingThumbnail(_ item: RecordingItem) -> some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(.quaternary)
             if let image = library.thumbnail(for: item) {
                 Image(nsImage: image)
@@ -133,33 +147,33 @@ struct LibraryView: View {
                     .scaledToFill()
             } else {
                 Image(systemName: "play.rectangle.fill")
-                    .font(.title2)
+                    .font(.title3)
                     .foregroundStyle(.secondary)
             }
             LinearGradient(
-                colors: [.clear, .black.opacity(0.22)],
+                colors: [.clear, .black.opacity(0.28)],
                 startPoint: .center,
                 endPoint: .bottom
             )
             Image(systemName: "play.fill")
-                .font(.caption.weight(.bold))
+                .font(.caption2.weight(.bold))
                 .foregroundStyle(.white)
-                .padding(7)
+                .padding(6)
                 .background(.black.opacity(0.58), in: Circle())
         }
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(.separator.opacity(0.45), lineWidth: 0.5)
         }
     }
 
-    private func metadataBadge(_ text: String, systemImage: String) -> some View {
+    private func compactBadge(_ text: String, systemImage: String) -> some View {
         Label(text, systemImage: systemImage)
             .font(.caption2.weight(.medium))
             .lineLimit(1)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
             .background(.quaternary, in: Capsule())
     }
 
@@ -168,81 +182,16 @@ struct LibraryView: View {
         if let item = selectedItem {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    NativeLibraryVideoPlayer(player: player)
-                        .aspectRatio(16 / 9, contentMode: .fit)
-                        .frame(maxWidth: .infinity)
-                        .background(.black)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(.separator.opacity(0.5), lineWidth: 0.5)
-                        }
-
-                    HStack(spacing: 9) {
-                        Button {
-                            if player.timeControlStatus == .playing {
-                                player.pause()
-                            } else {
-                                player.play()
-                            }
-                        } label: {
-                            Label(
-                                isPreviewPlaying ? "Pause" : "Play",
-                                systemImage: isPreviewPlaying ? "pause.fill" : "play.fill"
-                            )
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button { onEdit(item) } label: {
-                            Label("Edit", systemImage: "timeline.selection")
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button { exportItem = item } label: {
-                            Label("Export", systemImage: "square.and.arrow.down")
-                        }
-                        .buttonStyle(.bordered)
-
-                        ShareLink(item: item.url) {
-                            Label("Share", systemImage: "square.and.arrow.up")
-                        }
-                        .buttonStyle(.bordered)
-
-                        Spacer(minLength: 0)
-
-                        Button(role: .destructive) { pendingDelete = item } label: {
-                            Image(systemName: "trash")
-                        }
-                        .buttonStyle(.bordered)
-                        .reccyTooltip("Move to Trash")
-                    }
-
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(item.name)
-                            .font(.title2.weight(.bold))
-                            .textSelection(.enabled)
-                        Label(item.sourceName, systemImage: item.manifest.source.kind.systemImage)
-                            .font(.headline)
-                        let detail = item.manifest.source.detail
-                        if detail != item.sourceName {
-                            Text(detail)
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    Divider()
-
-                    recordingDetails(item)
-
-                    Button("Show in Finder", systemImage: "folder") {
-                        library.reveal(item)
-                    }
-                    .buttonStyle(.link)
+                    detailHeader(item)
+                    compactPreview(item)
+                    playbackControls(item)
+                    recordingDetailsCard(item)
                 }
-                .padding(20)
+                .padding(22)
+                .frame(maxWidth: 760, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .background(Color(nsColor: .controlBackgroundColor))
+            .background(Color(nsColor: .windowBackgroundColor))
         } else {
             WorkspaceEmptyState(
                 "Select a Recording",
@@ -252,19 +201,237 @@ struct LibraryView: View {
         }
     }
 
-    private func recordingDetails(_ item: RecordingItem) -> some View {
-        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 11) {
-            detailRow("Duration", value: item.formattedDuration)
-            detailRow("Created", value: item.createdAt.formatted(.dateTime.day().month(.abbreviated).year().hour().minute()))
-            detailRow("File", value: "\(item.formattedSize) · \(item.fileExtension)")
-            if let resolution = item.formattedResolution {
-                detailRow("Video", value: [resolution, item.formattedFrameRate, item.videoCodec].compactMap { $0 }.joined(separator: " · "))
+    private func detailHeader(_ item: RecordingItem) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(item.name)
+                        .font(.title2.weight(.bold))
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+
+                    Label(item.sourceName, systemImage: item.manifest.source.kind.systemImage)
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+
+                    let detail = item.manifest.source.detail
+                    if !detail.isEmpty, detail != item.sourceName {
+                        Text(detail)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Spacer(minLength: 6)
+
+                HStack(spacing: 7) {
+                    Button {
+                        onEdit(item)
+                    } label: {
+                        Image(systemName: "timeline.selection")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .reccyTooltip("Edit recording")
+                    .accessibilityLabel("Edit Recording")
+
+                    Button {
+                        exportItem = item
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.bordered)
+                    .reccyTooltip("Export recording")
+                    .accessibilityLabel("Export Recording")
+
+                    ShareLink(item: item.url) {
+                        Image(systemName: "square.and.arrow.up")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.bordered)
+                    .reccyTooltip("Share recording")
+                    .accessibilityLabel("Share Recording")
+
+                    Button(role: .destructive) {
+                        pendingDelete = item
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.bordered)
+                    .reccyTooltip("Move to Trash")
+                }
             }
-            detailRow("Audio", value: item.audioSummary)
-            detailRow("Dynamic Range", value: item.manifest.isHDR ? "HDR10" : "SDR")
-            detailRow("Pointer", value: item.manifest.showsCursor
-                ? (item.manifest.highlightsClicks ? "Cursor + click highlights" : "Cursor visible")
-                : "Hidden")
+
+            HStack(spacing: 7) {
+                compactBadge(item.sourceKindTitle, systemImage: item.manifest.source.kind.systemImage)
+                compactBadge(item.audioDetail, systemImage: "waveform")
+                compactBadge(item.manifest.isHDR ? "HDR10" : "SDR", systemImage: "circle.lefthalf.filled")
+            }
+        }
+    }
+
+    private func compactPreview(_ item: RecordingItem) -> some View {
+        NativeLibraryVideoPlayer(player: player)
+            .frame(maxWidth: 560)
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .background(.black)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(.separator.opacity(0.5), lineWidth: 0.5)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .accessibilityLabel("Preview of \(item.name)")
+    }
+
+    private func playbackControls(_ item: RecordingItem) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                playbackButton("gobackward.5", help: "Back 5 seconds") { seekBy(-5) }
+
+                Button {
+                    togglePlayback()
+                } label: {
+                    Image(systemName: isPreviewPlaying ? "pause.fill" : "play.fill")
+                        .frame(width: 17, height: 17)
+                }
+                .buttonStyle(.borderedProminent)
+                .clipShape(Circle())
+                .reccyTooltip(isPreviewPlaying ? "Pause" : "Play")
+                .accessibilityLabel(isPreviewPlaying ? "Pause" : "Play")
+
+                playbackButton("goforward.5", help: "Forward 5 seconds") { seekBy(5) }
+
+                Text("\(playbackTimecode(playbackTime)) / \(playbackTimecode(item.duration))")
+                    .font(.callout.monospacedDigit().weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                Button {
+                    library.reveal(item)
+                } label: {
+                    Image(systemName: "folder")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .reccyTooltip("Show in Finder")
+                .accessibilityLabel("Show in Finder")
+            }
+
+            waveformScrubber(item)
+        }
+        .padding(12)
+        .frame(maxWidth: 560)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.separator.opacity(0.4), lineWidth: 0.5)
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private func playbackButton(
+        _ systemImage: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .reccyTooltip(help)
+        .accessibilityLabel(help)
+    }
+
+    private func waveformScrubber(_ item: RecordingItem) -> some View {
+        GeometryReader { geometry in
+            let progress = item.duration > 0 ? playbackTime / item.duration : 0
+            ZStack(alignment: .leading) {
+                if let audioTrackID = item.audioTrackIDs.first {
+                    ReccyAssetWaveform(
+                        sourceURL: item.url,
+                        sourceTrackID: audioTrackID,
+                        sourceStart: 0,
+                        duration: item.duration,
+                        color: .accentColor,
+                        progress: progress
+                    )
+                    .padding(.vertical, 4)
+                } else {
+                    Capsule()
+                        .fill(.secondary.opacity(0.18))
+                        .frame(height: 2)
+                        .padding(.horizontal, 8)
+                }
+
+                Rectangle()
+                    .fill(Color.accentColor)
+                    .frame(width: 1)
+                    .offset(x: max(0, min(geometry.size.width - 1, geometry.size.width * progress)))
+                    .allowsHitTesting(false)
+            }
+            .background(.quaternary.opacity(0.38), in: RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard item.duration > 0 else { return }
+                        let fraction = min(max(value.location.x / max(geometry.size.width, 1), 0), 1)
+                        seek(to: item.duration * fraction)
+                    }
+            )
+            .accessibilityLabel("Recording waveform and scrubber")
+            .accessibilityValue(playbackTimecode(playbackTime))
+        }
+        .frame(height: 44)
+    }
+
+    private func recordingDetailsCard(_ item: RecordingItem) -> some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 14) {
+                SectionHeading("Recording details")
+
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
+                    detailRow("Source", value: item.sourceKindTitle)
+                    detailRow("Name", value: item.sourceName)
+                    if let bundleID = item.manifest.source.applicationBundleIdentifier {
+                        detailRow("Application", value: bundleID)
+                    }
+                    if let windowName = item.manifest.source.windowName {
+                        detailRow("Window", value: windowName)
+                    }
+                    detailRow("Duration", value: item.formattedDuration)
+                    detailRow(
+                        "Created",
+                        value: item.createdAt.formatted(
+                            .dateTime.day().month(.abbreviated).year().hour().minute()
+                        )
+                    )
+                    detailRow("File", value: "\(item.formattedSize) · \(item.fileExtension)")
+                    if let resolution = item.formattedResolution {
+                        detailRow(
+                            "Video",
+                            value: [resolution, item.formattedFrameRate, item.videoCodec]
+                                .compactMap { $0 }
+                                .joined(separator: " · ")
+                        )
+                    }
+                    detailRow("Audio", value: item.audioDetail)
+                    detailRow("Dynamic Range", value: item.manifest.isHDR ? "HDR10" : "SDR")
+                    detailRow(
+                        "Pointer",
+                        value: item.manifest.showsCursor
+                            ? (item.manifest.highlightsClicks ? "Cursor + click highlights" : "Cursor visible")
+                            : "Hidden"
+                    )
+                }
+            }
         }
     }
 
@@ -296,6 +463,7 @@ struct LibraryView: View {
     private func loadSelectedRecording() {
         guard let item = selectedItem else {
             player.replaceCurrentItem(with: nil)
+            playbackTime = 0
             return
         }
         load(item, autoplay: false)
@@ -304,8 +472,40 @@ struct LibraryView: View {
     private func load(_ item: RecordingItem, autoplay: Bool) {
         selectedID = item.id
         isPreviewPlaying = false
+        playbackTime = 0
         player.replaceCurrentItem(with: AVPlayerItem(url: item.url))
         if autoplay { player.play() }
+    }
+
+    private func togglePlayback() {
+        if player.timeControlStatus == .playing {
+            player.pause()
+        } else {
+            if let item = selectedItem, playbackTime >= item.duration - 0.02 {
+                seek(to: 0)
+            }
+            player.play()
+        }
+    }
+
+    private func seekBy(_ delta: TimeInterval) {
+        seek(to: playbackTime + delta)
+    }
+
+    private func seek(to seconds: TimeInterval) {
+        let duration = selectedItem?.duration ?? 0
+        let target = min(max(seconds, 0), duration)
+        playbackTime = target
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+    }
+
+    private func playbackTimecode(_ seconds: TimeInterval) -> String {
+        let value = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d", value / 60, value % 60)
     }
 }
 
@@ -315,10 +515,8 @@ private struct NativeLibraryVideoPlayer: NSViewRepresentable {
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
         view.player = player
-        view.controlsStyle = .floating
+        view.controlsStyle = .none
         view.videoGravity = .resizeAspect
-        view.showsFrameSteppingButtons = true
-        view.showsFullScreenToggleButton = true
         view.updatesNowPlayingInfoCenter = false
         view.allowsVideoFrameAnalysis = false
         return view

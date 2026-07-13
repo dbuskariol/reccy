@@ -15,7 +15,11 @@ struct RootView: View {
                     }
                 }
                 .padding(.horizontal, 9)
-                .padding(.top, 8)
+                // A NavigationSplitView sidebar can extend beneath the unified
+                // titlebar when the detail view changes its toolbar contents.
+                // Keep navigation in the window safe area so switching pages
+                // never moves the first row underneath the traffic lights.
+                .safeAreaPadding(.top, 8)
 
                 Spacer(minLength: 12)
 

@@ -108,6 +108,7 @@ final class RecordingLibrary: ObservableObject {
             let asset = AVURLAsset(url: url)
             let duration = (try? await asset.load(.duration).seconds) ?? 0
             let videoTracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
+            let audioTracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
 
             var width = 0
             var height = 0
@@ -135,6 +136,7 @@ final class RecordingLibrary: ObservableObject {
             if recordings[index].pixelHeight == 0 { recordings[index].pixelHeight = height }
             if recordings[index].frameRate == 0 { recordings[index].frameRate = frameRate }
             if recordings[index].videoCodec == nil { recordings[index].videoCodec = codec }
+            recordings[index].audioTrackIDs = audioTracks.map(\.trackID)
 
             if !videoTracks.isEmpty,
                let thumbnail = await makeThumbnail(url: url)

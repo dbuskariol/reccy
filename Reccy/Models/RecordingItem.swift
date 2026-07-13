@@ -10,6 +10,7 @@ struct RecordingItem: Identifiable, Hashable, Sendable {
     var pixelHeight: Int = 0
     var frameRate: Double = 0
     var videoCodec: String?
+    var audioTrackIDs: [Int32] = []
 
     var id: URL { url }
     var name: String { url.deletingPathExtension().lastPathComponent }
@@ -49,5 +50,11 @@ struct RecordingItem: Identifiable, Hashable, Sendable {
         case (false, true): manifest.microphoneName ?? "Microphone"
         case (false, false): "No Audio"
         }
+    }
+
+    var audioDetail: String {
+        guard !audioTrackIDs.isEmpty else { return audioSummary }
+        let trackLabel = audioTrackIDs.count == 1 ? "1 editable track" : "\(audioTrackIDs.count) editable tracks"
+        return "\(audioSummary) · \(trackLabel)"
     }
 }
