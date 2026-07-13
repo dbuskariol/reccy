@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 
 enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
     case display
+    case region
     case application
     case window
 
@@ -14,6 +15,7 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
     var title: String {
         switch self {
         case .display: "Display"
+        case .region: "Portion"
         case .application: "Application"
         case .window: "Window"
         }
@@ -22,6 +24,7 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
     var detail: String {
         switch self {
         case .display: "Record an entire connected display"
+        case .region: "Record a custom area of one display"
         case .application: "Record every window from one app"
         case .window: "Record one specific window"
         }
@@ -30,6 +33,7 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
     var systemImage: String {
         switch self {
         case .display: "display"
+        case .region: "viewfinder.rectangular"
         case .application: "macwindow.on.rectangle"
         case .window: "macwindow"
         }
@@ -37,7 +41,7 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var pickerMode: SCContentSharingPickerMode {
         switch self {
-        case .display: .singleDisplay
+        case .display, .region: .singleDisplay
         case .application: .singleApplication
         case .window: .singleWindow
         }
@@ -45,7 +49,7 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var contentStyle: SCShareableContentStyle {
         switch self {
-        case .display: .display
+        case .display, .region: .display
         case .application: .application
         case .window: .window
         }

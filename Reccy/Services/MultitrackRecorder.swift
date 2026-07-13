@@ -66,8 +66,15 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     private var latestPresentationTime: CMTime = .invalid
     private var outputURL: URL?
     private var hasNotifiedFailure = false
+    private var systemAudioLevel: Double = 0
+    private var microphoneAudioLevel: Double = 0
 
-    var metrics: (duration: TimeInterval, fileSize: Int64) {
+    var metrics: (
+        duration: TimeInterval,
+        fileSize: Int64,
+        systemAudioLevel: Double,
+        microphoneLevel: Double
+    ) {
         sampleQueue.sync {
             let duration: TimeInterval
             if let sessionStartTime, latestPresentationTime.isValid {
@@ -78,7 +85,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             let size = outputURL
                 .flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize }
                 .map(Int64.init) ?? 0
-            return (duration, size)
+            return (duration, size, systemAudioLevel, microphoneAudioLevel)
         }
     }
 
@@ -181,6 +188,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         sessionStartTime = nil
         latestPresentationTime = .invalid
         hasNotifiedFailure = false
+        systemAudioLevel = 0
+        microphoneAudioLevel = 0
     }
 
     private static func videoSettings(options: MultitrackRecordingOptions) -> [String: Any] {
@@ -239,8 +248,16 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             startSessionIfNeeded(at: presentationTime)
             append(sampleBuffer, to: videoInput)
         case .audio:
+            systemAudioLevel = Self.smoothedLevel(
+                current: systemAudioLevel,
+                sample: Self.normalizedAudioLevel(from: sampleBuffer)
+            )
             handleAudio(sampleBuffer, pending: &pendingSystemAudio, input: systemAudioInput)
         case .microphone:
+            microphoneAudioLevel = Self.smoothedLevel(
+                current: microphoneAudioLevel,
+                sample: Self.normalizedAudioLevel(from: sampleBuffer)
+            )
             handleAudio(sampleBuffer, pending: &pendingMicrophone, input: microphoneInput)
         @unknown default:
             break
@@ -307,6 +324,71 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         }
     }
 
+    private static func smoothedLevel(current: Double, sample: Double) -> Double {
+        let response = sample > current ? 0.38 : 0.14
+        return current + (sample - current) * response
+    }
+
+    private static func normalizedAudioLevel(from sampleBuffer: CMSampleBuffer) -> Double {
+        guard
+            let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+            let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription),
+            streamDescription.pointee.mFormatID == kAudioFormatLinearPCM,
+            let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer)
+        else { return 0 }
+
+        var lengthAtOffset = 0
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        guard CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: &lengthAtOffset,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        ) == kCMBlockBufferNoErr, let dataPointer, totalLength > 0 else { return 0 }
+
+        let description = streamDescription.pointee
+        let isFloat = description.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        let isSignedInteger = description.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0
+        let rawPointer = UnsafeRawPointer(dataPointer)
+        let meanSquare: Double
+
+        if isFloat, description.mBitsPerChannel == 32 {
+            let count = totalLength / MemoryLayout<Float>.size
+            guard count > 0 else { return 0 }
+            let samples = rawPointer.bindMemory(to: Float.self, capacity: count)
+            let stride = max(1, count / 2_048)
+            var sum = 0.0
+            var sampledCount = 0
+            for index in Swift.stride(from: 0, to: count, by: stride) {
+                let value = Double(samples[index])
+                sum += value * value
+                sampledCount += 1
+            }
+            meanSquare = sum / Double(sampledCount)
+        } else if isSignedInteger, description.mBitsPerChannel == 16 {
+            let count = totalLength / MemoryLayout<Int16>.size
+            guard count > 0 else { return 0 }
+            let samples = rawPointer.bindMemory(to: Int16.self, capacity: count)
+            let stride = max(1, count / 2_048)
+            var sum = 0.0
+            var sampledCount = 0
+            for index in Swift.stride(from: 0, to: count, by: stride) {
+                let value = Double(samples[index]) / Double(Int16.max)
+                sum += value * value
+                sampledCount += 1
+            }
+            meanSquare = sum / Double(sampledCount)
+        } else {
+            return 0
+        }
+
+        let rms = sqrt(meanSquare)
+        let decibels = 20 * log10(max(rms, 0.000_001))
+        return min(max((decibels + 60) / 60, 0), 1)
+    }
+
     private func finishWriting() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sampleQueue.async { [self] in
@@ -351,6 +433,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         pendingSystemAudio.removeAll()
         pendingMicrophone.removeAll()
         sessionStartTime = nil
+        systemAudioLevel = 0
+        microphoneAudioLevel = 0
         if !keepOutputURL {
             outputURL = nil
         }

@@ -5,11 +5,13 @@ import UniformTypeIdentifiers
 
 struct EditorView: View {
     @EnvironmentObject private var editor: TimelineEditorController
-    @State private var exportPreset: ExportPreset = .hevcBest
     @State private var isExporting = false
     @State private var exportError: String?
 
     private let playbackTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+    private let trackHeaderWidth: CGFloat = 176
+    private let rulerHeight: CGFloat = 32
+    private let laneHeight: CGFloat = 68
 
     var body: some View {
         Group {
@@ -26,8 +28,10 @@ struct EditorView: View {
                 )
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .navigationTitle("Editor")
         .toolbar { editorToolbar }
+        .onAppear { editor.refreshVoiceoverInputDevices() }
         .onReceive(playbackTimer) { _ in editor.syncPlayheadFromPlayer() }
         .alert("Export Failed", isPresented: Binding(
             get: { exportError != nil },
@@ -37,316 +41,454 @@ struct EditorView: View {
         } message: {
             Text(exportError ?? "Unknown error")
         }
+        .alert("Editor Couldn’t Apply Change", isPresented: Binding(
+            get: { editor.errorMessage != nil },
+            set: { if !$0 { editor.errorMessage = nil } }
+        )) {
+            Button("OK") { editor.errorMessage = nil }
+        } message: {
+            Text(editor.errorMessage ?? "Unknown error")
+        }
     }
 
     private func editorWorkspace(_ project: TimelineProject) -> some View {
-        VStack(spacing: 0) {
-            HSplitView {
-                preview(project)
-                    .frame(minWidth: 470, idealWidth: 700)
-                inspector(project)
-                    .frame(minWidth: 230, idealWidth: 270, maxWidth: 320)
-            }
-            .frame(minHeight: 340)
+        VSplitView {
+            previewPane(project)
+                .frame(minHeight: 250, idealHeight: 390)
 
-            Divider()
-
-            timeline(project)
-                .frame(minHeight: 270, idealHeight: 320)
+            timelinePane(project)
+                .frame(minHeight: 285, idealHeight: 360)
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private func preview(_ project: TimelineProject) -> some View {
-        VStack(spacing: 12) {
-            VideoPlayer(player: editor.player)
+    private func previewPane(_ project: TimelineProject) -> some View {
+        VStack(spacing: 0) {
+            NativeVideoPlayer(player: editor.player)
                 .background(.black)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(.separator.opacity(0.5), lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(.separator.opacity(0.45), lineWidth: 0.5)
                 }
-                .padding([.top, .horizontal], 18)
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            HStack(spacing: 16) {
-                Button {
-                    editor.seek(to: max(0, editor.playhead - 5))
-                } label: {
-                    Image(systemName: "gobackward.5")
-                }
-
-                Button {
-                    editor.playPause()
-                } label: {
-                    Image(systemName: editor.isPlaying ? "pause.fill" : "play.fill")
-                        .frame(width: 24)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-                Button {
-                    editor.seek(to: min(editor.duration, editor.playhead + 5))
-                } label: {
-                    Image(systemName: "goforward.5")
-                }
-
-                Text(timecode(editor.playhead))
-                    .font(.body.monospacedDigit().weight(.semibold))
-                Text("/ \(timecode(project.duration))")
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                if editor.isRebuilding {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 14)
+            transportBar(project)
         }
     }
 
-    private func inspector(_ project: TimelineProject) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(project.name)
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(2)
-                Text("Non-destructive project")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+    private func transportBar(_ project: TimelineProject) -> some View {
+        HStack(spacing: 10) {
+            transportButton("gobackward.5", help: "Back 5 seconds") {
+                editor.seekBy(-5)
             }
-
-            Divider()
-
-            if let selected = project.lanes
-                .flatMap(\.clips)
-                .first(where: { $0.id == editor.selectedClipID })
-            {
-                Text("Selected Clip")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                LabeledContent("Name", value: selected.name)
-                LabeledContent("Start", value: timecode(selected.timelineStart))
-                LabeledContent("Duration", value: timecode(selected.duration))
-
-                Button("Split Selected Clip", systemImage: "scissors") {
-                    editor.splitSelectionAtPlayhead()
-                }
-                .disabled(!selected.contains(editor.playhead))
-
-                Button("Split All Tracks", systemImage: "timeline.selection") {
-                    editor.splitAllAtPlayhead()
-                }
-                .disabled(!selected.contains(editor.playhead))
-
-                Button("Delete Clip", systemImage: "trash", role: .destructive) {
-                    editor.deleteSelection()
-                }
-
-                Button("Delete and Close Gap", systemImage: "arrow.left.and.right") {
-                    editor.rippleDeleteSelection()
-                }
-            } else {
-                Text("Select a clip to split or delete it.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            transportButton("backward.frame.fill", help: "Previous frame") {
+                editor.stepFrames(-1)
             }
-
-            Divider()
 
             Button {
-                editor.toggleVoiceover()
+                editor.playPause()
             } label: {
-                Label(
-                    editor.isVoiceoverRecording ? "Stop Voiceover" : "Record Voiceover",
-                    systemImage: editor.isVoiceoverRecording ? "stop.circle.fill" : "mic.circle.fill"
-                )
-                .frame(maxWidth: .infinity)
+                Image(systemName: editor.isPlaying ? "pause.fill" : "play.fill")
+                    .frame(width: 18, height: 18)
             }
             .buttonStyle(.borderedProminent)
-            .tint(editor.isVoiceoverRecording ? .red : .accentColor)
             .controlSize(.large)
+            .clipShape(Circle())
+            .reccyTooltip(editor.isPlaying ? "Pause (Space)" : "Play (Space)")
+            .keyboardShortcut(.space, modifiers: [])
 
-            Text("Starts at the playhead while the project plays. Voiceovers remain independent, splittable clips.")
-                .font(.caption)
+            transportButton("forward.frame.fill", help: "Next frame") {
+                editor.stepFrames(1)
+            }
+            transportButton("goforward.5", help: "Forward 5 seconds") {
+                editor.seekBy(5)
+            }
+
+            Divider()
+                .frame(height: 22)
+
+            Text(timecode(editor.playhead, includeFrames: true))
+                .font(.body.monospacedDigit().weight(.semibold))
+            Text("/ \(timecode(project.duration))")
+                .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
 
             Spacer()
 
-            if let errorMessage = editor.errorMessage {
-                Text(errorMessage)
+            if editor.isRebuilding {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Updating preview")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(18)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
         .background(.bar)
     }
 
-    private func timeline(_ project: TimelineProject) -> some View {
+    private func transportButton(
+        _ systemImage: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .frame(width: 19, height: 19)
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.large)
+        .reccyTooltip(help)
+    }
+
+    private func timelinePane(_ project: TimelineProject) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Menu {
-                    Button("Split Selected Clip") { editor.splitSelectionAtPlayhead() }
-                        .disabled(editor.selectedClipID == nil)
-                    Button("Split All Tracks") { editor.splitAllAtPlayhead() }
-                } label: {
-                    Label("Split", systemImage: "scissors")
-                }
-                .disabled(project.duration <= 0)
-
-                Menu {
-                    Button("Delete Clip") { editor.deleteSelection() }
-                    Button("Delete and Close Gap") { editor.rippleDeleteSelection() }
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-                .disabled(editor.selectedClipID == nil)
-
-                Divider().frame(height: 18)
-
-                Text(timecode(editor.playhead))
-                    .font(.caption.monospacedDigit().weight(.semibold))
-
-                Slider(
-                    value: Binding(
-                        get: { editor.playhead },
-                        set: { editor.seek(to: $0) }
-                    ),
-                    in: 0...max(project.duration, 0.01)
-                )
-
-                Image(systemName: "minus.magnifyingglass")
-                    .foregroundStyle(.secondary)
-                Slider(value: $editor.pixelsPerSecond, in: 30...180)
-                    .frame(width: 110)
-                Image(systemName: "plus.magnifyingglass")
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(.bar)
-
+            editCommandBar(project)
             Divider()
 
-            ScrollView([.horizontal, .vertical]) {
-                let trackWidth = max(project.duration * editor.pixelsPerSecond, 820)
-                VStack(alignment: .leading, spacing: 7) {
-                    ruler(width: trackWidth, duration: project.duration)
-                    ForEach(project.lanes) { lane in
-                        laneRow(lane, trackWidth: trackWidth)
-                    }
+            HStack(alignment: .top, spacing: 0) {
+                trackHeaders(project)
+                    .frame(width: trackHeaderWidth)
+
+                Divider()
+
+                ScrollView(.horizontal) {
+                    timelineCanvas(project)
                 }
-                .padding(12)
-                .overlay(alignment: .topLeading) {
-                    Rectangle()
-                        .fill(.red)
-                        .frame(width: 1.5)
-                        .offset(x: 151 + editor.playhead * editor.pixelsPerSecond, y: 8)
-                        .allowsHitTesting(false)
-                }
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .scrollIndicators(.visible)
             }
             .background(Color(nsColor: .controlBackgroundColor))
         }
     }
 
-    private func ruler(width: Double, duration: TimeInterval) -> some View {
-        HStack(spacing: 0) {
-            Text("TRACKS")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.secondary)
-                .frame(width: 140, alignment: .leading)
+    private func editCommandBar(_ project: TimelineProject) -> some View {
+        HStack(spacing: 8) {
+            editorAction("Split Clip", systemImage: "scissors", help: "Split the selected clip at the playhead (⌘B)") {
+                editor.splitSelectionAtPlayhead()
+            }
+            .disabled(!editor.canSplitSelection)
+            .keyboardShortcut("b", modifiers: .command)
 
-            ZStack(alignment: .leading) {
-                let interval = editor.pixelsPerSecond > 100 ? 2.0 : 5.0
-                ForEach(Array(stride(from: 0.0, through: duration + interval, by: interval)), id: \.self) { value in
-                    VStack(spacing: 2) {
-                        Text(timecode(value, includeHours: false))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                        Rectangle()
-                            .fill(.separator)
-                            .frame(width: 1, height: 5)
-                    }
-                    .offset(x: value * editor.pixelsPerSecond)
+            editorAction("Split All", systemImage: "timeline.selection", help: "Split every track at the playhead (⇧⌘B)") {
+                editor.splitAllAtPlayhead()
+            }
+            .disabled(!editor.canSplitAll)
+            .keyboardShortcut("b", modifiers: [.command, .shift])
+
+            Divider()
+                .frame(height: 20)
+
+            editorAction("Delete", systemImage: "trash", help: "Delete the selected clip") {
+                editor.deleteSelection()
+            }
+            .disabled(editor.selectedClipID == nil)
+            .keyboardShortcut(.delete, modifiers: [])
+
+            editorAction("Close Gap", systemImage: "arrow.left.and.right", help: "Delete the selected time range and close the gap") {
+                editor.rippleDeleteSelection()
+            }
+            .disabled(editor.selectedClipID == nil)
+            .keyboardShortcut(.delete, modifiers: .command)
+
+            Divider()
+                .frame(height: 20)
+
+            Button {
+                editor.moveLinkedClips.toggle()
+            } label: {
+                Image(systemName: editor.moveLinkedClips ? "link" : "link.badge.plus")
+                    .frame(width: 20, height: 18)
+            }
+            .buttonStyle(.bordered)
+            .frame(width: 44)
+            .tint(editor.moveLinkedClips ? .accentColor : nil)
+            .accessibilityLabel("Move linked audio and video")
+            .reccyTooltip(editor.moveLinkedClips
+                ? "Linked movement is on — video and matching audio move or trim together"
+                : "Independent movement is on — each audio or video clip moves and trims separately")
+
+            Picker(
+                "Gap Fill",
+                selection: Binding(
+                    get: { editor.selectedGapFillMode },
+                    set: { editor.setSelectedGapFillMode($0) }
+                )
+            ) {
+                ForEach(TimelineGapFillMode.allCases) { mode in
+                    Image(systemName: mode.systemImage)
+                        .accessibilityLabel(mode.title)
+                        .tag(mode)
                 }
             }
-            .frame(width: width, height: 25, alignment: .leading)
-        }
-    }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 126)
+            .disabled(editor.selectedGapID == nil)
+            .reccyTooltip(editor.selectedGapID == nil
+                ? "Select a video gap to choose how it renders"
+                : "Render this gap as black, the previous frame, or the next frame")
 
-    private func laneRow(_ lane: TimelineLane, trackWidth: Double) -> some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Image(systemName: lane.kind.systemImage)
-                    Text(lane.name)
-                        .lineLimit(1)
+            Divider()
+                .frame(height: 20)
+
+            Menu {
+                Button {
+                    editor.selectedVoiceoverInputID = nil
+                } label: {
+                    Label(
+                        "System Default",
+                        systemImage: editor.selectedVoiceoverInputID == nil ? "checkmark" : "circle"
+                    )
                 }
-                .font(.caption.weight(.semibold))
-
-                if lane.kind != .video {
-                    HStack(spacing: 5) {
-                        Button {
-                            editor.toggleMute(laneID: lane.id)
-                        } label: {
-                            Image(systemName: lane.isMuted ? "speaker.slash.fill" : "speaker.wave.1")
-                        }
-                        .buttonStyle(.borderless)
-
-                        Slider(
-                            value: Binding(
-                                get: { lane.volume },
-                                set: { editor.setVolume($0, laneID: lane.id) }
-                            ),
-                            in: 0...2
+                Divider()
+                ForEach(editor.voiceoverInputDevices) { device in
+                    Button {
+                        editor.selectedVoiceoverInputID = device.id
+                    } label: {
+                        Label(
+                            device.name,
+                            systemImage: editor.selectedVoiceoverInputID == device.id ? "checkmark" : "circle"
                         )
                     }
                 }
+            } label: {
+                Image(systemName: "mic.badge.plus")
+                    .frame(width: 20, height: 18)
             }
-            .frame(width: 130, alignment: .leading)
+            .menuStyle(.button)
+            .buttonStyle(.bordered)
+            .frame(width: 44)
+            .disabled(editor.isVoiceoverRecording)
+            .accessibilityLabel("Voiceover Input")
+            .reccyTooltip("Voiceover input: \(editor.selectedVoiceoverInputName)")
 
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(.quaternary.opacity(0.55))
-
-                ForEach(lane.clips) { clip in
-                    clipView(clip, lane: lane)
-                        .frame(width: max(clip.duration * editor.pixelsPerSecond, 6), height: 52)
-                        .offset(x: clip.timelineStart * editor.pixelsPerSecond)
-                }
+            Button {
+                editor.toggleVoiceover()
+            } label: {
+                Image(systemName: editor.isVoiceoverRecording ? "stop.fill" : "mic.fill")
+                    .frame(width: 20, height: 18)
             }
-            .frame(width: trackWidth, height: 58, alignment: .leading)
+            .buttonStyle(.borderedProminent)
+            .frame(width: 44)
+            .tint(editor.isVoiceoverRecording ? .red : .accentColor)
+            .accessibilityLabel(editor.isVoiceoverRecording ? "Stop Voiceover" : "Record Voiceover")
+            .reccyTooltip("Record a new, independently editable audio clip at the playhead")
+
+            Spacer(minLength: 12)
+
+            Divider()
+                .frame(height: 20)
+
+            Image(systemName: "minus.magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Slider(value: $editor.pixelsPerSecond, in: 30...220)
+                .frame(width: 104)
+                .accessibilityLabel("Timeline zoom")
+            Image(systemName: "plus.magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
     }
 
-    private func clipView(_ clip: TimelineClip, lane: TimelineLane) -> some View {
-        let selected = editor.selectedClipID == clip.id
-        return Button {
-            editor.select(clip)
-        } label: {
+    private func editorAction(
+        _ title: String,
+        systemImage: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .frame(width: 20, height: 18)
+        }
+        .buttonStyle(.bordered)
+        .frame(width: 44)
+        .accessibilityLabel(title)
+        .reccyTooltip(help)
+    }
+
+    private func trackHeaders(_ project: TimelineProject) -> some View {
+        VStack(spacing: 0) {
+            Text("TRACKS")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .frame(height: rulerHeight)
+
+            ForEach(project.lanes) { lane in
+                laneHeader(lane)
+                    .frame(height: laneHeight)
+                Divider()
+            }
+
+            Spacer(minLength: 0)
+        }
+        .background(.bar.opacity(0.72))
+    }
+
+    private func laneHeader(_ lane: TimelineLane) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 7) {
                 Image(systemName: lane.kind.systemImage)
-                Text(clip.name)
+                    .foregroundStyle(laneColor(lane.kind))
+                Text(lane.name)
+                    .font(.caption.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
-            .font(.caption.weight(.medium))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 9)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(laneColor(lane.kind).gradient)
-            .overlay {
-                RoundedRectangle(cornerRadius: 7)
-                    .stroke(selected ? Color.white : Color.clear, lineWidth: 2)
+
+            if lane.kind != .video {
+                HStack(spacing: 7) {
+                    Button {
+                        editor.toggleMute(laneID: lane.id)
+                    } label: {
+                        Image(systemName: lane.isMuted ? "speaker.slash.fill" : "speaker.wave.1.fill")
+                            .frame(width: 16)
+                    }
+                    .buttonStyle(.borderless)
+                    .reccyTooltip(lane.isMuted ? "Unmute \(lane.name)" : "Mute \(lane.name)")
+
+                    Slider(
+                        value: Binding(
+                            get: { lane.volume },
+                            set: { editor.setVolume($0, laneID: lane.id) }
+                        ),
+                        in: 0...2
+                    )
+                    .controlSize(.small)
+                    .accessibilityLabel("\(lane.name) volume")
+                }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .shadow(color: selected ? laneColor(lane.kind).opacity(0.4) : .clear, radius: 4)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+    }
+
+    private func timelineCanvas(_ project: TimelineProject) -> some View {
+        let paddingDuration = max(4, 480 / max(editor.pixelsPerSecond, 1))
+        let canvasDuration = max(project.duration + paddingDuration, 12)
+        let trackWidth = canvasDuration * editor.pixelsPerSecond
+        let canvasHeight = rulerHeight + CGFloat(project.lanes.count) * (laneHeight + 1)
+
+        return ZStack(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                ruler(width: trackWidth, duration: canvasDuration)
+
+                ForEach(project.lanes) { lane in
+                    laneRow(
+                        lane,
+                        videoGaps: lane.kind == .video ? project.videoGaps : [],
+                        trackWidth: trackWidth
+                    )
+                        .frame(height: laneHeight)
+                    Divider()
+                }
+            }
+
+            TimelinePlayhead()
+                .frame(height: canvasHeight)
+                .offset(x: editor.playhead * editor.pixelsPerSecond - 5)
+                .allowsHitTesting(false)
+                .zIndex(20)
+        }
+        .frame(width: trackWidth, height: canvasHeight, alignment: .topLeading)
+        .coordinateSpace(name: "timelineCanvas")
+    }
+
+    private func ruler(width: Double, duration: TimeInterval) -> some View {
+        ZStack(alignment: .topLeading) {
+            Rectangle()
+                .fill(Color(nsColor: .controlBackgroundColor))
+
+            let interval = rulerInterval
+            ForEach(Array(stride(from: 0.0, through: duration, by: interval)), id: \.self) { value in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(timecode(value, includeHours: false))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Rectangle()
+                        .fill(.separator)
+                        .frame(width: 1, height: 6)
+                }
+                .offset(x: value * editor.pixelsPerSecond + 4, y: 3)
+            }
+        }
+        .frame(width: width, height: rulerHeight)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
+                .onChanged { value in
+                editor.seek(to: value.location.x / editor.pixelsPerSecond)
+            }
+        )
+    }
+
+    private var rulerInterval: TimeInterval {
+        if editor.pixelsPerSecond >= 150 { return 1 }
+        if editor.pixelsPerSecond >= 70 { return 2 }
+        return 5
+    }
+
+    private func laneRow(
+        _ lane: TimelineLane,
+        videoGaps: [TimelineGapSegment],
+        trackWidth: Double
+    ) -> some View {
+        ZStack(alignment: .leading) {
+            Rectangle()
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
+                        .onChanged { value in
+                        editor.seek(to: value.location.x / editor.pixelsPerSecond)
+                    }
+                )
+
+            ForEach(videoGaps) { gap in
+                TimelineGapView(
+                    gap: gap,
+                    pixelsPerSecond: editor.pixelsPerSecond,
+                    isSelected: editor.selectedGapID == gap.id,
+                    onSelect: { time in editor.select(gap, at: time) }
+                )
+                .frame(width: max(gap.duration * editor.pixelsPerSecond, 18), height: laneHeight - 12)
+                .offset(x: gap.timelineStart * editor.pixelsPerSecond)
+            }
+
+            ForEach(lane.clips) { clip in
+                TimelineClipView(
+                    clip: clip,
+                    lane: lane,
+                    pixelsPerSecond: editor.pixelsPerSecond,
+                    isSelected: editor.selectedClipID == clip.id,
+                    color: laneColor(lane.kind),
+                    onSelect: { time in editor.select(clip, at: time) },
+                    onBeginMove: { anchorTime in
+                        editor.beginClipMove(id: clip.id, anchorTime: anchorTime)
+                    },
+                    onMoveChanged: { translation in
+                        editor.updateClipMove(id: clip.id, by: translation)
+                    },
+                    onEndMove: { editor.endClipMove(id: clip.id) },
+                    onBeginTrim: { edge in editor.beginClipTrim(id: clip.id, edge: edge) },
+                    onTrimChanged: { edge, translation in
+                        editor.updateClipTrim(id: clip.id, edge: edge, by: translation)
+                    },
+                    onEndTrim: { edge in editor.endClipTrim(id: clip.id, edge: edge) }
+                )
+                .frame(width: max(clip.duration * editor.pixelsPerSecond, 18), height: laneHeight - 12)
+                .offset(x: clip.timelineStart * editor.pixelsPerSecond)
+            }
+        }
+        .frame(width: trackWidth, alignment: .leading)
     }
 
     @ToolbarContentBuilder
@@ -397,14 +539,236 @@ struct EditorView: View {
         }
     }
 
-    private func timecode(_ time: TimeInterval, includeHours: Bool = true) -> String {
-        let totalSeconds = max(0, Int(time.rounded(.down)))
+    private func timecode(
+        _ time: TimeInterval,
+        includeHours: Bool = true,
+        includeFrames: Bool = false
+    ) -> String {
+        let safeTime = max(0, time)
+        let totalSeconds = Int(safeTime.rounded(.down))
         let hours = totalSeconds / 3600
         let minutes = (totalSeconds % 3600) / 60
         let seconds = totalSeconds % 60
+        let base: String
         if includeHours || hours > 0 {
-            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+            base = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            base = String(format: "%02d:%02d", minutes, seconds)
         }
-        return String(format: "%02d:%02d", minutes, seconds)
+        guard includeFrames else { return base }
+        let frames = min(Int((safeTime - floor(safeTime)) * 30), 29)
+        return String(format: "%@:%02d", base, frames)
+    }
+}
+
+private struct TimelineGapView: View {
+    let gap: TimelineGapSegment
+    let pixelsPerSecond: Double
+    let isSelected: Bool
+    let onSelect: (TimeInterval) -> Void
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                Image(systemName: gap.fillMode.systemImage)
+                Text(gap.fillMode.title)
+                    .lineLimit(1)
+            }
+            Image(systemName: gap.fillMode.systemImage)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.white.opacity(0.82))
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(gapBackground)
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(
+                    isSelected ? Color.accentColor : Color.white.opacity(0.14),
+                    lineWidth: isSelected ? 2 : 1
+                )
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            SpatialTapGesture().onEnded { value in
+                select(at: value.location.x)
+            }
+        )
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 3)
+                .onChanged { value in select(at: value.location.x) }
+        )
+        .reccyTooltip("Empty video space • Click to select • Drag to scrub")
+        .accessibilityLabel(
+            "\(gap.fillMode.title) video gap, \(gap.duration.formatted(.number.precision(.fractionLength(1)))) seconds"
+        )
+    }
+
+    private var gapBackground: some ShapeStyle {
+        switch gap.fillMode {
+        case .black:
+            AnyShapeStyle(Color.black)
+        case .holdPrevious:
+            AnyShapeStyle(Color(nsColor: .darkGray).gradient)
+        case .holdNext:
+            AnyShapeStyle(Color(nsColor: .gray).opacity(0.72).gradient)
+        }
+    }
+
+    private func select(at localX: CGFloat) {
+        let localTime = min(max(localX / pixelsPerSecond, 0), gap.duration)
+        onSelect(gap.timelineStart + localTime)
+    }
+}
+
+private struct TimelineClipView: View {
+    let clip: TimelineClip
+    let lane: TimelineLane
+    let pixelsPerSecond: Double
+    let isSelected: Bool
+    let color: Color
+    let onSelect: (TimeInterval) -> Void
+    let onBeginMove: (TimeInterval) -> Void
+    let onMoveChanged: (TimeInterval) -> Void
+    let onEndMove: () -> Void
+    let onBeginTrim: (TimelineTrimEdge) -> Void
+    let onTrimChanged: (TimelineTrimEdge, TimeInterval) -> Void
+    let onEndTrim: (TimelineTrimEdge) -> Void
+
+    @State private var isMoving = false
+    @State private var trimmingEdge: TimelineTrimEdge?
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: lane.kind.systemImage)
+            Text(clip.name)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 9)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(color.gradient)
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(isSelected ? Color.white : Color.white.opacity(0.12), lineWidth: isSelected ? 2 : 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .shadow(color: isSelected ? color.opacity(0.45) : .clear, radius: 5)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            SpatialTapGesture().onEnded { value in
+                let localTime = min(max(value.location.x / pixelsPerSecond, 0), clip.duration)
+                onSelect(clip.timelineStart + localTime)
+            }
+        )
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 3, coordinateSpace: .named("timelineCanvas"))
+                .onChanged { value in
+                    guard trimmingEdge == nil else { return }
+                    if !isMoving {
+                        isMoving = true
+                        let localX = value.startLocation.x - clip.timelineStart * pixelsPerSecond
+                        onBeginMove(min(max(localX / pixelsPerSecond, 0), clip.duration))
+                    }
+                    onMoveChanged(value.translation.width / pixelsPerSecond)
+                }
+                .onEnded { value in
+                    guard isMoving else { return }
+                    onMoveChanged(value.translation.width / pixelsPerSecond)
+                    onEndMove()
+                    isMoving = false
+                }
+        )
+        .overlay {
+            HStack(spacing: 0) {
+                trimHandle(edge: .leading)
+                Spacer(minLength: 0)
+                trimHandle(edge: .trailing)
+            }
+        }
+        .reccyTooltip("Click to seek • Drag the body to move • Drag either edge to trim")
+        .accessibilityLabel("\(clip.name), \(clip.duration.formatted(.number.precision(.fractionLength(1)))) seconds")
+    }
+
+    private func trimHandle(edge: TimelineTrimEdge) -> some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 11)
+            .contentShape(Rectangle())
+            .overlay(alignment: edge == .leading ? .leading : .trailing) {
+                Capsule()
+                    .fill(isSelected ? Color.white.opacity(0.92) : Color.white.opacity(0.35))
+                    .frame(width: isSelected ? 3 : 2, height: 28)
+                    .padding(edge == .leading ? .leading : .trailing, 3)
+            }
+            .onHover { hovering in
+                if hovering { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
+            }
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
+                    .onChanged { value in
+                        guard !isMoving else { return }
+                        if trimmingEdge == nil {
+                            trimmingEdge = edge
+                            onBeginTrim(edge)
+                        }
+                        guard trimmingEdge == edge else { return }
+                        onTrimChanged(edge, value.translation.width / pixelsPerSecond)
+                    }
+                    .onEnded { value in
+                        guard trimmingEdge == edge else { return }
+                        onTrimChanged(edge, value.translation.width / pixelsPerSecond)
+                        onEndTrim(edge)
+                        trimmingEdge = nil
+                    }
+            )
+            .reccyTooltip(edge == .leading ? "Trim clip in-point" : "Trim clip out-point")
+    }
+}
+
+private struct TimelinePlayhead: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            Image(systemName: "triangle.fill")
+                .font(.system(size: 9))
+                .rotationEffect(.degrees(180))
+            Rectangle()
+                .frame(width: 1.5)
+        }
+        .foregroundStyle(.red)
+        .frame(width: 11)
+    }
+}
+
+/// The editor owns transport and seeking, so AVPlayerView provides only the
+/// native Metal-backed video surface. This prevents a second hover scrubber
+/// from competing with the project timeline.
+private struct NativeVideoPlayer: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let playerView = AVPlayerView()
+        playerView.player = player
+        playerView.controlsStyle = .none
+        playerView.videoGravity = .resizeAspect
+        playerView.showsFrameSteppingButtons = false
+        playerView.showsFullScreenToggleButton = false
+        playerView.updatesNowPlayingInfoCenter = false
+        playerView.allowsVideoFrameAnalysis = false
+        playerView.preferredDisplayDynamicRange = .automatic
+        return playerView
+    }
+
+    func updateNSView(_ playerView: AVPlayerView, context: Context) {
+        if playerView.player !== player {
+            playerView.player = player
+        }
+    }
+
+    static func dismantleNSView(_ playerView: AVPlayerView, coordinator: Void) {
+        playerView.player = nil
     }
 }

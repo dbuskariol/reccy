@@ -94,7 +94,12 @@ struct ExportService {
         try await export(asset: asset, destinationURL: destinationURL, preset: preset)
     }
 
-    func export(asset: AVAsset, destinationURL: URL, preset: ExportPreset) async throws {
+    func export(
+        asset: AVAsset,
+        destinationURL: URL,
+        preset: ExportPreset,
+        videoComposition: AVVideoComposition? = nil
+    ) async throws {
         guard let session = AVAssetExportSession(asset: asset, presetName: preset.avPresetName) else {
             throw ExportServiceError.unsupportedPreset
         }
@@ -103,6 +108,9 @@ struct ExportService {
         }
 
         session.shouldOptimizeForNetworkUse = preset.fileType == .mp4
+        if preset != .audioM4A {
+            session.videoComposition = videoComposition
+        }
         try await session.export(to: destinationURL, as: preset.fileType)
     }
 }

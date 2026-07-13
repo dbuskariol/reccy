@@ -25,6 +25,14 @@ enum CaptureState: Equatable, Sendable {
     var canChangeSettings: Bool { !isRecording }
 }
 
+enum CapturePermissionStatus: Equatable, Sendable {
+    case notGranted
+    case granted
+    case restartRequired
+
+    var isGranted: Bool { self == .granted }
+}
+
 @MainActor
 final class CaptureCoordinator: NSObject, ObservableObject {
     @Published var settings: CaptureSettings {
@@ -44,14 +52,28 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var lastRecordingURL: URL?
     @Published private(set) var lastScreenshotURL: URL?
     @Published private(set) var isCapturingScreenshot = false
+    @Published private(set) var screenCapturePermission: CapturePermissionStatus = .notGranted
+    @Published private(set) var microphonePermission: AVAuthorizationStatus = .notDetermined
+    @Published private(set) var isPresentingSourcePicker = false
+    @Published private(set) var sourceSelectionMessage: String?
+    @Published private(set) var selectedSource: CaptureSourceDescriptor?
+    @Published private(set) var systemAudioLevel: Double = 0
+    @Published private(set) var microphoneAudioLevel: Double = 0
+    @Published private(set) var systemAudioHistory: [Double] = []
+    @Published private(set) var microphoneAudioHistory: [Double] = []
 
     let library: RecordingLibrary
 
     private var selectedFilter: SCContentFilter?
+    private var selectedSourceRect: CGRect?
     private var multitrackRecorder: MultitrackRecorder?
     private var activeOutputURL: URL?
+    private var activeRecordingManifest: RecordingManifest?
     private var countdownTask: Task<Void, Never>?
     private var meterTask: Task<Void, Never>?
+    private var activationCancellable: AnyCancellable?
+    private let regionSelectionController = RegionSelectionController()
+    private let boundaryController = CaptureBoundaryController()
 
     override init() {
         let savedSettings = CaptureSettings.load()
@@ -63,6 +85,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         picker.add(self)
         picker.isActive = true
         refreshAudioInputDevices()
+        refreshPermissionStatus()
+        activationCancellable = NotificationCenter.default
+            .publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.refreshPermissionStatus() }
+            }
     }
 
     var formattedDuration: String {
@@ -82,10 +110,21 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     func chooseSource(_ kind: CaptureSourceKind) {
         guard state.canChangeSettings else { return }
+        guard screenCapturePermission.isGranted else {
+            sourceSelectionMessage = "Allow Screen & System Audio Recording before choosing a source."
+            return
+        }
         selectedSourceKind = kind
         selectedFilter = nil
+        selectedSourceRect = nil
+        selectedSource = nil
         hasSelectedSource = false
+        boundaryController.hide()
         state = .idle
+        isPresentingSourcePicker = true
+        sourceSelectionMessage = kind == .region
+            ? "Choose a display in the macOS picker, then drag out the portion to record."
+            : "Choose a \(kind.title.lowercased()) in the macOS picker."
 
         var pickerConfiguration = SCContentSharingPickerConfiguration()
         pickerConfiguration.allowedPickerModes = kind.pickerMode
@@ -98,6 +137,53 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         picker.defaultConfiguration = pickerConfiguration
         picker.isActive = true
         picker.present(using: kind.contentStyle)
+    }
+
+    func requestScreenCapturePermission() {
+        guard !screenCapturePermission.isGranted else { return }
+        let wasGranted = CGPreflightScreenCaptureAccess()
+        let granted = CGRequestScreenCaptureAccess()
+        if granted && !wasGranted {
+            screenCapturePermission = .restartRequired
+            sourceSelectionMessage = "Permission granted. Quit and reopen Reccy once to enable capture."
+        } else {
+            refreshPermissionStatus()
+            if !granted {
+                sourceSelectionMessage = "Enable Reccy in System Settings → Privacy & Security → Screen & System Audio Recording."
+            }
+        }
+    }
+
+    func requestMicrophonePermission() {
+        Task {
+            _ = await AVCaptureDevice.requestAccess(for: .audio)
+            refreshPermissionStatus()
+        }
+    }
+
+    func openScreenCapturePrivacySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func openMicrophonePrivacySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func quitForPermissionRestart() {
+        NSApp.terminate(nil)
+    }
+
+    func refreshPermissionStatus() {
+        if screenCapturePermission != .restartRequired {
+            screenCapturePermission = CGPreflightScreenCaptureAccess() ? .granted : .notGranted
+        }
+        microphonePermission = AVCaptureDevice.authorizationStatus(for: .audio)
     }
 
     func startRecording() {
@@ -167,6 +253,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 configuration.dynamicRange = settings.screenshotRange.screenCaptureRange
                 configuration.displayIntent = .canonical
                 configuration.fileURL = try makeScreenshotURL()
+                if let selectedSourceRect {
+                    configuration.sourceRect = selectedSourceRect
+                }
 
                 let output = try await SCScreenshotManager.captureScreenshot(
                     contentFilter: selectedFilter,
@@ -226,6 +315,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             state = .starting
             recordedDuration = 0
             recordedFileSize = 0
+            systemAudioLevel = 0
+            microphoneAudioLevel = 0
+            systemAudioHistory.removeAll(keepingCapacity: true)
+            microphoneAudioHistory.removeAll(keepingCapacity: true)
 
             let streamConfiguration = makeStreamConfiguration(for: filter)
             let outputURL = try makeOutputURL()
@@ -242,6 +335,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             recorder.onStarted = { [weak self] in
                 Task { @MainActor in
                     self?.state = .recording
+                    self?.boundaryController.setRecording(true)
                     self?.beginMetering()
                 }
             }
@@ -250,6 +344,22 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             }
             multitrackRecorder = recorder
             activeOutputURL = outputURL
+            if let selectedSource {
+                activeRecordingManifest = RecordingManifest(
+                    createdAt: Date(),
+                    source: selectedSource,
+                    width: streamConfiguration.width,
+                    height: streamConfiguration.height,
+                    frameRate: settings.frameRate.rawValue,
+                    recordingPreset: settings.recordingPreset,
+                    isHDR: settings.useHDR,
+                    includesSystemAudio: settings.includeSystemAudio,
+                    includesMicrophone: settings.includeMicrophone,
+                    microphoneName: settings.includeMicrophone ? selectedMicrophoneName : nil,
+                    showsCursor: settings.showCursor,
+                    highlightsClicks: settings.showMouseClicks && !settings.useHDR
+                )
+            }
             try await recorder.start(
                 filter: filter,
                 configuration: streamConfiguration,
@@ -270,8 +380,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             configuration.pixelFormat = kCVPixelFormatType_32BGRA
         }
 
+        let captureRect = selectedSourceRect ?? filter.contentRect
         let size = settings.resolution.outputSize(
-            contentRect: filter.contentRect,
+            contentRect: captureRect,
             pointPixelScale: CGFloat(filter.pointPixelScale)
         )
         configuration.width = Int(size.width)
@@ -292,6 +403,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         configuration.captureMicrophone = settings.includeMicrophone
         configuration.microphoneCaptureDeviceID = settings.selectedMicrophoneID
         configuration.streamName = "Reccy Recording"
+        if let selectedSourceRect {
+            configuration.sourceRect = selectedSourceRect
+        }
         return configuration
     }
 
@@ -356,8 +470,20 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 let metrics = recorder.metrics
                 recordedDuration = metrics.duration
                 recordedFileSize = metrics.fileSize
+                systemAudioLevel = metrics.systemAudioLevel
+                microphoneAudioLevel = metrics.microphoneLevel
+                appendLevel(metrics.systemAudioLevel, to: &systemAudioHistory)
+                appendLevel(metrics.microphoneLevel, to: &microphoneAudioHistory)
+                boundaryController.setRecording(true, duration: metrics.duration)
                 try? await Task.sleep(for: .milliseconds(250))
             }
+        }
+    }
+
+    private func appendLevel(_ level: Double, to history: inout [Double]) {
+        history.append(min(max(level, 0), 1))
+        if history.count > 96 {
+            history.removeFirst(history.count - 96)
         }
     }
 
@@ -365,11 +491,29 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         meterTask?.cancel()
         meterTask = nil
         multitrackRecorder = nil
+        systemAudioLevel = 0
+        microphoneAudioLevel = 0
 
         if let activeOutputURL {
+            if let activeRecordingManifest {
+                do {
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    encoder.dateEncodingStrategy = .iso8601
+                    let data = try encoder.encode(activeRecordingManifest)
+                    try data.write(
+                        to: RecordingManifest.sidecarURL(for: activeOutputURL),
+                        options: .atomic
+                    )
+                } catch {
+                    sourceSelectionMessage = "Recording saved, but its capture details could not be indexed."
+                }
+            }
             lastRecordingURL = activeOutputURL
         }
         activeOutputURL = nil
+        activeRecordingManifest = nil
+        boundaryController.setRecording(false)
         state = hasSelectedSource ? .sourceSelected : .idle
         library.refresh()
         NSApp.requestUserAttention(.informationalRequest)
@@ -383,6 +527,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
         multitrackRecorder = nil
         activeOutputURL = nil
+        activeRecordingManifest = nil
+        boundaryController.setRecording(false)
+        systemAudioLevel = 0
+        microphoneAudioLevel = 0
         state = .failed(error.localizedDescription)
     }
 
@@ -395,40 +543,166 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             ?? FileManager.default.homeDirectoryForCurrentUser
         return movies.appendingPathComponent("Reccy", isDirectory: true)
     }
-}
 
-extension CaptureCoordinator: SCContentSharingPickerObserver {
-    func contentSharingPicker(
-        _ picker: SCContentSharingPicker,
-        didCancelFor stream: SCStream?
+    private func completeSourceSelection(
+        filter: SCContentFilter,
+        sourceRect: CGRect? = nil
     ) {
-        if !hasSelectedSource {
-            state = .idle
+        guard let descriptor = makeSourceDescriptor(filter: filter, sourceRect: sourceRect) else {
+            handleFailure(CaptureError.sourceUnavailable)
+            return
+        }
+        selectedFilter = filter
+        selectedSourceRect = sourceRect
+        selectedSource = descriptor
+        hasSelectedSource = true
+        state = .sourceSelected
+        sourceSelectionMessage = "\(descriptor.name) selected. Reccy is ready to record."
+        if let target = makeBoundaryTarget(from: descriptor) {
+            boundaryController.show(target: target, sourceName: descriptor.name)
         }
     }
 
-    func contentSharingPicker(
+    private func makeSourceDescriptor(
+        filter: SCContentFilter,
+        sourceRect: CGRect?
+    ) -> CaptureSourceDescriptor? {
+        switch selectedSourceKind {
+        case .display, .region:
+            guard let display = filter.includedDisplays.first else { return nil }
+            let displayName = NSScreen.screen(displayID: display.displayID)?.localizedName
+                ?? "Display \(display.displayID)"
+            return CaptureSourceDescriptor(
+                kind: selectedSourceKind,
+                name: selectedSourceKind == .region ? "Portion of \(displayName)" : displayName,
+                applicationName: nil,
+                applicationBundleIdentifier: nil,
+                windowName: nil,
+                windowIDs: [],
+                displayID: display.displayID,
+                displayName: displayName,
+                region: sourceRect.map(CaptureRegion.init)
+            )
+
+        case .application:
+            guard let application = filter.includedApplications.first else { return nil }
+            return CaptureSourceDescriptor(
+                kind: .application,
+                name: application.applicationName,
+                applicationName: application.applicationName,
+                applicationBundleIdentifier: application.bundleIdentifier,
+                windowName: nil,
+                windowIDs: filter.includedWindows.map(\.windowID),
+                displayID: nil,
+                displayName: nil,
+                region: nil
+            )
+
+        case .window:
+            guard let window = filter.includedWindows.first else { return nil }
+            let applicationName = window.owningApplication?.applicationName
+            let windowName = window.title?.isEmpty == false ? window.title : nil
+            return CaptureSourceDescriptor(
+                kind: .window,
+                name: windowName ?? applicationName ?? "Window",
+                applicationName: applicationName,
+                applicationBundleIdentifier: window.owningApplication?.bundleIdentifier,
+                windowName: windowName,
+                windowIDs: [window.windowID],
+                displayID: nil,
+                displayName: nil,
+                region: nil
+            )
+        }
+    }
+
+    private func makeBoundaryTarget(
+        from descriptor: CaptureSourceDescriptor
+    ) -> CaptureBoundaryTarget? {
+        switch descriptor.kind {
+        case .display:
+            return descriptor.displayID.map(CaptureBoundaryTarget.display)
+        case .region:
+            guard let displayID = descriptor.displayID, let region = descriptor.region else { return nil }
+            return .region(displayID, region)
+        case .application:
+            if let bundleIdentifier = descriptor.applicationBundleIdentifier {
+                return .application(bundleIdentifier)
+            }
+            return descriptor.windowIDs.isEmpty ? nil : .windows(descriptor.windowIDs)
+        case .window:
+            return descriptor.windowIDs.isEmpty ? nil : .windows(descriptor.windowIDs)
+        }
+    }
+}
+
+extension CaptureCoordinator: SCContentSharingPickerObserver {
+    nonisolated func contentSharingPicker(
+        _ picker: SCContentSharingPicker,
+        didCancelFor stream: SCStream?
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            isPresentingSourcePicker = false
+            if !hasSelectedSource {
+                state = .idle
+                sourceSelectionMessage = "Source selection was cancelled."
+            }
+        }
+    }
+
+    nonisolated func contentSharingPicker(
         _ picker: SCContentSharingPicker,
         didUpdateWith filter: SCContentFilter,
         for stream: SCStream?
     ) {
-        selectedFilter = filter
-        hasSelectedSource = true
-        state = .sourceSelected
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            isPresentingSourcePicker = false
+            if selectedSourceKind == .region {
+                guard let display = filter.includedDisplays.first else {
+                    handleFailure(CaptureError.sourceUnavailable)
+                    return
+                }
+                isPresentingSourcePicker = true
+                sourceSelectionMessage = "Drag to select the portion to record, then choose Use Area."
+                if let region = await regionSelectionController.selectRegion(on: display) {
+                    isPresentingSourcePicker = false
+                    completeSourceSelection(filter: filter, sourceRect: region)
+                } else {
+                    isPresentingSourcePicker = false
+                    state = .idle
+                    sourceSelectionMessage = "Portion selection was cancelled."
+                }
+            } else {
+                completeSourceSelection(filter: filter)
+            }
+        }
     }
 
-    func contentSharingPickerStartDidFailWithError(_ error: Error) {
-        handleFailure(error)
+    nonisolated func contentSharingPickerStartDidFailWithError(_ error: Error) {
+        let message = error.localizedDescription
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            isPresentingSourcePicker = false
+            handleFailure(CaptureError.sourcePickerFailed(message))
+        }
     }
 }
 
 enum CaptureError: LocalizedError {
     case microphonePermissionDenied
+    case sourcePickerFailed(String)
+    case sourceUnavailable
 
     var errorDescription: String? {
         switch self {
         case .microphonePermissionDenied:
             "Microphone access is off. Enable it for Reccy in System Settings → Privacy & Security → Microphone."
+        case let .sourcePickerFailed(message):
+            "The macOS source picker failed: \(message)"
+        case .sourceUnavailable:
+            "The selected source is no longer available. Choose it again in the macOS picker."
         }
     }
 }

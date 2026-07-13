@@ -1,8 +1,8 @@
 import AppKit
-import AVFAudio
 import AVFoundation
 import Combine
 import Foundation
+import OSLog
 
 enum TimelineEditorError: LocalizedError {
     case noMedia
@@ -10,6 +10,7 @@ enum TimelineEditorError: LocalizedError {
     case microphonePermissionDenied
     case voiceoverCouldNotStart
     case exportUnsupported
+    case projectFormatUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -18,31 +19,90 @@ enum TimelineEditorError: LocalizedError {
         case .microphonePermissionDenied: "Microphone access is required to record a voiceover."
         case .voiceoverCouldNotStart: "The voiceover recorder couldn’t start."
         case .exportUnsupported: "That export format isn’t compatible with this project."
+        case .projectFormatUnsupported: "This timeline uses an unsupported development format. Remove its project package and open the recording again."
         }
     }
 }
 
 @MainActor
 final class TimelineEditorController: ObservableObject {
+    private let logger = Logger(subsystem: "com.reccy.mac", category: "TimelineEditor")
     @Published private(set) var project: TimelineProject?
     @Published private(set) var isLoading = false
     @Published private(set) var isRebuilding = false
     @Published private(set) var isVoiceoverRecording = false
     @Published var selectedClipID: UUID?
+    @Published var selectedGapID: UUID?
     @Published var playhead: TimeInterval = 0
     @Published var pixelsPerSecond: Double = 72
     @Published var errorMessage: String?
+    @Published var moveLinkedClips = false
+    @Published private(set) var voiceoverInputDevices: [AudioInputDevice] = []
+    @Published var selectedVoiceoverInputID: String? = UserDefaults.standard.string(
+        forKey: "voiceover-input-device-id"
+    ) {
+        didSet {
+            if let selectedVoiceoverInputID {
+                UserDefaults.standard.set(selectedVoiceoverInputID, forKey: "voiceover-input-device-id")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "voiceover-input-device-id")
+            }
+        }
+    }
 
-    let player = AVPlayer()
+    /// Construct playback only when the editor is first used, not at app launch.
+    lazy var player = AVPlayer()
 
     private var composition: AVMutableComposition?
-    private var voiceoverRecorder: AVAudioRecorder?
+    private var compositionVideoComposition: AVVideoComposition?
+    private var voiceoverRecorder: VoiceoverRecorder?
     private var voiceoverStartTime: TimeInterval = 0
     private var projectPackageURL: URL?
+    private var sourceDurations: [URL: TimeInterval] = [:]
+    private var interactionOriginalProject: TimelineProject?
+    private var interactionOriginalClip: TimelineClip?
+    private var interactionKind: TimelineInteractionKind?
+    private var interactionAnchorTime: TimeInterval = 0
+    private var interactionSnapTime: TimeInterval = 0
+    private var interactionPreviewVideoID: UUID?
+    private var rebuildGeneration: UInt = 0
+
+    init() {
+        refreshVoiceoverInputDevices()
+    }
 
     var duration: TimeInterval { max(project?.duration ?? 0, 0.01) }
     var hasProject: Bool { project != nil }
     var isPlaying: Bool { player.timeControlStatus == .playing }
+    var selectedClip: TimelineClip? {
+        guard let selectedClipID else { return nil }
+        return project?.clip(id: selectedClipID)
+    }
+    var selectedGap: TimelineGapSegment? {
+        guard let selectedGapID else { return nil }
+        return project?.videoGap(id: selectedGapID)
+    }
+    var canSplitSelection: Bool { selectedClip?.contains(playhead) == true }
+    var canSplitAll: Bool {
+        project?.lanes.flatMap(\.clips).contains(where: { $0.contains(playhead) }) == true
+    }
+    var selectedGapFillMode: TimelineGapFillMode { selectedGap?.fillMode ?? .black }
+    var selectedVoiceoverInputName: String {
+        guard let selectedVoiceoverInputID else { return "System Default" }
+        return voiceoverInputDevices.first(where: { $0.id == selectedVoiceoverInputID })?.name
+            ?? "Unavailable Input"
+    }
+
+    func refreshVoiceoverInputDevices() {
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        voiceoverInputDevices = session.devices
+            .map { AudioInputDevice(id: $0.uniqueID, name: $0.localizedName) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
 
     func open(_ item: RecordingItem) async {
         isLoading = true
@@ -50,6 +110,36 @@ final class TimelineEditorController: ObservableObject {
         defer { isLoading = false }
 
         do {
+            let packageURL = item.url
+                .deletingLastPathComponent()
+                .appendingPathComponent("Projects", isDirectory: true)
+                .appendingPathComponent("\(item.name).reccyproject", isDirectory: true)
+            try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+            projectPackageURL = packageURL
+            let savedProjectURL = packageURL.appendingPathComponent("project.json")
+
+            if FileManager.default.fileExists(atPath: savedProjectURL.path) {
+                let data = try Data(contentsOf: savedProjectURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let savedProject = try decoder.decode(TimelineProject.self, from: data)
+                guard savedProject.formatVersion == TimelineProject.currentFormatVersion else {
+                    throw TimelineEditorError.projectFormatUnsupported
+                }
+
+                sourceDurations.removeAll(keepingCapacity: true)
+                for url in Set(savedProject.lanes.flatMap(\.clips).map(\.sourceURL)) {
+                    let sourceAsset = AVURLAsset(url: url)
+                    sourceDurations[url] = try await sourceAsset.load(.duration).seconds
+                }
+                project = savedProject
+                playhead = 0
+                selectedClipID = savedProject.lanes.flatMap(\.clips).first?.id
+                selectedGapID = nil
+                try await rebuildComposition()
+                return
+            }
+
             let asset = AVURLAsset(url: item.url)
             let duration = try await asset.load(.duration).seconds
             let videoTracks = try await asset.loadTracks(withMediaType: .video)
@@ -80,13 +170,22 @@ final class TimelineEditorController: ObservableObject {
                 )
             }
 
-            for (index, track) in audioTracks.enumerated() {
-                let kind: TimelineLaneKind = index == 0 ? .systemAudio : .microphone
-                let name = audioTracks.count == 1 ? "Recorded Audio" : kind.title
+            var audioLaneDescriptions: [(kind: TimelineLaneKind, name: String)] = []
+            if item.manifest.includesSystemAudio {
+                audioLaneDescriptions.append((.systemAudio, "System Audio"))
+            }
+            if item.manifest.includesMicrophone {
+                audioLaneDescriptions.append((
+                    .microphone,
+                    item.manifest.microphoneName ?? "Microphone"
+                ))
+            }
+
+            for (track, description) in zip(audioTracks, audioLaneDescriptions) {
                 lanes.append(
                     TimelineLane(
-                        kind: kind,
-                        name: name,
+                        kind: description.kind,
+                        name: description.name,
                         clips: [
                             TimelineClip(
                                 sourceURL: item.url,
@@ -94,7 +193,7 @@ final class TimelineEditorController: ObservableObject {
                                 sourceStart: 0,
                                 timelineStart: 0,
                                 duration: duration,
-                                name: name,
+                                name: description.name,
                                 linkedGroupID: linkedGroupID
                             ),
                         ]
@@ -102,15 +201,11 @@ final class TimelineEditorController: ObservableObject {
                 )
             }
 
-            let packageURL = item.url
-                .deletingLastPathComponent()
-                .appendingPathComponent("Projects", isDirectory: true)
-                .appendingPathComponent("\(item.name).reccyproject", isDirectory: true)
-            try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
-            projectPackageURL = packageURL
             project = TimelineProject(name: item.name, lanes: lanes)
+            sourceDurations = [item.url: duration]
             playhead = 0
             selectedClipID = lanes.first?.clips.first?.id
+            selectedGapID = nil
             try await rebuildComposition()
             try save()
         } catch {
@@ -158,9 +253,84 @@ final class TimelineEditorController: ObservableObject {
         rebuildAndSave()
     }
 
-    func select(_ clip: TimelineClip) {
+    func select(_ clip: TimelineClip, at time: TimeInterval? = nil) {
         selectedClipID = clip.id
-        seek(to: clip.timelineStart)
+        selectedGapID = nil
+        seek(to: time ?? clip.timelineStart)
+    }
+
+    func select(_ gap: TimelineGapSegment, at time: TimeInterval? = nil) {
+        selectedClipID = nil
+        selectedGapID = gap.id
+        seek(to: time ?? gap.timelineStart)
+    }
+
+    func beginClipMove(id: UUID, anchorTime: TimeInterval) {
+        beginTimelineInteraction(.move(id), anchorTime: anchorTime)
+    }
+
+    func updateClipMove(id: UUID, by translation: TimeInterval) {
+        guard
+            case .move(id) = interactionKind,
+            var draft = interactionOriginalProject,
+            let original = interactionOriginalClip
+        else { return }
+
+        _ = draft.moveClip(
+            id: id,
+            to: original.timelineStart + translation,
+            includeLinked: moveLinkedClips,
+            snapTargets: [interactionSnapTime],
+            snapTolerance: 8 / max(pixelsPerSecond, 1)
+        )
+        project = draft
+        selectedClipID = id
+        updateInteractionPreview(in: draft)
+    }
+
+    func endClipMove(id: UUID) {
+        guard case .move(id) = interactionKind else { return }
+        finishTimelineInteraction()
+    }
+
+    func beginClipTrim(id: UUID, edge: TimelineTrimEdge) {
+        beginTimelineInteraction(.trim(id, edge), anchorTime: 0)
+    }
+
+    func updateClipTrim(id: UUID, edge: TimelineTrimEdge, by translation: TimeInterval) {
+        guard
+            case .trim(id, edge) = interactionKind,
+            var draft = interactionOriginalProject,
+            let original = interactionOriginalClip
+        else { return }
+
+        let originalBoundary = edge == .leading ? original.timelineStart : original.timelineEnd
+        let sourceDuration = sourceDurations[original.sourceURL]
+            ?? max(original.sourceStart + original.duration, 1 / 30)
+        _ = draft.trimClip(
+            id: id,
+            edge: edge,
+            to: originalBoundary + translation,
+            sourceDuration: sourceDuration,
+            includeLinked: moveLinkedClips,
+            snapTargets: [interactionSnapTime],
+            snapTolerance: 8 / max(pixelsPerSecond, 1)
+        )
+        project = draft
+        selectedClipID = id
+        updateInteractionPreview(in: draft)
+    }
+
+    func endClipTrim(id: UUID, edge: TimelineTrimEdge) {
+        guard case .trim(id, edge) = interactionKind else { return }
+        finishTimelineInteraction()
+    }
+
+    func setSelectedGapFillMode(_ mode: TimelineGapFillMode) {
+        guard var project, let selectedGapID, selectedGap?.fillMode != mode else { return }
+        project.setGapFillMode(mode, gapID: selectedGapID)
+        self.project = project
+        rebuildAndSave()
     }
 
     func toggleMute(laneID: UUID) {
@@ -197,6 +367,16 @@ final class TimelineEditorController: ObservableObject {
         player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
+    func seekBy(_ seconds: TimeInterval) {
+        seek(to: playhead + seconds)
+    }
+
+    func stepFrames(_ frameCount: Int) {
+        player.pause()
+        seekBy(TimeInterval(frameCount) / 30)
+        objectWillChange.send()
+    }
+
     func syncPlayheadFromPlayer() {
         guard player.timeControlStatus == .playing else { return }
         let current = player.currentTime().seconds
@@ -228,7 +408,12 @@ final class TimelineEditorController: ObservableObject {
         guard let snapshot = composition.copy() as? AVComposition else {
             throw TimelineEditorError.noProject
         }
-        try await ExportService().export(asset: snapshot, destinationURL: destinationURL, preset: preset)
+        try await ExportService().export(
+            asset: snapshot,
+            destinationURL: destinationURL,
+            preset: preset,
+            videoComposition: compositionVideoComposition
+        )
     }
 
     private func rebuildAndSave() {
@@ -237,6 +422,7 @@ final class TimelineEditorController: ObservableObject {
                 try await rebuildComposition()
                 try save()
             } catch {
+                logRebuildError(error)
                 errorMessage = error.localizedDescription
             }
         }
@@ -244,57 +430,55 @@ final class TimelineEditorController: ObservableObject {
 
     private func rebuildComposition() async throws {
         guard let project else { throw TimelineEditorError.noProject }
+        rebuildGeneration &+= 1
+        let generation = rebuildGeneration
         isRebuilding = true
-        defer { isRebuilding = false }
-
-        let newComposition = AVMutableComposition()
-        var audioParameters: [AVMutableAudioMixInputParameters] = []
-
-        for lane in project.lanes where !lane.clips.isEmpty {
-            guard let compositionTrack = newComposition.addMutableTrack(
-                withMediaType: lane.kind.mediaType,
-                preferredTrackID: kCMPersistentTrackID_Invalid
-            ) else { continue }
-
-            for clip in lane.clips.sorted(by: { $0.timelineStart < $1.timelineStart }) {
-                let asset = AVURLAsset(url: clip.sourceURL)
-                let tracks = try await asset.loadTracks(withMediaType: lane.kind.mediaType)
-                guard let sourceTrack = tracks.first(where: { $0.trackID == clip.sourceTrackID }) else {
-                    continue
-                }
-                let sourceRange = CMTimeRange(
-                    start: CMTime(seconds: clip.sourceStart, preferredTimescale: 600),
-                    duration: CMTime(seconds: clip.duration, preferredTimescale: 600)
-                )
-                try compositionTrack.insertTimeRange(
-                    sourceRange,
-                    of: sourceTrack,
-                    at: CMTime(seconds: clip.timelineStart, preferredTimescale: 600)
-                )
-
-                if lane.kind == .video {
-                    compositionTrack.preferredTransform = try await sourceTrack.load(.preferredTransform)
-                }
-            }
-
-            if lane.kind != .video {
-                let parameters = AVMutableAudioMixInputParameters(track: compositionTrack)
-                parameters.setVolume(lane.isMuted ? 0 : Float(lane.volume), at: .zero)
-                audioParameters.append(parameters)
+        defer {
+            if generation == rebuildGeneration {
+                isRebuilding = false
             }
         }
 
-        let snapshot = (newComposition.copy() as? AVComposition) ?? newComposition
+        let build = try await TimelineCompositionBuilder.build(project)
+        let snapshot = (build.composition.copy() as? AVComposition) ?? build.composition
         let item = AVPlayerItem(asset: snapshot)
-        if !audioParameters.isEmpty {
-            let audioMix = AVMutableAudioMix()
-            audioMix.inputParameters = audioParameters
-            item.audioMix = audioMix
-        }
+        item.videoComposition = build.videoComposition
+        item.audioMix = build.audioMix
 
-        composition = newComposition
+        // A prior edit may still be assembling while the user makes a newer
+        // one. Never let the older composition overwrite the current project.
+        guard generation == rebuildGeneration, self.project == project else { return }
+
+        composition = build.composition
+        compositionVideoComposition = build.videoComposition
+        item.seekingWaitsForVideoCompositionRendering = true
         player.replaceCurrentItem(with: item)
-        seek(to: min(playhead, project.duration))
+        let target = min(playhead, project.duration)
+        playhead = target
+        item.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        ) { [weak self, weak item] finished in
+            guard finished else { return }
+            Task { @MainActor in
+                guard let self, self.player.currentItem === item else { return }
+                self.objectWillChange.send()
+            }
+        }
+    }
+
+    private func logRebuildError(_ error: Error) {
+        let nsError = error as NSError
+        let underlying = (error as? TimelineCompositionBuildError)?.underlyingError as NSError?
+        let underlyingDomain = underlying?.domain ?? "none"
+        let underlyingCode = underlying?.code ?? 0
+        let underlyingInfo = String(describing: underlying?.userInfo)
+        let detail = "Timeline rebuild failed domain=\(nsError.domain) "
+            + "code=\(nsError.code) description=\(nsError.localizedDescription) "
+            + "underlyingDomain=\(underlyingDomain) underlyingCode=\(underlyingCode) "
+            + "underlyingInfo=\(underlyingInfo)"
+        logger.error("\(detail, privacy: .public)")
     }
 
     private func startVoiceover() async {
@@ -317,16 +501,9 @@ final class TimelineEditorController: ObservableObject {
             let url = mediaDirectory
                 .appendingPathComponent("Voiceover \(UUID().uuidString)")
                 .appendingPathExtension("m4a")
-            let settings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: 48_000,
-                AVNumberOfChannelsKey: 1,
-                AVEncoderBitRateKey: 128_000,
-                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-            ]
-            let recorder = try AVAudioRecorder(url: url, settings: settings)
-            recorder.prepareToRecord()
-            guard recorder.record() else { throw TimelineEditorError.voiceoverCouldNotStart }
+            refreshVoiceoverInputDevices()
+            let recorder = VoiceoverRecorder()
+            try await recorder.start(to: url, deviceID: selectedVoiceoverInputID)
 
             voiceoverRecorder = recorder
             voiceoverStartTime = playhead
@@ -339,32 +516,30 @@ final class TimelineEditorController: ObservableObject {
 
     private func stopVoiceover() {
         guard let recorder = voiceoverRecorder else { return }
-        let recordedDuration = recorder.currentTime
-        let url = recorder.url
-        recorder.stop()
         player.pause()
         voiceoverRecorder = nil
         isVoiceoverRecording = false
 
-        guard recordedDuration > 0.05 else {
-            try? FileManager.default.removeItem(at: url)
-            return
-        }
-
         Task {
             do {
-                let asset = AVURLAsset(url: url)
+                let recording = try await recorder.stop()
+                guard recording.duration > 0.05 else {
+                    try? FileManager.default.removeItem(at: recording.url)
+                    return
+                }
+
+                let asset = AVURLAsset(url: recording.url)
                 guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
                     throw TimelineEditorError.noMedia
                 }
                 guard var project else { throw TimelineEditorError.noProject }
                 let clip = TimelineClip(
-                    sourceURL: url,
+                    sourceURL: recording.url,
                     sourceTrackID: track.trackID,
                     sourceStart: 0,
                     timelineStart: voiceoverStartTime,
-                    duration: recordedDuration,
-                    name: "Voiceover",
+                    duration: recording.duration,
+                    name: "Voiceover · \(selectedVoiceoverInputName)",
                     linkedGroupID: nil
                 )
                 if let laneIndex = project.lanes.firstIndex(where: { $0.kind == .voiceover }) {
@@ -375,6 +550,7 @@ final class TimelineEditorController: ObservableObject {
                     )
                 }
                 project.modifiedAt = Date()
+                sourceDurations[recording.url] = recording.duration
                 self.project = project
                 selectedClipID = clip.id
                 try await rebuildComposition()
@@ -382,6 +558,111 @@ final class TimelineEditorController: ObservableObject {
             } catch {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    private func beginTimelineInteraction(
+        _ kind: TimelineInteractionKind,
+        anchorTime: TimeInterval
+    ) {
+        guard interactionKind == nil, let project else { return }
+        let id = kind.clipID
+        guard let clip = project.clip(id: id) else { return }
+
+        player.pause()
+        interactionOriginalProject = project
+        interactionOriginalClip = clip
+        interactionKind = kind
+        interactionAnchorTime = min(max(anchorTime, 0), clip.duration)
+        interactionSnapTime = playhead
+        interactionPreviewVideoID = previewVideoClipID(for: clip, in: project)
+        selectedClipID = id
+        selectedGapID = nil
+
+        if let previewID = interactionPreviewVideoID,
+           let videoClip = project.clip(id: previewID)
+        {
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVURLAsset(url: videoClip.sourceURL)))
+            updateInteractionPreview(in: project)
+        }
+    }
+
+    private func updateInteractionPreview(in project: TimelineProject) {
+        guard
+            let interactionKind,
+            let previewID = interactionPreviewVideoID,
+            let videoClip = project.clip(id: previewID)
+        else { return }
+
+        let sourceTime: TimeInterval
+        switch interactionKind {
+        case .move:
+            let localTime = min(interactionAnchorTime, max(0, videoClip.duration - 1 / 60))
+            playhead = videoClip.timelineStart + localTime
+            sourceTime = videoClip.sourceStart + localTime
+        case .trim(_, let edge):
+            switch edge {
+            case .leading:
+                playhead = videoClip.timelineStart
+                sourceTime = videoClip.sourceStart
+            case .trailing:
+                playhead = videoClip.timelineEnd
+                sourceTime = videoClip.sourceStart + max(0, videoClip.duration - 1 / 60)
+            }
+        }
+        player.seek(
+            to: CMTime(seconds: sourceTime, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+    }
+
+    private func finishTimelineInteraction() {
+        let changed = project != interactionOriginalProject
+        let usedSourcePreview = interactionPreviewVideoID != nil
+        interactionOriginalProject = nil
+        interactionOriginalClip = nil
+        interactionKind = nil
+        interactionPreviewVideoID = nil
+        interactionAnchorTime = 0
+        interactionSnapTime = 0
+
+        if changed || usedSourcePreview {
+            rebuildAndSave()
+        }
+    }
+
+    private func previewVideoClipID(
+        for selected: TimelineClip,
+        in project: TimelineProject
+    ) -> UUID? {
+        if project.lanes.contains(where: {
+            $0.kind == .video && $0.clips.contains(where: { $0.id == selected.id })
+        }) {
+            return selected.id
+        }
+        guard moveLinkedClips, let groupID = selected.linkedGroupID else { return nil }
+        let tolerance = 0.002
+        return project.lanes
+            .first(where: { $0.kind == .video })?
+            .clips
+            .first(where: {
+                $0.linkedGroupID == groupID
+                    && abs($0.sourceStart - selected.sourceStart) < tolerance
+                    && abs($0.timelineStart - selected.timelineStart) < tolerance
+                    && abs($0.duration - selected.duration) < tolerance
+            })?
+            .id
+    }
+}
+
+private enum TimelineInteractionKind: Equatable {
+    case move(UUID)
+    case trim(UUID, TimelineTrimEdge)
+
+    var clipID: UUID {
+        switch self {
+        case .move(let id), .trim(let id, _): id
         }
     }
 }

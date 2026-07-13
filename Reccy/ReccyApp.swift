@@ -25,10 +25,15 @@ struct ReccyApp: App {
                 }
                 .keyboardShortcut("2", modifiers: [.command, .shift])
 
+                Button("Choose Portion…") {
+                    coordinator.chooseSource(.region)
+                }
+                .keyboardShortcut("3", modifiers: [.command, .shift])
+
                 Button("Choose Window…") {
                     coordinator.chooseSource(.window)
                 }
-                .keyboardShortcut("3", modifiers: [.command, .shift])
+                .keyboardShortcut("4", modifiers: [.command, .shift])
 
                 Divider()
 
@@ -76,6 +81,9 @@ private struct MenuBarRecorderView: View {
             }
             Button("Record Application…") {
                 coordinator.chooseSource(.application)
+            }
+            Button("Record Portion…") {
+                coordinator.chooseSource(.region)
             }
             Button("Record Window…") {
                 coordinator.chooseSource(.window)

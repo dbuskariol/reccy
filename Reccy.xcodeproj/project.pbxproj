@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		0A1000000000000000000050 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0A1000000000000000000051 /* AVKit.framework */; };
+		0A1000000000000000000060 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000064 /* Sparkle */; };
+		0A1000000000000000000061 /* KeyboardShortcuts in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000065 /* KeyboardShortcuts */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		0A1000000000000000000020 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -19,6 +25,7 @@
 /* Begin PBXFileReference section */
 		0A1000000000000000000008 /* Reccy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Reccy.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0A1000000000000000000009 /* ReccyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ReccyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0A1000000000000000000051 /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = System/Library/Frameworks/AVKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -39,6 +46,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0A1000000000000000000050 /* AVKit.framework in Frameworks */,
+				0A1000000000000000000060 /* Sparkle in Frameworks */,
+				0A1000000000000000000061 /* KeyboardShortcuts in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -57,6 +67,7 @@
 			children = (
 				0A1000000000000000000006 /* Reccy */,
 				0A1000000000000000000007 /* ReccyTests */,
+				0A1000000000000000000052 /* Frameworks */,
 				0A1000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -68,6 +79,14 @@
 				0A1000000000000000000009 /* ReccyTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		0A1000000000000000000052 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				0A1000000000000000000051 /* AVKit.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -90,6 +109,8 @@
 			);
 			name = Reccy;
 			packageProductDependencies = (
+				0A1000000000000000000064 /* Sparkle */,
+				0A1000000000000000000065 /* KeyboardShortcuts */,
 			);
 			productName = Reccy;
 			productReference = 0A1000000000000000000008 /* Reccy.app */;
@@ -145,6 +166,10 @@
 				Base,
 			);
 			mainGroup = 0A1000000000000000000002;
+			packageReferences = (
+				0A1000000000000000000062 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				0A1000000000000000000063 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
+			);
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0A1000000000000000000003 /* Products */;
@@ -198,6 +223,38 @@
 			targetProxy = 0A1000000000000000000020 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		0A1000000000000000000062 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9.2;
+			};
+		};
+		0A1000000000000000000063 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sindresorhus/KeyboardShortcuts";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.4.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0A1000000000000000000064 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0A1000000000000000000062 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+		0A1000000000000000000065 /* KeyboardShortcuts */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0A1000000000000000000063 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */;
+			productName = KeyboardShortcuts;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		0A1000000000000000000040 /* Debug */ = {
@@ -317,7 +374,9 @@
 		0A1000000000000000000042 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Reccy/Reccy.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -329,7 +388,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Reccy;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Reccy records microphone audio when you enable it for a screen recording.";
-				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Reccy records the display, app, or window you choose.";
+				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Reccy records the display, portion, app, or window you choose.";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				INFOPLIST_KEY_NSSupportsAutomaticGraphicsSwitching = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -349,7 +408,10 @@
 		0A1000000000000000000043 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				CODE_SIGN_ENTITLEMENTS = Reccy/Reccy.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -361,7 +423,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Reccy;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Reccy records microphone audio when you enable it for a screen recording.";
-				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Reccy records the display, app, or window you choose.";
+				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Reccy records the display, portion, app, or window you choose.";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				INFOPLIST_KEY_NSSupportsAutomaticGraphicsSwitching = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
