@@ -531,6 +531,7 @@ struct SettingsView: View {
     private func shortcutDetail(_ shortcut: ReccyGlobalShortcut) -> String {
         switch shortcut {
         case .toggleRecording: "Starts with the current source, or stops the active recording."
+        case .toggleRecordingPause: "Pauses or resumes writing while keeping the live monitor available."
         case .chooseDisplay: "Open the native picker for an entire display."
         case .choosePortion: "Choose a display, then drag out the exact capture area."
         case .chooseApplication: "Open the native picker for all windows from one app."
@@ -542,6 +543,7 @@ struct SettingsView: View {
     private func shortcutSystemImage(_ shortcut: ReccyGlobalShortcut) -> String {
         switch shortcut {
         case .toggleRecording: "record.circle"
+        case .toggleRecordingPause: "pause.circle"
         case .chooseDisplay: "display"
         case .choosePortion: "viewfinder.rectangular"
         case .chooseApplication: "macwindow.on.rectangle"

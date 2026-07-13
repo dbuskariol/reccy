@@ -13,6 +13,7 @@ final class CaptureBoundaryController {
     private var target: CaptureBoundaryTarget?
     private var sourceName = "Selected source"
     private var isRecording = false
+    private var isPaused = false
     private var duration: TimeInterval = 0
     private var panels: [NSPanel] = []
     private var refreshTask: Task<Void, Never>?
@@ -22,6 +23,7 @@ final class CaptureBoundaryController {
         self.target = target
         self.sourceName = sourceName
         isRecording = false
+        isPaused = false
         duration = 0
         refreshTask = Task { [weak self] in
             guard let self else { return }
@@ -33,8 +35,13 @@ final class CaptureBoundaryController {
         }
     }
 
-    func setRecording(_ isRecording: Bool, duration: TimeInterval = 0) {
+    func setRecording(
+        _ isRecording: Bool,
+        isPaused: Bool = false,
+        duration: TimeInterval = 0
+    ) {
         self.isRecording = isRecording
+        self.isPaused = isPaused
         self.duration = duration
         updatePanelAppearance()
     }
@@ -160,6 +167,7 @@ final class CaptureBoundaryController {
             guard let view = panel.contentView as? CaptureBoundaryView else { continue }
             view.sourceName = sourceName
             view.isRecording = isRecording
+            view.isPaused = isPaused
             view.duration = duration
             view.needsDisplay = true
         }
@@ -178,6 +186,7 @@ private extension CaptureBoundaryTarget {
 private final class CaptureBoundaryView: NSView {
     var sourceName = "Selected source"
     var isRecording = false
+    var isPaused = false
     var duration: TimeInterval = 0
     var showsLabel = true
 
@@ -185,14 +194,23 @@ private final class CaptureBoundaryView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let color = isRecording ? NSColor.systemRed : NSColor.controlAccentColor
+        let color = isPaused
+            ? NSColor.systemOrange
+            : (isRecording ? NSColor.systemRed : NSColor.controlAccentColor)
         color.setStroke()
         let border = NSBezierPath(roundedRect: bounds.insetBy(dx: 3, dy: 3), xRadius: 8, yRadius: 8)
         border.lineWidth = 5
         border.stroke()
 
         guard showsLabel, bounds.width >= 90, bounds.height >= 38 else { return }
-        let status = isRecording ? "● REC \(formattedDuration)" : "SELECTED"
+        let status: String
+        if isPaused {
+            status = "Ⅱ PAUSED \(formattedDuration)"
+        } else if isRecording {
+            status = "● REC \(formattedDuration)"
+        } else {
+            status = "SELECTED"
+        }
         let text = "  \(status)  ·  \(sourceName)  "
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold),

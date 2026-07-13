@@ -16,10 +16,10 @@ struct LibraryView: View {
     var body: some View {
         Group {
             if library.recordings.isEmpty {
-                ContentUnavailableView(
+                WorkspaceEmptyState(
                     "No Recordings Yet",
                     systemImage: "rectangle.stack.badge.plus",
-                    description: Text("Your completed recordings will appear here.")
+                    description: "Your completed recordings will appear here."
                 )
             } else {
                 HSplitView {
@@ -244,7 +244,11 @@ struct LibraryView: View {
             }
             .background(Color(nsColor: .controlBackgroundColor))
         } else {
-            ContentUnavailableView("Select a Recording", systemImage: "play.rectangle")
+            WorkspaceEmptyState(
+                "Select a Recording",
+                systemImage: "play.rectangle",
+                description: "Choose a recording to preview its media and details."
+            )
         }
     }
 

@@ -21,14 +21,14 @@ struct EditorView: View {
             } else if let project = editor.project {
                 editorWorkspace(project)
             } else {
-                ContentUnavailableView(
+                WorkspaceEmptyState(
                     "Open a Recording",
                     systemImage: "timeline.selection",
-                    description: Text("Choose Edit in the Library to create a non-destructive project.")
+                    description: "Choose Edit in the Library to create a non-destructive project."
                 )
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Editor")
         .toolbar { editorToolbar }
         .onAppear { editor.refreshVoiceoverInputDevices() }
@@ -640,15 +640,32 @@ private struct TimelineClipView: View {
     @State private var trimmingEdge: TimelineTrimEdge?
 
     var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: lane.kind.systemImage)
-            Text(clip.name)
-                .lineLimit(1)
-            Spacer(minLength: 0)
+        ZStack(alignment: .leading) {
+            if lane.kind != .video {
+                ReccyAssetWaveform(
+                    sourceURL: clip.sourceURL,
+                    sourceTrackID: clip.sourceTrackID,
+                    sourceStart: clip.sourceStart,
+                    duration: clip.duration,
+                    color: .white
+                )
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .opacity(0.72)
+                .allowsHitTesting(false)
+            }
+
+            HStack(spacing: 7) {
+                Image(systemName: lane.kind.systemImage)
+                Text(clip.name)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 9)
+            .shadow(color: .black.opacity(lane.kind == .video ? 0 : 0.45), radius: 2)
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(.white)
-        .padding(.horizontal, 9)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(color.gradient)
         .overlay {

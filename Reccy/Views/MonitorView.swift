@@ -14,7 +14,7 @@ struct MonitorView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         header
-                        recordingStatusCard
+                        monitoringOverview
                         audioSection
                     }
                     .padding(28)
@@ -22,11 +22,11 @@ struct MonitorView: View {
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
             } else {
-                ContentUnavailableView {
-                    Label("No Active Recording", systemImage: "waveform.path.ecg.rectangle")
-                } description: {
-                    Text("Choose a source in Record, then start recording. Reccy opens this monitor automatically.")
-                }
+                WorkspaceEmptyState(
+                    "No Active Recording",
+                    systemImage: "waveform.path.ecg.rectangle",
+                    description: "Choose a source in Record, then start recording. Reccy opens this monitor automatically."
+                )
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -34,10 +34,20 @@ struct MonitorView: View {
         .toolbar {
             if coordinator.state.isRecording {
                 ToolbarItem {
-                    Button("Stop", systemImage: "stop.fill") {
-                        coordinator.stopRecording()
+                    HStack {
+                        Button(
+                            coordinator.state == .paused ? "Resume" : "Pause",
+                            systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill"
+                        ) {
+                            coordinator.toggleRecordingPause()
+                        }
+                        .disabled(coordinator.state != .recording && coordinator.state != .paused)
+
+                        Button("Stop", systemImage: "stop.fill") {
+                            coordinator.stopRecording()
+                        }
+                        .tint(.red)
                     }
-                    .tint(.red)
                 }
             }
         }
@@ -48,7 +58,7 @@ struct MonitorView: View {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 9) {
                     Circle()
-                        .fill(.red)
+                        .fill(coordinator.state == .paused ? .orange : .red)
                         .frame(width: 10, height: 10)
                         .shadow(color: .red.opacity(0.55), radius: 4)
                     Text(statusTitle)
@@ -64,30 +74,100 @@ struct MonitorView: View {
         }
     }
 
+    private var monitoringOverview: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 16) {
+                livePreview
+                    .frame(maxWidth: .infinity)
+                recordingStatusCard
+                    .frame(width: 260)
+            }
+
+            VStack(spacing: 16) {
+                livePreview
+                recordingStatusCard
+            }
+        }
+    }
+
+    private var livePreview: some View {
+        ZStack(alignment: .topLeading) {
+            CapturePreviewView(pipeline: coordinator.previewPipeline)
+                .background(.black)
+
+            LinearGradient(
+                colors: [.black.opacity(0.62), .clear],
+                startPoint: .top,
+                endPoint: .center
+            )
+            .allowsHitTesting(false)
+
+            HStack(spacing: 8) {
+                Label(
+                    coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title,
+                    systemImage: coordinator.selectedSourceKind.systemImage
+                )
+                .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 7, height: 7)
+                    Text(coordinator.state == .paused ? "PAUSED" : "LIVE")
+                }
+                .foregroundStyle(.white)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(10)
+        }
+        .aspectRatio(16 / 9, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.separator.opacity(0.55), lineWidth: 0.5)
+        }
+        .accessibilityLabel(
+            "Live preview of \(coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title)"
+        )
+    }
+
     private var recordingStatusCard: some View {
         CardContainer {
-            HStack(spacing: 24) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(primaryStatusValue)
-                        .font(.system(size: 52, weight: .semibold, design: .monospaced))
-                        .contentTransition(.numericText())
-
-                    HStack(spacing: 8) {
-                        metadataPill(
-                            coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title,
-                            systemImage: coordinator.selectedSourceKind.systemImage
-                        )
-                        metadataPill(coordinator.settings.resolution.title, systemImage: "rectangle.expand.vertical")
-                        metadataPill(coordinator.settings.frameRate.title, systemImage: "speedometer")
-                        metadataPill(coordinator.settings.recordingPreset.title, systemImage: "doc.badge.gearshape")
-                    }
-
-                    Text("\(coordinator.formattedFileSize) written · \(activeAudioDescription)")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label(statusTitle, systemImage: "record.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                    Spacer()
                 }
 
-                Spacer(minLength: 24)
+                Text(primaryStatusValue)
+                    .font(.system(size: 34, weight: .semibold, design: .monospaced))
+                    .contentTransition(.numericText())
+
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) {
+                        metadataPill(coordinator.settings.resolution.title, systemImage: "rectangle.expand.vertical")
+                        metadataPill(coordinator.settings.frameRate.title, systemImage: "speedometer")
+                    }
+                    VStack(alignment: .leading, spacing: 5) {
+                        metadataPill(coordinator.settings.resolution.title, systemImage: "rectangle.expand.vertical")
+                        metadataPill(coordinator.settings.frameRate.title, systemImage: "speedometer")
+                    }
+                }
+
+                Text("\(coordinator.formattedFileSize) written")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Text(activeAudioDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
 
                 Button {
                     coordinator.stopRecording()
@@ -96,11 +176,24 @@ struct MonitorView: View {
                         .frame(minWidth: 130)
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.large)
                 .tint(.red)
                 .disabled(coordinator.state == .stopping)
+                .frame(maxWidth: .infinity)
+
+                Button {
+                    coordinator.toggleRecordingPause()
+                } label: {
+                    Label(
+                        coordinator.state == .paused ? "Resume Recording" : "Pause Recording",
+                        systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill"
+                    )
+                    .frame(minWidth: 130)
+                }
+                .buttonStyle(.bordered)
+                .disabled(coordinator.state != .recording && coordinator.state != .paused)
+                .frame(maxWidth: .infinity)
             }
-            .frame(minHeight: 150)
+            .frame(maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -151,7 +244,7 @@ struct MonitorView: View {
                         .foregroundStyle(isEnabled ? AnyShapeStyle(color) : AnyShapeStyle(.secondary))
                 }
 
-                AudioWaveformView(samples: history, color: color, isEnabled: isEnabled)
+                ReccyLiveWaveform(samples: history, color: color, isEnabled: isEnabled)
                     .frame(height: 92)
 
                 GeometryReader { geometry in
@@ -184,6 +277,7 @@ struct MonitorView: View {
         case .countingDown: "Recording starts shortly"
         case .starting: "Starting capture"
         case .recording: "Recording in progress"
+        case .paused: "Recording paused"
         case .stopping: "Finishing recording"
         default: "Monitor"
         }
@@ -217,36 +311,5 @@ struct MonitorView: View {
         case (false, true): "Microphone is recording on its own track."
         case (false, false): "This recording has no audio tracks."
         }
-    }
-}
-
-private struct AudioWaveformView: View {
-    let samples: [Double]
-    let color: Color
-    let isEnabled: Bool
-
-    var body: some View {
-        Canvas { context, size in
-            let visibleSamples = samples.isEmpty ? Array(repeating: 0.0, count: 48) : samples
-            let spacing = size.width / CGFloat(max(visibleSamples.count, 1))
-            let barWidth = max(1.5, spacing * 0.48)
-
-            for (index, sample) in visibleSamples.enumerated() {
-                let amplitude = isEnabled ? min(max(sample, 0.015), 1) : 0.015
-                let height = max(2, amplitude * size.height * 0.9)
-                let rect = CGRect(
-                    x: CGFloat(index) * spacing,
-                    y: (size.height - height) / 2,
-                    width: barWidth,
-                    height: height
-                )
-                context.fill(
-                    Path(roundedRect: rect, cornerRadius: barWidth / 2),
-                    with: .color(isEnabled ? color.opacity(0.9) : Color.secondary.opacity(0.2))
-                )
-            }
-        }
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityLabel(isEnabled ? "Live audio waveform" : "Audio source off")
     }
 }

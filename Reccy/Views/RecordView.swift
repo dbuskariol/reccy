@@ -546,6 +546,17 @@ struct RecordView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .tint(.red)
+
+                    Button {
+                        coordinator.toggleRecordingPause()
+                    } label: {
+                        Label(
+                            coordinator.state == .paused ? "Resume Recording" : "Pause Recording",
+                            systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
                 }
             }
             .frame(maxWidth: .infinity, minHeight: 390)

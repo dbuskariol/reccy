@@ -122,10 +122,11 @@ final class TimelineEditorController: ObservableObject {
                 let data = try Data(contentsOf: savedProjectURL)
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
-                let savedProject = try decoder.decode(TimelineProject.self, from: data)
-                guard savedProject.formatVersion == TimelineProject.currentFormatVersion else {
+                let header = try decoder.decode(TimelineProjectHeader.self, from: data)
+                guard header.formatVersion == TimelineProject.currentFormatVersion else {
                     throw TimelineEditorError.projectFormatUnsupported
                 }
+                let savedProject = try decoder.decode(TimelineProject.self, from: data)
 
                 sourceDurations.removeAll(keepingCapacity: true)
                 for url in Set(savedProject.lanes.flatMap(\.clips).map(\.sourceURL)) {
@@ -654,6 +655,10 @@ final class TimelineEditorController: ObservableObject {
             })?
             .id
     }
+}
+
+private struct TimelineProjectHeader: Decodable {
+    let formatVersion: Int
 }
 
 private enum TimelineInteractionKind: Equatable {

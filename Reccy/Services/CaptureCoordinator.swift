@@ -13,12 +13,13 @@ enum CaptureState: Equatable, Sendable {
     case countingDown(Int)
     case starting
     case recording
+    case paused
     case stopping
     case failed(String)
 
     var isRecording: Bool {
         switch self {
-        case .countingDown, .starting, .recording, .stopping: true
+        case .countingDown, .starting, .recording, .paused, .stopping: true
         default: false
         }
     }
@@ -64,6 +65,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var microphoneAudioHistory: [Double] = []
 
     let library: RecordingLibrary
+    let previewPipeline = CapturePreviewPipeline()
 
     private var selectedFilter: SCContentFilter?
     private var selectedSourceRect: CGRect?
@@ -120,6 +122,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                     self.startRecording()
                 }
             }
+        }
+        KeyboardShortcuts.onKeyUp(for: .toggleRecordingPause) { [weak self] in
+            Task { @MainActor in self?.toggleRecordingPause() }
         }
         KeyboardShortcuts.onKeyUp(for: .chooseDisplay) { [weak self] in
             Task { @MainActor in self?.chooseSource(.display) }
@@ -266,6 +271,22 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
+    func toggleRecordingPause() {
+        guard let multitrackRecorder else { return }
+        switch state {
+        case .recording:
+            multitrackRecorder.pause()
+            state = .paused
+            boundaryController.setRecording(true, isPaused: true, duration: recordedDuration)
+        case .paused:
+            multitrackRecorder.resume()
+            state = .recording
+            boundaryController.setRecording(true, duration: recordedDuration)
+        default:
+            break
+        }
+    }
+
     func captureScreenshot() {
         guard let selectedFilter, state.canChangeSettings, !isCapturingScreenshot else {
             if selectedFilter == nil {
@@ -349,6 +370,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             microphoneAudioLevel = 0
             systemAudioHistory.removeAll(keepingCapacity: true)
             microphoneAudioHistory.removeAll(keepingCapacity: true)
+            previewPipeline.clear()
 
             let streamConfiguration = makeStreamConfiguration(for: filter)
             let outputURL = try makeOutputURL()
@@ -371,6 +393,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             }
             recorder.onFailure = { [weak self] error in
                 Task { @MainActor in self?.handleFailure(error) }
+            }
+            recorder.onVideoFrame = { [previewPipeline] sampleBuffer in
+                previewPipeline.enqueue(sampleBuffer)
             }
             multitrackRecorder = recorder
             activeOutputURL = outputURL
@@ -504,16 +529,20 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 microphoneAudioLevel = metrics.microphoneLevel
                 appendLevel(metrics.systemAudioLevel, to: &systemAudioHistory)
                 appendLevel(metrics.microphoneLevel, to: &microphoneAudioHistory)
-                boundaryController.setRecording(true, duration: metrics.duration)
-                try? await Task.sleep(for: .milliseconds(250))
+                boundaryController.setRecording(
+                    true,
+                    isPaused: state == .paused,
+                    duration: metrics.duration
+                )
+                try? await Task.sleep(for: .milliseconds(66))
             }
         }
     }
 
     private func appendLevel(_ level: Double, to history: inout [Double]) {
         history.append(min(max(level, 0), 1))
-        if history.count > 96 {
-            history.removeFirst(history.count - 96)
+        if history.count > 600 {
+            history.removeFirst(history.count - 600)
         }
     }
 
@@ -523,6 +552,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         multitrackRecorder = nil
         systemAudioLevel = 0
         microphoneAudioLevel = 0
+        previewPipeline.clear()
 
         if let activeOutputURL {
             if let activeRecordingManifest {
@@ -561,6 +591,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         boundaryController.setRecording(false)
         systemAudioLevel = 0
         microphoneAudioLevel = 0
+        previewPipeline.clear()
         state = .failed(error.localizedDescription)
     }
 

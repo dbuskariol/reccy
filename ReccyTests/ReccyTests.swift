@@ -233,6 +233,134 @@ struct ReccyTests {
         #expect(decoded.source.detail.contains("1280 × 720"))
     }
 
+    @Test func recordingPauseTimelineRemovesPausedWallClockTimeAcrossEveryTrack() throws {
+        var timeline = RecordingPauseTimeline()
+
+        let initialOffsetValue = timeline.offset(
+            for: CMTime(seconds: 1, preferredTimescale: 600),
+            isVideo: true
+        )
+        let initialOffset = try #require(initialOffsetValue)
+        #expect(initialOffset.seconds == 0)
+        timeline.pause(at: CMTime(seconds: 4, preferredTimescale: 600))
+        let pausedAudioOffset = timeline.offset(
+            for: CMTime(seconds: 7, preferredTimescale: 600),
+            isVideo: false
+        )
+        #expect(pausedAudioOffset == nil)
+
+        timeline.requestResume()
+        let earlyAudioOffset = timeline.offset(
+            for: CMTime(seconds: 9.9, preferredTimescale: 600),
+            isVideo: false
+        )
+        #expect(earlyAudioOffset == nil)
+        let videoOffsetValue = timeline.offset(
+            for: CMTime(seconds: 10, preferredTimescale: 600),
+            isVideo: true
+        )
+        let videoOffset = try #require(videoOffsetValue)
+        #expect(abs(videoOffset.seconds - 6) < 0.001)
+        let bufferedAudioOffset = timeline.offset(
+            for: CMTime(seconds: 9.99, preferredTimescale: 600),
+            isVideo: false
+        )
+        #expect(bufferedAudioOffset == nil)
+
+        let audioOffsetValue = timeline.offset(
+            for: CMTime(seconds: 10.02, preferredTimescale: 600),
+            isVideo: false
+        )
+        let audioOffset = try #require(audioOffsetValue)
+        #expect(audioOffset == videoOffset)
+        #expect(abs(CMTimeSubtract(CMTime(seconds: 10.02, preferredTimescale: 600), audioOffset).seconds - 4.02) < 0.001)
+    }
+
+    @Test func waveformRepositoryUsesTheExactTrimmedSourceRange() async throws {
+        let sourceURL = try makeWaveformTestAudio { frame, sampleRate in
+            let time = Double(frame) / sampleRate
+            guard time >= 1 else { return 0 }
+            return Float(sin(2 * Double.pi * 440 * time) * 0.8)
+        }
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        let asset = AVURLAsset(url: sourceURL)
+        let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let quiet = try await WaveformRepository.shared.samples(for: WaveformSliceRequest(
+            sourceURL: sourceURL,
+            sourceTrackID: track.trackID,
+            sourceStart: 0.1,
+            duration: 0.7,
+            sampleCount: 180
+        ))
+        let tone = try await WaveformRepository.shared.samples(for: WaveformSliceRequest(
+            sourceURL: sourceURL,
+            sourceTrackID: track.trackID,
+            sourceStart: 1.15,
+            duration: 0.7,
+            sampleCount: 180
+        ))
+
+        #expect(quiet.count == 180)
+        #expect(tone.count == 180)
+        #expect(mean(quiet) > 0.9)
+        #expect(mean(tone) < 0.35)
+    }
+
+    @Test func waveformRepositoryKeepsContainerAudioTracksIndependent() async throws {
+        let loudURL = try makeWaveformTestAudio { frame, sampleRate in
+            Float(sin(2 * Double.pi * 220 * Double(frame) / sampleRate) * 0.85)
+        }
+        let quietURL = try makeWaveformTestAudio { frame, sampleRate in
+            Float(sin(2 * Double.pi * 660 * Double(frame) / sampleRate) * 0.015)
+        }
+        let containerURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Multitrack Waveform \(UUID().uuidString)")
+            .appendingPathExtension("mov")
+        defer {
+            try? FileManager.default.removeItem(at: loudURL)
+            try? FileManager.default.removeItem(at: quietURL)
+            try? FileManager.default.removeItem(at: containerURL)
+        }
+
+        let composition = AVMutableComposition()
+        for sourceURL in [loudURL, quietURL] {
+            let sourceAsset = AVURLAsset(url: sourceURL)
+            let sourceTrack = try #require(try await sourceAsset.loadTracks(withMediaType: .audio).first)
+            let sourceRange = try await sourceTrack.load(.timeRange)
+            let targetTrack = try #require(composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ))
+            try targetTrack.insertTimeRange(sourceRange, of: sourceTrack, at: .zero)
+        }
+        let exporter = try #require(AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetPassthrough
+        ))
+        try await exporter.export(to: containerURL, as: .mov)
+
+        let exportedAsset = AVURLAsset(url: containerURL)
+        let tracks = try await exportedAsset.loadTracks(withMediaType: .audio)
+        #expect(tracks.count == 2)
+        let first = try await WaveformRepository.shared.samples(for: WaveformSliceRequest(
+            sourceURL: containerURL,
+            sourceTrackID: tracks[0].trackID,
+            sourceStart: 0,
+            duration: 1,
+            sampleCount: 180
+        ))
+        let second = try await WaveformRepository.shared.samples(for: WaveformSliceRequest(
+            sourceURL: containerURL,
+            sourceTrackID: tracks[1].trackID,
+            sourceStart: 0,
+            duration: 1,
+            sampleCount: 180
+        ))
+
+        #expect(abs(mean(first) - mean(second)) > 0.35)
+    }
+
     @Test func eachNewVideoGapIsAnIndependentBlackSegment() {
         var project = makeProject()
         project.splitClip(id: project.lanes[0].clips[0].id, at: 4)
@@ -430,6 +558,38 @@ struct ReccyTests {
         return url
     }
 
+    private func makeWaveformTestAudio(
+        sample: (_ frame: Int, _ sampleRate: Double) -> Float
+    ) throws -> URL {
+        let sampleRate = 48_000.0
+        let frameCount = Int(sampleRate * 2)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Waveform Test \(UUID().uuidString)")
+            .appendingPathExtension("caf")
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: sampleRate,
+            channels: 1
+        ))
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(frameCount)
+        ))
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        let channel = try #require(buffer.floatChannelData?[0])
+        for frame in 0..<frameCount {
+            channel[frame] = sample(frame, sampleRate)
+        }
+
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        try file.write(from: buffer)
+        return url
+    }
+
+    private func mean(_ values: [Float]) -> Float {
+        guard !values.isEmpty else { return 0 }
+        return values.reduce(0, +) / Float(values.count)
+    }
+
     private func makePixelBuffer(color: RGBAColor) throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
@@ -474,11 +634,17 @@ struct ReccyTests {
         generator.videoComposition = videoComposition
         generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .zero
-        var actualTime = CMTime.zero
-        let image = try generator.copyCGImage(
-            at: CMTime(seconds: seconds, preferredTimescale: 600),
-            actualTime: &actualTime
-        )
+        let requestedTime = CMTime(seconds: seconds, preferredTimescale: 600)
+        let image = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<CGImage, Error>) in
+            generator.generateCGImageAsynchronously(for: requestedTime) { image, _, error in
+                if let image {
+                    continuation.resume(returning: image)
+                } else {
+                    continuation.resume(throwing: error ?? TestMediaError.writerFailed)
+                }
+            }
+        }
         let context = CIContext(options: [.cacheIntermediates: false])
         var pixel = [UInt8](repeating: 0, count: 4)
         context.render(

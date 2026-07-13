@@ -33,6 +33,7 @@ enum MultitrackRecorderError: LocalizedError {
     case writerCouldNotStart(Error?)
     case writerFailed(Error?)
     case noVideoFrames
+    case couldNotRetimeSample
 
     var errorDescription: String? {
         switch self {
@@ -42,13 +43,65 @@ enum MultitrackRecorderError: LocalizedError {
         case let .writerCouldNotStart(error): error?.localizedDescription ?? "The recording file couldn’t be started."
         case let .writerFailed(error): error?.localizedDescription ?? "The recording file couldn’t be finished."
         case .noVideoFrames: "No complete video frames were received from the selected source."
+        case .couldNotRetimeSample: "The recorder couldn’t close the paused section of the media timeline."
         }
+    }
+}
+
+/// Maps the capture clock onto a continuous media clock while recording is
+/// paused. Resuming is anchored by the next video frame so every audio lane
+/// uses the same cut point and no silent or frozen wall-clock gap is written.
+nonisolated struct RecordingPauseTimeline: Sendable {
+    private(set) var cumulativeOffset = CMTime.zero
+    private(set) var isPaused = false
+    private var pausedAt: CMTime?
+    private var resumeRequested = false
+    private var resumeFloor: CMTime?
+
+    mutating func pause(at sourceTime: CMTime) {
+        guard sourceTime.isValid, !isPaused else { return }
+        pausedAt = sourceTime
+        resumeRequested = false
+        isPaused = true
+    }
+
+    mutating func requestResume() {
+        guard isPaused else { return }
+        resumeRequested = true
+    }
+
+    /// Returns the source-time offset to remove, or `nil` when the sample must
+    /// remain monitoring-only and must not reach the asset writer.
+    mutating func offset(for sourceTime: CMTime, isVideo: Bool) -> CMTime? {
+        guard sourceTime.isValid else { return nil }
+
+        if isPaused {
+            guard resumeRequested, isVideo, let pausedAt else { return nil }
+            let pausedDuration = CMTimeSubtract(sourceTime, pausedAt)
+            if pausedDuration.isValid, CMTimeCompare(pausedDuration, .zero) > 0 {
+                cumulativeOffset = CMTimeAdd(cumulativeOffset, pausedDuration)
+            }
+            resumeFloor = sourceTime
+            self.pausedAt = nil
+            resumeRequested = false
+            isPaused = false
+        }
+
+        if let resumeFloor, CMTimeCompare(sourceTime, resumeFloor) < 0 {
+            return nil
+        }
+        return cumulativeOffset
+    }
+
+    mutating func reset() {
+        self = RecordingPauseTimeline()
     }
 }
 
 nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     var onStarted: (@Sendable () -> Void)?
     var onFailure: (@Sendable (Error) -> Void)?
+    var onVideoFrame: (@Sendable (CMSampleBuffer) -> Void)?
 
     private let sampleQueue = DispatchQueue(
         label: "com.reccy.capture.samples",
@@ -64,6 +117,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     private var pendingMicrophone: [CMSampleBuffer] = []
     private var sessionStartTime: CMTime?
     private var latestPresentationTime: CMTime = .invalid
+    private var latestSourcePresentationTime: CMTime = .invalid
+    private var pauseTimeline = RecordingPauseTimeline()
     private var outputURL: URL?
     private var hasNotifiedFailure = false
     private var systemAudioLevel: Double = 0
@@ -116,6 +171,18 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         try await stream.stopCapture()
         self.stream = nil
         try await finishWriting()
+    }
+
+    func pause() {
+        sampleQueue.sync {
+            pauseTimeline.pause(at: latestSourcePresentationTime)
+        }
+    }
+
+    func resume() {
+        sampleQueue.sync {
+            pauseTimeline.requestResume()
+        }
     }
 
     func cancel() async {
@@ -187,6 +254,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         pendingMicrophone.removeAll(keepingCapacity: true)
         sessionStartTime = nil
         latestPresentationTime = .invalid
+        latestSourcePresentationTime = .invalid
+        pauseTimeline.reset()
         hasNotifiedFailure = false
         systemAudioLevel = 0
         microphoneAudioLevel = 0
@@ -242,33 +311,59 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         let presentationTime = sampleBuffer.presentationTimeStamp
         guard presentationTime.isValid else { return }
 
+        if latestSourcePresentationTime.isValid {
+            if CMTimeCompare(presentationTime, latestSourcePresentationTime) > 0 {
+                latestSourcePresentationTime = presentationTime
+            }
+        } else {
+            latestSourcePresentationTime = presentationTime
+        }
+
         switch type {
         case .screen:
             guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil else { return }
-            startSessionIfNeeded(at: presentationTime)
-            append(sampleBuffer, to: videoInput)
+            onVideoFrame?(sampleBuffer)
         case .audio:
             systemAudioLevel = Self.smoothedLevel(
                 current: systemAudioLevel,
                 sample: Self.normalizedAudioLevel(from: sampleBuffer)
             )
-            handleAudio(sampleBuffer, pending: &pendingSystemAudio, input: systemAudioInput)
         case .microphone:
             microphoneAudioLevel = Self.smoothedLevel(
                 current: microphoneAudioLevel,
                 sample: Self.normalizedAudioLevel(from: sampleBuffer)
             )
-            handleAudio(sampleBuffer, pending: &pendingMicrophone, input: microphoneInput)
         @unknown default:
-            break
+            return
+        }
+
+        guard let offset = pauseTimeline.offset(for: presentationTime, isVideo: type == .screen) else {
+            return
+        }
+        guard let writerBuffer = Self.retimed(sampleBuffer, subtracting: offset) else {
+            notifyFailure(MultitrackRecorderError.couldNotRetimeSample)
+            return
+        }
+        let writerPresentationTime = writerBuffer.presentationTimeStamp
+
+        switch type {
+        case .screen:
+            startSessionIfNeeded(at: writerPresentationTime)
+            append(writerBuffer, to: videoInput)
+        case .audio:
+            handleAudio(writerBuffer, pending: &pendingSystemAudio, input: systemAudioInput)
+        case .microphone:
+            handleAudio(writerBuffer, pending: &pendingMicrophone, input: microphoneInput)
+        @unknown default:
+            return
         }
 
         if latestPresentationTime.isValid {
-            if CMTimeCompare(presentationTime, latestPresentationTime) > 0 {
-                latestPresentationTime = presentationTime
+            if CMTimeCompare(writerPresentationTime, latestPresentationTime) > 0 {
+                latestPresentationTime = writerPresentationTime
             }
         } else {
-            latestPresentationTime = presentationTime
+            latestPresentationTime = writerPresentationTime
         }
 
         if writer?.status == .failed {
@@ -322,6 +417,54 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         if !input.append(sampleBuffer), writer?.status == .failed {
             notifyFailure(MultitrackRecorderError.writerFailed(writer?.error))
         }
+    }
+
+    private static func retimed(
+        _ sampleBuffer: CMSampleBuffer,
+        subtracting offset: CMTime
+    ) -> CMSampleBuffer? {
+        guard offset.isValid, CMTimeCompare(offset, .zero) > 0 else { return sampleBuffer }
+
+        var timingCount = 0
+        guard CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: 0,
+            arrayToFill: nil,
+            entriesNeededOut: &timingCount
+        ) == noErr, timingCount > 0 else { return nil }
+
+        var timing = Array(repeating: CMSampleTimingInfo(), count: timingCount)
+        guard CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: timingCount,
+            arrayToFill: &timing,
+            entriesNeededOut: &timingCount
+        ) == noErr else { return nil }
+
+        for index in timing.indices {
+            if timing[index].presentationTimeStamp.isValid {
+                timing[index].presentationTimeStamp = CMTimeSubtract(
+                    timing[index].presentationTimeStamp,
+                    offset
+                )
+            }
+            if timing[index].decodeTimeStamp.isValid {
+                timing[index].decodeTimeStamp = CMTimeSubtract(
+                    timing[index].decodeTimeStamp,
+                    offset
+                )
+            }
+        }
+
+        var result: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: sampleBuffer,
+            sampleTimingEntryCount: timing.count,
+            sampleTimingArray: &timing,
+            sampleBufferOut: &result
+        )
+        return status == noErr ? result : nil
     }
 
     private static func smoothedLevel(current: Double, sample: Double) -> Double {
@@ -433,6 +576,9 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         pendingSystemAudio.removeAll()
         pendingMicrophone.removeAll()
         sessionStartTime = nil
+        latestPresentationTime = .invalid
+        latestSourcePresentationTime = .invalid
+        pauseTimeline.reset()
         systemAudioLevel = 0
         microphoneAudioLevel = 0
         if !keepOutputURL {

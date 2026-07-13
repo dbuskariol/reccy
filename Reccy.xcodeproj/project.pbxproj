@@ -10,6 +10,8 @@
 		0A1000000000000000000050 /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0A1000000000000000000051 /* AVKit.framework */; };
 		0A1000000000000000000060 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000064 /* Sparkle */; };
 		0A1000000000000000000061 /* KeyboardShortcuts in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000065 /* KeyboardShortcuts */; };
+		0A1000000000000000000069 /* DSWaveformImage in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000067 /* DSWaveformImage */; };
+		0A1000000000000000000070 /* DSWaveformImageViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000068 /* DSWaveformImageViews */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -49,6 +51,8 @@
 				0A1000000000000000000050 /* AVKit.framework in Frameworks */,
 				0A1000000000000000000060 /* Sparkle in Frameworks */,
 				0A1000000000000000000061 /* KeyboardShortcuts in Frameworks */,
+				0A1000000000000000000069 /* DSWaveformImage in Frameworks */,
+				0A1000000000000000000070 /* DSWaveformImageViews in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -111,6 +115,8 @@
 			packageProductDependencies = (
 				0A1000000000000000000064 /* Sparkle */,
 				0A1000000000000000000065 /* KeyboardShortcuts */,
+				0A1000000000000000000067 /* DSWaveformImage */,
+				0A1000000000000000000068 /* DSWaveformImageViews */,
 			);
 			productName = Reccy;
 			productReference = 0A1000000000000000000008 /* Reccy.app */;
@@ -169,6 +175,7 @@
 			packageReferences = (
 				0A1000000000000000000062 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				0A1000000000000000000063 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
+				0A1000000000000000000066 /* XCRemoteSwiftPackageReference "DSWaveformImage" */,
 			);
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
@@ -241,6 +248,14 @@
 				minimumVersion = 2.4.0;
 			};
 		};
+		0A1000000000000000000066 /* XCRemoteSwiftPackageReference "DSWaveformImage" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/dmrschmidt/DSWaveformImage";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 14.5.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -253,6 +268,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 0A1000000000000000000063 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */;
 			productName = KeyboardShortcuts;
+		};
+		0A1000000000000000000067 /* DSWaveformImage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0A1000000000000000000066 /* XCRemoteSwiftPackageReference "DSWaveformImage" */;
+			productName = DSWaveformImage;
+		};
+		0A1000000000000000000068 /* DSWaveformImageViews */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0A1000000000000000000066 /* XCRemoteSwiftPackageReference "DSWaveformImage" */;
+			productName = DSWaveformImageViews;
 		};
 /* End XCSwiftPackageProductDependency section */
 

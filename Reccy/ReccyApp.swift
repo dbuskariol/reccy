@@ -9,7 +9,7 @@ struct ReccyApp: App {
     @StateObject private var softwareUpdates = SoftwareUpdateController()
 
     var body: some Scene {
-        WindowGroup {
+        Window("Reccy", id: "main") {
             RootView()
                 .environmentObject(coordinator)
                 .environmentObject(editor)
@@ -51,17 +51,31 @@ struct ReccyApp: App {
                     }
                 }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
+
+                Button(coordinator.state == .paused ? "Resume Recording" : "Pause Recording") {
+                    coordinator.toggleRecordingPause()
+                }
+                .disabled(coordinator.state != .recording && coordinator.state != .paused)
+                .keyboardShortcut("p", modifiers: [.command, .shift])
             }
         }
 
         MenuBarExtra(isInserted: menuBarExtraInsertion) {
             MenuBarRecorderView()
                 .environmentObject(coordinator)
+                .environmentObject(editor)
                 .environmentObject(navigation)
                 .environmentObject(softwareUpdates)
         } label: {
-            Label("Reccy", systemImage: coordinator.state.isRecording ? "record.circle.fill" : "record.circle")
+            if coordinator.state == .paused {
+                Label(coordinator.formattedDuration, systemImage: "pause.circle.fill")
+            } else if coordinator.state.isRecording {
+                Label(coordinator.formattedDuration, systemImage: "record.circle.fill")
+            } else {
+                Label("Reccy", systemImage: "record.circle")
+            }
         }
+        .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView()
@@ -81,38 +95,5 @@ struct ReccyApp: App {
                 preferences.showMenuBarExtra = isInserted
             }
         )
-    }
-}
-
-private struct MenuBarRecorderView: View {
-    @EnvironmentObject private var coordinator: CaptureCoordinator
-
-    var body: some View {
-        if coordinator.state.isRecording {
-            Text(coordinator.formattedDuration)
-            Text(coordinator.formattedFileSize)
-            Divider()
-            Button("Stop Recording") {
-                coordinator.stopRecording()
-            }
-            .keyboardShortcut("r", modifiers: [.command, .shift])
-        } else {
-            Button("Record Display…") {
-                coordinator.chooseSource(.display)
-            }
-            Button("Record Application…") {
-                coordinator.chooseSource(.application)
-            }
-            Button("Record Portion…") {
-                coordinator.chooseSource(.region)
-            }
-            Button("Record Window…") {
-                coordinator.chooseSource(.window)
-            }
-            Divider()
-            Button("Open Recordings Folder") {
-                coordinator.library.revealDirectory()
-            }
-        }
     }
 }

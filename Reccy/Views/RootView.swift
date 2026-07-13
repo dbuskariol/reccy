@@ -9,42 +9,22 @@ struct RootView: View {
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
-                List(primarySections, selection: $navigation.section) { section in
-                    HStack {
-                        Label(section.title, systemImage: section.systemImage)
-                        Spacer()
-                        if section == .monitor, coordinator.state.isRecording {
-                            Circle()
-                                .fill(.red)
-                                .frame(width: 7, height: 7)
-                                .shadow(color: .red.opacity(0.55), radius: 3)
-                                .accessibilityLabel("Recording in progress")
-                        }
+                VStack(spacing: 3) {
+                    ForEach(primarySections) { section in
+                        sidebarButton(section)
                     }
-                    .tag(section)
                 }
-                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 9)
+                .padding(.top, 8)
+
+                Spacer(minLength: 12)
 
                 Divider()
-
-                Button {
-                    navigation.section = .settings
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 10)
-                        .frame(height: 32)
-                        .background(
-                            navigation.section == .settings ? Color.accentColor.opacity(0.18) : .clear,
-                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        )
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 9)
-                .accessibilityAddTraits(navigation.section == .settings ? .isSelected : [])
+                sidebarButton(.settings)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 9)
             }
-            .navigationTitle("Reccy")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationSplitViewColumnWidth(min: 180, ideal: 210)
         } detail: {
             switch navigation.section {
@@ -63,6 +43,7 @@ struct RootView: View {
                 SettingsView()
             }
         }
+        .navigationSplitViewStyle(.balanced)
         .onChange(of: coordinator.state) { oldState, newState in
             if newState.isRecording, !oldState.isRecording {
                 navigation.section = .monitor
@@ -74,6 +55,44 @@ struct RootView: View {
 
     private var primarySections: [AppSection] {
         AppSection.allCases.filter { $0 != .settings }
+    }
+
+    private func sidebarButton(_ section: AppSection) -> some View {
+        let isSelected = navigation.section == section
+        return Button {
+            navigation.section = section
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: section.systemImage)
+                    .frame(width: 17)
+                Text(section.title)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if section == .monitor, coordinator.state.isRecording {
+                    Circle()
+                        .fill(coordinator.state == .paused ? .orange : .red)
+                        .frame(width: 7, height: 7)
+                        .shadow(
+                            color: (coordinator.state == .paused ? Color.orange : Color.red).opacity(0.55),
+                            radius: 3
+                        )
+                        .accessibilityLabel(
+                            coordinator.state == .paused ? "Recording paused" : "Recording in progress"
+                        )
+                }
+            }
+            .font(.body)
+            .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+            .background(
+                isSelected ? Color.accentColor : .clear,
+                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private func handleRecordingCompletion(_ state: CaptureState) {
