@@ -26,12 +26,14 @@ struct LibraryView: View {
                     description: "Your completed recordings will appear here."
                 )
             } else {
-                HSplitView {
+                HStack(spacing: 0) {
                     recordingBrowser
-                        .frame(minWidth: 280, idealWidth: 320, maxWidth: 380)
+                        .frame(width: 360)
+
+                    Divider()
 
                     previewPane
-                        .frame(minWidth: 390)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
@@ -92,12 +94,46 @@ struct LibraryView: View {
     }
 
     private var recordingBrowser: some View {
-        List(library.recordings, selection: $selectedID) { item in
-            recordingRow(item)
-                .tag(item.id)
-                .listRowInsets(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
+        ScrollView {
+            LazyVStack(spacing: 5) {
+                ForEach(library.recordings) { item in
+                    recordingBrowserRow(item)
+                }
+            }
+            .padding(10)
         }
-        .listStyle(.sidebar)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func recordingBrowserRow(_ item: RecordingItem) -> some View {
+        let isSelected = selectedID == item.id
+        return Button {
+            load(item, autoplay: false)
+        } label: {
+            recordingRow(item)
+                .padding(8)
+                .background(
+                    isSelected ? Color.accentColor.opacity(0.18) : .clear,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.accentColor.opacity(0.55), lineWidth: 1)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .onTapGesture(count: 2) { load(item, autoplay: true) }
+        .contextMenu {
+            Button("Play") { load(item, autoplay: true) }
+            Button("Edit") { onEdit(item) }
+            Button("Export As…") { exportItem = item }
+            Button("Show in Finder") { library.reveal(item) }
+            Divider()
+            Button("Move to Trash", role: .destructive) { pendingDelete = item }
+        }
     }
 
     private func recordingRow(_ item: RecordingItem) -> some View {
@@ -126,15 +162,6 @@ struct LibraryView: View {
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { load(item, autoplay: true) }
-        .contextMenu {
-            Button("Play") { load(item, autoplay: true) }
-            Button("Edit") { onEdit(item) }
-            Button("Export As…") { exportItem = item }
-            Button("Show in Finder") { library.reveal(item) }
-            Divider()
-            Button("Move to Trash", role: .destructive) { pendingDelete = item }
-        }
     }
 
     private func recordingThumbnail(_ item: RecordingItem) -> some View {

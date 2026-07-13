@@ -13,22 +13,24 @@ struct RootView: View {
         NavigationStack {
             HStack(spacing: 0) {
                 if isSidebarVisible {
-                    sidebar
+                    AppSidebar(
+                        selection: $navigation.section,
+                        captureState: coordinator.state
+                    )
                         .frame(width: sidebarWidth)
-                        .transition(.move(edge: .leading).combined(with: .opacity))
+                        .zIndex(1)
 
                     Divider()
                 }
 
                 detail
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
             }
             .toolbar {
                 ToolbarItem(placement: .navigation) {
                     Button {
-                        withAnimation(.snappy(duration: 0.2)) {
-                            isSidebarVisible.toggle()
-                        }
+                        isSidebarVisible.toggle()
                     } label: {
                         Image(systemName: "sidebar.left")
                     }
@@ -44,27 +46,6 @@ struct RootView: View {
                 handleRecordingCompletion(newState)
             }
         }
-    }
-
-    private var sidebar: some View {
-        VStack(spacing: 0) {
-            VStack(spacing: 3) {
-                ForEach(primarySections) { section in
-                    sidebarButton(section)
-                }
-            }
-            .padding(.horizontal, 9)
-            .padding(.top, 8)
-
-            Spacer(minLength: 12)
-
-            Divider()
-            sidebarButton(.settings)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 9)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.ultraThinMaterial)
     }
 
     @ViewBuilder
@@ -84,48 +65,6 @@ struct RootView: View {
         case .settings:
             SettingsView()
         }
-    }
-
-    private var primarySections: [AppSection] {
-        AppSection.allCases.filter { $0 != .settings }
-    }
-
-    private func sidebarButton(_ section: AppSection) -> some View {
-        let isSelected = navigation.section == section
-        return Button {
-            navigation.section = section
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: section.systemImage)
-                    .frame(width: 17)
-                Text(section.title)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                if section == .monitor, coordinator.state.isRecording {
-                    Circle()
-                        .fill(coordinator.state == .paused ? .orange : .red)
-                        .frame(width: 7, height: 7)
-                        .shadow(
-                            color: (coordinator.state == .paused ? Color.orange : Color.red).opacity(0.55),
-                            radius: 3
-                        )
-                        .accessibilityLabel(
-                            coordinator.state == .paused ? "Recording paused" : "Recording in progress"
-                        )
-                }
-            }
-            .font(.body)
-            .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
-            .background(
-                isSelected ? Color.accentColor : .clear,
-                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private func handleRecordingCompletion(_ state: CaptureState) {
@@ -151,5 +90,76 @@ struct RootView: View {
             navigation.section = .editor
             Task { await editor.open(item) }
         }
+    }
+}
+
+private struct AppSidebar: View {
+    @Binding var selection: AppSection
+    let captureState: CaptureState
+
+    private var primarySections: [AppSection] {
+        AppSection.allCases.filter { $0 != .settings }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 3) {
+                ForEach(primarySections) { section in
+                    sidebarButton(section)
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.top, 8)
+
+            Spacer(minLength: 12)
+
+            Divider()
+            sidebarButton(.settings)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 9)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            Color(nsColor: .windowBackgroundColor)
+            Color.primary.opacity(0.025)
+        }
+    }
+
+    private func sidebarButton(_ section: AppSection) -> some View {
+        let isSelected = selection == section
+        return Button {
+            selection = section
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: section.systemImage)
+                    .frame(width: 17)
+                Text(section.title)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if section == .monitor, captureState.isRecording {
+                    Circle()
+                        .fill(captureState == .paused ? .orange : .red)
+                        .frame(width: 7, height: 7)
+                        .shadow(
+                            color: (captureState == .paused ? Color.orange : Color.red).opacity(0.55),
+                            radius: 3
+                        )
+                        .accessibilityLabel(
+                            captureState == .paused ? "Recording paused" : "Recording in progress"
+                        )
+                }
+            }
+            .font(.body)
+            .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+            .background(
+                isSelected ? Color.accentColor : .clear,
+                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
