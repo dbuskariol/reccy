@@ -173,6 +173,15 @@ struct ReccyApp: App {
         } else if CommandLine.arguments.contains("-ReccyLibraryQA") {
             coordinator.library.refresh()
             navigation.section = .library
+        } else if CommandLine.arguments.contains("-ReccyRecoveryQA") {
+            coordinator.library.refresh()
+            coordinator.library.presentNotice(
+                kind: .recovered,
+                title: "Interrupted recording recovered",
+                message: "Reccy validated and restored Reccy Recovery Test.",
+                fileURL: coordinator.library.recordings.first?.url
+            )
+            navigation.section = .library
         } else if CommandLine.arguments.contains("-ReccyEditorQA") {
             coordinator.library.refresh()
             guard let recording = coordinator.library.recordings.first else {

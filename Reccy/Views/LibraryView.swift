@@ -18,24 +18,32 @@ struct LibraryView: View {
     private let playbackTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        Group {
-            if library.recordings.isEmpty {
-                WorkspaceEmptyState(
-                    "No Recordings Yet",
-                    systemImage: "rectangle.stack.badge.plus",
-                    description: "Your completed recordings will appear here."
-                )
-            } else {
-                HStack(spacing: 0) {
-                    recordingBrowser
-                        .frame(width: 360)
+        VStack(spacing: 0) {
+            if let notice = library.recoveryNotice {
+                recoveryBanner(notice)
+                Divider()
+            }
 
-                    Divider()
+            Group {
+                if library.recordings.isEmpty {
+                    WorkspaceEmptyState(
+                        "No Recordings Yet",
+                        systemImage: "rectangle.stack.badge.plus",
+                        description: "Your completed recordings will appear here."
+                    )
+                } else {
+                    HStack(spacing: 0) {
+                        recordingBrowser
+                            .frame(width: 360)
 
-                    previewPane
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Divider()
+
+                        previewPane
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("Library")
         .toolbar {
@@ -90,6 +98,56 @@ struct LibraryView: View {
         .onDisappear {
             player.pause()
             isPreviewPlaying = false
+        }
+    }
+
+    private func recoveryBanner(_ notice: RecordingRecoveryNotice) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: recoverySymbol(for: notice.kind))
+                .font(.title3)
+                .foregroundStyle(recoveryColor(for: notice.kind))
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(notice.title)
+                    .font(.headline)
+                Text(notice.message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if notice.fileURL != nil {
+                Button("Show in Finder") { library.revealRecoveryItem() }
+            }
+            Button {
+                library.dismissRecoveryNotice()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .reccyTooltip("Dismiss")
+            .accessibilityLabel("Dismiss recovery notice")
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(recoveryColor(for: notice.kind).opacity(0.08))
+    }
+
+    private func recoverySymbol(for kind: RecordingRecoveryNotice.Kind) -> String {
+        switch kind {
+        case .recovered: "checkmark.circle.fill"
+        case .warning: "exclamationmark.triangle.fill"
+        case .information: "info.circle.fill"
+        }
+    }
+
+    private func recoveryColor(for kind: RecordingRecoveryNotice.Kind) -> Color {
+        switch kind {
+        case .recovered: .green
+        case .warning: .orange
+        case .information: .blue
         }
     }
 

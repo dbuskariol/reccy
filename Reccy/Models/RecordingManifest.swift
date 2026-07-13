@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-struct CaptureRegion: Codable, Hashable, Sendable {
+nonisolated struct CaptureRegion: Codable, Hashable, Sendable {
     var x: Double
     var y: Double
     var width: Double
@@ -19,7 +19,7 @@ struct CaptureRegion: Codable, Hashable, Sendable {
     }
 }
 
-struct CaptureSourceDescriptor: Codable, Hashable, Sendable {
+nonisolated struct CaptureSourceDescriptor: Codable, Hashable, Sendable {
     var kind: CaptureSourceKind
     var name: String
     var applicationName: String?
@@ -48,7 +48,7 @@ struct CaptureSourceDescriptor: Codable, Hashable, Sendable {
     }
 }
 
-struct RecordingManifest: Codable, Hashable, Sendable {
+nonisolated struct RecordingManifest: Codable, Hashable, Sendable {
     static let currentVersion = 1
 
     var version = currentVersion

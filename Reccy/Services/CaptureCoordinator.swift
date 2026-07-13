@@ -72,6 +72,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var multitrackRecorder: MultitrackRecorder?
     private var activeOutputURL: URL?
     private var activeRecordingManifest: RecordingManifest?
+    private var pendingCompletionNotice: String?
     private var countdownTask: Task<Void, Never>?
     private var meterTask: Task<Void, Never>?
     private var activationCancellable: AnyCancellable?
@@ -434,7 +435,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             previewPipeline.clear()
 
             let streamConfiguration = makeStreamConfiguration(for: filter)
-            let outputURL = try makeOutputURL()
             let options = MultitrackRecordingOptions(
                 width: streamConfiguration.width,
                 height: streamConfiguration.height,
@@ -444,6 +444,34 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 includesMicrophone: settings.includeMicrophone,
                 isHDR: settings.useHDR
             )
+            let outputURL = try makeOutputURL()
+            let availableBytes = try RecordingStoragePolicy.availableBytes(
+                at: outputURL.deletingLastPathComponent()
+            )
+            try RecordingStoragePolicy.validatePreflight(
+                availableBytes: availableBytes,
+                options: options
+            )
+            guard let selectedSource else { throw CaptureError.sourceUnavailable }
+            let manifest = RecordingManifest(
+                createdAt: Date(),
+                source: selectedSource,
+                width: streamConfiguration.width,
+                height: streamConfiguration.height,
+                frameRate: settings.frameRate.rawValue,
+                recordingPreset: settings.recordingPreset,
+                isHDR: settings.useHDR,
+                includesSystemAudio: settings.includeSystemAudio,
+                includesMicrophone: settings.includeMicrophone,
+                microphoneName: settings.includeMicrophone ? selectedMicrophoneName : nil,
+                showsCursor: settings.showCursor,
+                highlightsClicks: settings.showMouseClicks && !settings.useHDR
+            )
+            _ = try RecordingRecoveryJournal.write(
+                mediaURL: outputURL,
+                manifest: manifest
+            )
+
             let recorder = MultitrackRecorder()
             recorder.onStarted = { [weak self] in
                 Task { @MainActor in
@@ -460,22 +488,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             }
             multitrackRecorder = recorder
             activeOutputURL = outputURL
-            if let selectedSource {
-                activeRecordingManifest = RecordingManifest(
-                    createdAt: Date(),
-                    source: selectedSource,
-                    width: streamConfiguration.width,
-                    height: streamConfiguration.height,
-                    frameRate: settings.frameRate.rawValue,
-                    recordingPreset: settings.recordingPreset,
-                    isHDR: settings.useHDR,
-                    includesSystemAudio: settings.includeSystemAudio,
-                    includesMicrophone: settings.includeMicrophone,
-                    microphoneName: settings.includeMicrophone ? selectedMicrophoneName : nil,
-                    showsCursor: settings.showCursor,
-                    highlightsClicks: settings.showMouseClicks && !settings.useHDR
-                )
-            }
+            activeRecordingManifest = manifest
             try await recorder.start(
                 filter: filter,
                 configuration: streamConfiguration,
@@ -582,6 +595,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private func beginMetering() {
         meterTask?.cancel()
         meterTask = Task { [weak self] in
+            var storageCheckTick = 0
             while let self, !Task.isCancelled, let recorder = self.multitrackRecorder {
                 let metrics = recorder.metrics
                 recordedDuration = metrics.duration
@@ -595,9 +609,32 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                     isPaused: state == .paused,
                     duration: metrics.duration
                 )
+                if storageCheckTick == 0,
+                   shouldStopForStorageReserve()
+                {
+                    return
+                }
+                storageCheckTick = (storageCheckTick + 1) % 30
                 try? await Task.sleep(for: .milliseconds(66))
             }
         }
+    }
+
+    private func shouldStopForStorageReserve() -> Bool {
+        guard let activeOutputURL,
+              let availableBytes = try? RecordingStoragePolicy.availableBytes(
+                at: activeOutputURL.deletingLastPathComponent()
+              ),
+              availableBytes < RecordingStoragePolicy.runtimeReserveBytes
+        else { return false }
+
+        let available = ByteCountFormatter.string(
+            fromByteCount: availableBytes,
+            countStyle: .file
+        )
+        pendingCompletionNotice = "Only \(available) remained in the recording folder. Reccy stopped gracefully before the filesystem reserve was exhausted."
+        stopRecording()
+        return true
     }
 
     private func appendLevel(_ level: Double, to history: inout [Double]) {
@@ -615,6 +652,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         microphoneAudioLevel = 0
         previewPipeline.clear()
 
+        var indexingError: Error?
         if let activeOutputURL {
             if let activeRecordingManifest {
                 do {
@@ -626,8 +664,11 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                         to: RecordingManifest.sidecarURL(for: activeOutputURL),
                         options: .atomic
                     )
+                    try RecordingRecoveryJournal.remove(
+                        from: activeOutputURL.deletingLastPathComponent()
+                    )
                 } catch {
-                    sourceSelectionMessage = "Recording saved, but its capture details could not be indexed."
+                    indexingError = error
                 }
             }
             lastRecordingURL = activeOutputURL
@@ -637,6 +678,22 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         clearSourceSelection()
         state = .idle
         library.refresh()
+        if let indexingError {
+            library.presentNotice(
+                kind: .warning,
+                title: "Recording saved; indexing needs attention",
+                message: indexingError.localizedDescription,
+                fileURL: lastRecordingURL
+            )
+        } else if let pendingCompletionNotice {
+            library.presentNotice(
+                kind: .warning,
+                title: "Recording stopped to protect the file",
+                message: pendingCompletionNotice,
+                fileURL: lastRecordingURL
+            )
+        }
+        pendingCompletionNotice = nil
         NSApp.requestUserAttention(.informationalRequest)
     }
 
@@ -657,8 +714,14 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private func handleFailure(_ error: Error) {
         countdownTask?.cancel()
         meterTask?.cancel()
+        let shouldInspectRecovery = activeOutputURL != nil
         if let multitrackRecorder {
-            Task { await multitrackRecorder.cancel() }
+            Task {
+                await multitrackRecorder.cancel()
+                if shouldInspectRecovery {
+                    library.recoverInterruptedRecordingIfNeeded()
+                }
+            }
         }
         multitrackRecorder = nil
         activeOutputURL = nil
@@ -667,6 +730,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         systemAudioLevel = 0
         microphoneAudioLevel = 0
         previewPipeline.clear()
+        pendingCompletionNotice = nil
         state = .failed(error.localizedDescription)
     }
 

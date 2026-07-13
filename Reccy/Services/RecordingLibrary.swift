@@ -8,18 +8,26 @@ final class RecordingLibrary: ObservableObject {
     @Published private(set) var recordings: [RecordingItem] = []
     @Published private(set) var directoryURL: URL
     @Published private(set) var thumbnails: [URL: NSImage] = [:]
+    @Published private(set) var recoveryNotice: RecordingRecoveryNotice?
+    private var isRecoveringInterruptedRecording = false
+    private var recoveryTask: Task<Void, Never>?
 
     init(directoryURL: URL) {
         self.directoryURL = directoryURL
         ensureDirectoryExists()
         refresh()
+        recoverInterruptedRecordingIfNeeded()
     }
 
     func setDirectory(_ url: URL) {
         guard directoryURL != url else { return }
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        isRecoveringInterruptedRecording = false
         directoryURL = url
         ensureDirectoryExists()
         refresh()
+        recoverInterruptedRecordingIfNeeded()
     }
 
     func refresh() {
@@ -83,6 +91,91 @@ final class RecordingLibrary: ObservableObject {
         NSWorkspace.shared.open(directoryURL)
     }
 
+    func dismissRecoveryNotice() {
+        recoveryNotice = nil
+    }
+
+    func revealRecoveryItem() {
+        guard let fileURL = recoveryNotice?.fileURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+    }
+
+    func presentNotice(
+        kind: RecordingRecoveryNotice.Kind,
+        title: String,
+        message: String,
+        fileURL: URL? = nil
+    ) {
+        recoveryNotice = RecordingRecoveryNotice(
+            kind: kind,
+            title: title,
+            message: message,
+            fileURL: fileURL
+        )
+    }
+
+    func recoverInterruptedRecordingIfNeeded() {
+        guard !isRecoveringInterruptedRecording else { return }
+        isRecoveringInterruptedRecording = true
+        let directory = directoryURL
+        recoveryTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if directoryURL == directory {
+                    isRecoveringInterruptedRecording = false
+                    recoveryTask = nil
+                }
+            }
+            do {
+                guard let journal = try RecordingRecoveryJournal.load(from: directory) else { return }
+                let mediaURL = directory.appendingPathComponent(journal.mediaFileName)
+                guard !Task.isCancelled, directoryURL == directory else { return }
+                guard FileManager.default.fileExists(atPath: mediaURL.path) else {
+                    try RecordingRecoveryJournal.remove(from: directory)
+                    presentNotice(
+                        kind: .warning,
+                        title: "Interrupted recording was not found",
+                        message: "Reccy cleared stale recovery metadata because its media file no longer exists."
+                    )
+                    return
+                }
+
+                let asset = AVURLAsset(url: mediaURL)
+                let isPlayable = (try? await asset.load(.isPlayable)) == true
+                let duration = (try? await asset.load(.duration).seconds) ?? 0
+                let videoTracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
+                guard !Task.isCancelled, directoryURL == directory else { return }
+                if isPlayable, duration.isFinite, duration > 0, !videoTracks.isEmpty {
+                    try writeManifest(journal.manifest, for: mediaURL)
+                    try RecordingRecoveryJournal.remove(from: directory)
+                    refresh()
+                    presentNotice(
+                        kind: .recovered,
+                        title: "Interrupted recording recovered",
+                        message: "Reccy validated and restored \(mediaURL.deletingPathExtension().lastPathComponent).",
+                        fileURL: mediaURL
+                    )
+                } else {
+                    let partialURL = try moveToUniqueInterruptedURL(mediaURL)
+                    try RecordingRecoveryJournal.remove(from: directory)
+                    presentNotice(
+                        kind: .warning,
+                        title: "Interrupted recording needs attention",
+                        message: "The file could not be validated as playable. Reccy preserved it as \(partialURL.lastPathComponent) for inspection.",
+                        fileURL: partialURL
+                    )
+                }
+            } catch {
+                presentNotice(
+                    kind: .warning,
+                    title: "Recording recovery needs attention",
+                    message: error.localizedDescription,
+                    fileURL: RecordingRecoveryJournal.url(in: directory)
+                )
+            }
+        }
+    }
+
     func thumbnail(for item: RecordingItem) -> NSImage? {
         thumbnails[item.url]
     }
@@ -100,6 +193,32 @@ final class RecordingLibrary: ObservableObject {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(RecordingManifest.self, from: data)
+    }
+
+    private func writeManifest(_ manifest: RecordingManifest, for mediaURL: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(manifest)
+        try data.write(to: RecordingManifest.sidecarURL(for: mediaURL), options: [.atomic])
+    }
+
+    private func moveToUniqueInterruptedURL(_ mediaURL: URL) throws -> URL {
+        let directory = mediaURL.deletingLastPathComponent()
+        let stem = mediaURL.deletingPathExtension().lastPathComponent
+        let fileExtension = mediaURL.pathExtension
+        var destination = directory
+            .appendingPathComponent("\(stem) — Interrupted")
+            .appendingPathExtension(fileExtension)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: destination.path) {
+            destination = directory
+                .appendingPathComponent("\(stem) — Interrupted \(suffix)")
+                .appendingPathExtension(fileExtension)
+            suffix += 1
+        }
+        try FileManager.default.moveItem(at: mediaURL, to: destination)
+        return destination
     }
 
     private func loadMediaDetails() async {

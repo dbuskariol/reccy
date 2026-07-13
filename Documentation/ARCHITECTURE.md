@@ -38,6 +38,8 @@ Region selection overlay ├── approved SCContentFilter
 
 The writer creates separate, titled tracks for screen, system audio, and microphone. A five-second movie-fragment interval limits how much unwritten media is exposed during an interruption. HEVC is the default because it gives markedly better screen-content size efficiency; H.264 remains available for compatibility, and MOV is available for editing-oriented masters.
 
+Before capture starts, `RecordingStoragePolicy` derives a five-minute safety window from the exact configured video and audio bitrates and adds a 512 MB filesystem reserve. While recording, Reccy checks that reserve every two seconds and stops through the normal writer-finalization path before the volume is exhausted. An atomic journal beside the media records the intended manifest before `SCStream` starts. On the next launch, Library validates an interrupted fragmented file: playable video is re-indexed automatically, while invalid media is preserved under an explicit Interrupted filename and surfaced in a first-class recovery banner.
+
 The live monitor does not start a second stream. Complete ScreenCaptureKit frames feed the writer and a shared preview pipeline. That pipeline coalesces UI backpressure to the newest pixel buffer and assigns its IOSurface directly to the monitor layer on the main actor, matching Apple's zero-copy ScreenCaptureKit preview model without disturbing writer timestamps.
 
 HDR recording begins with ScreenCaptureKit's `.captureHDRRecordingPreservedSDRHDR10` configuration. Reccy then writes HEVC Main 10 with PQ transfer, Rec. 2020 primaries/matrix, and VideoToolbox's SDR-range-preservation metadata request. Mouse-click highlighting is disabled in HDR because ScreenCaptureKit currently supports that overlay for BGRA SDR capture.
@@ -81,13 +83,12 @@ Local capture builds use the same identity principle. `Scripts/install-developme
 
 ## Testing strategy
 
-The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, and codec bitrate policy. Installed-app Computer Use QA exercises the main navigation, library transport, timeline seeking, movement, reorder, trimming, gap fills, voiceover sources, and zoom. Remaining release acceptance includes:
+The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, codec bitrate policy, storage preflight, atomic recovery journals, playable interruption recovery, and invalid-file preservation. Installed-app Computer Use QA exercises the main navigation, recovery banner, library transport, timeline seeking, movement, reorder, trimming, gap fills, voiceover sources, and zoom. Remaining release acceptance includes:
 
 - signed capture runs for every source and audio combination;
 - long-duration A/V drift measurements;
 - HDR metadata and playback validation on SDR and HDR displays;
-- encoder fallback and low-disk behavior;
-- interrupted-capture recovery;
+- encoder fallback under sustained capture load;
 - multichannel and external microphone fixtures;
 - export matrix tests across Intel and Apple silicon;
 - UI automation for picker, timeline, VoiceOver, and keyboard navigation.

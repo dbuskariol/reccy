@@ -252,6 +252,142 @@ struct ReccyTests {
         #expect(compatible.targetVideoBitRate > efficient.targetVideoBitRate)
     }
 
+    @Test func storagePreflightScalesWithTheActualCaptureBitrate() {
+        let efficient = MultitrackRecordingOptions(
+            width: 1920,
+            height: 1080,
+            frameRate: 30,
+            preset: .efficient,
+            includesSystemAudio: false,
+            includesMicrophone: false,
+            isHDR: false
+        )
+        let highBandwidth = MultitrackRecordingOptions(
+            width: 3840,
+            height: 2160,
+            frameRate: 60,
+            preset: .hevcMaster,
+            includesSystemAudio: true,
+            includesMicrophone: true,
+            isHDR: true
+        )
+
+        #expect(RecordingStoragePolicy.requiredPreflightBytes(for: highBandwidth)
+            > RecordingStoragePolicy.requiredPreflightBytes(for: efficient))
+        #expect(RecordingStoragePolicy.requiredPreflightBytes(for: efficient)
+            > RecordingStoragePolicy.runtimeReserveBytes)
+    }
+
+    @Test func storagePreflightFailsBeforeTheRuntimeReserveIsAtRisk() {
+        let options = MultitrackRecordingOptions(
+            width: 2560,
+            height: 1440,
+            frameRate: 30,
+            preset: .efficient,
+            includesSystemAudio: true,
+            includesMicrophone: true,
+            isHDR: false
+        )
+        let required = RecordingStoragePolicy.requiredPreflightBytes(for: options)
+
+        #expect(throws: RecordingStorageError.self) {
+            try RecordingStoragePolicy.validatePreflight(
+                availableBytes: required - 1,
+                options: options
+            )
+        }
+        #expect(throws: Never.self) {
+            try RecordingStoragePolicy.validatePreflight(
+                availableBytes: required,
+                options: options
+            )
+        }
+    }
+
+    @Test func recoveryJournalRoundTripsAtomicallyBesideItsMedia() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Recovery \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mediaURL = directory.appendingPathComponent("Interrupted Recording.mp4")
+        let manifest = makeRecoveryManifest()
+
+        let journalURL = try RecordingRecoveryJournal.write(
+            mediaURL: mediaURL,
+            manifest: manifest
+        )
+        let loaded = try RecordingRecoveryJournal.load(from: directory)
+        let restored = try #require(loaded)
+
+        #expect(journalURL == RecordingRecoveryJournal.url(in: directory))
+        #expect(restored.mediaFileName == mediaURL.lastPathComponent)
+        #expect(restored.manifest == manifest)
+        #expect(throws: RecordingRecoveryError.self) {
+            _ = try RecordingRecoveryJournal.write(
+                mediaURL: directory.appendingPathComponent("New Recording.mp4"),
+                manifest: manifest
+            )
+        }
+        try RecordingRecoveryJournal.remove(from: directory)
+        let removed = try RecordingRecoveryJournal.load(from: directory)
+        #expect(removed == nil)
+    }
+
+    @Test func interruptedPlayableRecordingIsRestoredToTheLibrary() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Playable Recovery \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let generated = try await makeColorTestVideo()
+        let mediaURL = directory.appendingPathComponent("Recovered Recording.mov")
+        try FileManager.default.moveItem(at: generated, to: mediaURL)
+        let manifest = makeRecoveryManifest()
+        _ = try RecordingRecoveryJournal.write(mediaURL: mediaURL, manifest: manifest)
+
+        let library = RecordingLibrary(directoryURL: directory)
+        for _ in 0..<100 where library.recoveryNotice == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(library.recoveryNotice?.kind == .recovered)
+        #expect(library.recordings
+            .map { $0.url.resolvingSymlinksInPath() }
+            .contains(mediaURL.resolvingSymlinksInPath()))
+        #expect(FileManager.default.fileExists(
+            atPath: RecordingManifest.sidecarURL(for: mediaURL).path
+        ))
+        let remainingJournal = try RecordingRecoveryJournal.load(from: directory)
+        #expect(remainingJournal == nil)
+    }
+
+    @Test func interruptedInvalidMediaIsPreservedForInspection() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Invalid Recovery \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let mediaURL = directory.appendingPathComponent("Broken Recording.mp4")
+        try Data("not media".utf8).write(to: mediaURL)
+        _ = try RecordingRecoveryJournal.write(
+            mediaURL: mediaURL,
+            manifest: makeRecoveryManifest()
+        )
+
+        let library = RecordingLibrary(directoryURL: directory)
+        for _ in 0..<100 where library.recoveryNotice == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let preservedURL = try #require(library.recoveryNotice?.fileURL)
+        #expect(library.recoveryNotice?.kind == .warning)
+        #expect(preservedURL.lastPathComponent.contains("Interrupted"))
+        #expect(FileManager.default.fileExists(atPath: preservedURL.path))
+        #expect(!FileManager.default.fileExists(atPath: mediaURL.path))
+        let remainingJournal = try RecordingRecoveryJournal.load(from: directory)
+        #expect(remainingJournal == nil)
+    }
+
     @Test func recordingManifestRoundTripsExactCaptureIntent() throws {
         let source = CaptureSourceDescriptor(
             kind: .region,
@@ -555,6 +691,33 @@ struct ReccyTests {
                 TimelineLane(kind: .video, name: "Screen", clips: [video]),
                 TimelineLane(kind: .systemAudio, name: "System Audio", clips: [audio]),
             ]
+        )
+    }
+
+    private func makeRecoveryManifest() -> RecordingManifest {
+        RecordingManifest(
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000),
+            source: CaptureSourceDescriptor(
+                kind: .display,
+                name: "Studio Display",
+                applicationName: nil,
+                applicationBundleIdentifier: nil,
+                windowName: nil,
+                windowIDs: [],
+                displayID: 42,
+                displayName: "Studio Display",
+                region: nil
+            ),
+            width: 2560,
+            height: 1440,
+            frameRate: 30,
+            recordingPreset: .efficient,
+            isHDR: false,
+            includesSystemAudio: true,
+            includesMicrophone: false,
+            microphoneName: nil,
+            showsCursor: true,
+            highlightsClicks: true
         )
     }
 

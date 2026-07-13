@@ -14,6 +14,7 @@ Choose an entire display, every window from one application, or one specific win
 - Capture native resolution or cap output at 4K, 1440p, 1080p, or 720p without upscaling smaller sources.
 - Choose 24, 30, or 60 fps and efficient HEVC, compatible H.264, or editing-oriented MOV capture.
 - Record HDR10 or save native HEIC, JPEG, and PNG screenshots in SDR or HDR.
+- Preflight free space from the selected capture bitrate, preserve a runtime filesystem reserve, and recover playable fragmented recordings after interruption.
 
 ## Edit without flattening the recording
 
@@ -89,7 +90,7 @@ Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repo
 Scripts/verify-ci.sh
 ```
 
-The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, and bitrate policy. Installed-app Computer Use QA covers every workspace plus the real Library transport and timeline interactions.
+The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, and interrupted-file recovery. Installed-app Computer Use QA covers every workspace plus the real Library transport and timeline interactions.
 
 ### Permission identity matters
 
@@ -113,4 +114,4 @@ Capture, editing, projects, thumbnails, and exports stay on the Mac. Reccy only 
 
 ## Status
 
-Reccy is in active development at version 0.1.0. The core capture, monitoring, library, editing, export, settings, menu-bar, and update architectures are implemented. External release acceptance still requires the signed hardware capture matrix, long-duration A/V drift tests, HDR validation, low-disk and interruption recovery, VoiceOver/keyboard QA, and Intel plus Apple-silicon export coverage.
+Reccy is in active development at version 0.1.0. The core capture, monitoring, library, editing, export, settings, menu-bar, update, storage-reserve, and interrupted-recovery architectures are implemented. External release acceptance still requires the signed hardware capture matrix, long-duration A/V drift tests, HDR validation, VoiceOver/keyboard QA, and Intel plus Apple-silicon export coverage.
