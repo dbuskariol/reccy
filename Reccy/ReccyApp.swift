@@ -9,7 +9,9 @@ struct ReccyApp: App {
     @StateObject private var softwareUpdates = SoftwareUpdateController()
 
 #if DEBUG
+    private let presentsActiveMenuBarQAHarness = CommandLine.arguments.contains("-ReccyMenuBarActiveQA")
     private let presentsMenuBarQAHarness = CommandLine.arguments.contains("-ReccyMenuBarQA")
+        || CommandLine.arguments.contains("-ReccyMenuBarActiveQA")
 #endif
 
     var body: some Scene {
@@ -108,6 +110,11 @@ struct ReccyApp: App {
             MenuBarRecorderView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .background(Color(nsColor: .windowBackgroundColor))
+                .task {
+                    if presentsActiveMenuBarQAHarness {
+                        coordinator.installActiveMenuBarQAScenario()
+                    }
+                }
         } else {
             RootView()
         }

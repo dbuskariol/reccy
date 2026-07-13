@@ -695,6 +695,46 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             return descriptor.windowIDs.isEmpty ? nil : .windows(descriptor.windowIDs)
         }
     }
+
+#if DEBUG
+    /// Drives the exact production menu-bar view during installed-app visual QA.
+    /// This state is compiled out of Release and never starts a capture stream.
+    func installActiveMenuBarQAScenario() {
+        selectedSourceKind = .application
+        hasSelectedSource = true
+        selectedSource = CaptureSourceDescriptor(
+            kind: .application,
+            name: "Safari · Research",
+            applicationName: "Safari",
+            applicationBundleIdentifier: "com.apple.Safari",
+            windowName: nil,
+            windowIDs: [101, 102],
+            displayID: nil,
+            displayName: nil,
+            region: nil
+        )
+        recordedDuration = 222.4
+        recordedFileSize = 48_721_920
+        systemAudioLevel = 0.74
+        microphoneAudioLevel = 0.46
+        systemAudioHistory = Self.qaWaveformSamples(count: 120, amplitude: 0.82, phase: 0.15)
+        microphoneAudioHistory = Self.qaWaveformSamples(count: 120, amplitude: 0.58, phase: 1.1)
+        state = .recording
+    }
+
+    private static func qaWaveformSamples(
+        count: Int,
+        amplitude: Double,
+        phase: Double
+    ) -> [Double] {
+        (0..<count).map { index in
+            let position = Double(index) / 5.5
+            let carrier = abs(sin(position + phase))
+            let detail = abs(sin(position * 2.7 + phase * 0.6)) * 0.24
+            return min(1, 0.08 + (carrier * 0.76 + detail) * amplitude)
+        }
+    }
+#endif
 }
 
 extension CaptureCoordinator: SCContentSharingPickerObserver {
