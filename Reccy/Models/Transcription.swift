@@ -81,6 +81,7 @@ nonisolated struct TranscriptSegment: Identifiable, Codable, Hashable, Sendable 
     var sourceStart: TimeInterval
     var duration: TimeInterval
     var confidence: Double?
+    var alternatives: [String] = []
     var words: [TranscriptWord]
 
     var sourceEnd: TimeInterval { sourceStart + duration }
