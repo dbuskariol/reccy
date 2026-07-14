@@ -70,7 +70,7 @@ Reccy intentionally targets macOS 26 only. There are no availability branches or
 | Source approval | `SCContentSharingPicker`; direct multi-display portion overlay; `SCContentFilter` |
 | Capture | `SCStream` video, system-audio, and microphone sample buffers |
 | Recording | `AVAssetWriter`, AAC, HEVC/H.264, VideoToolbox color metadata |
-| Live monitor | Coalesced zero-copy IOSurface preview from the existing capture buffers |
+| Live monitor | Coalesced `AVSampleBufferVideoRenderer` preview from the existing capture buffers, with no second stream or pixel copy |
 | Timeline | Serializable project model materialized as `AVMutableComposition` |
 | Playback and export | AVKit, `AVAudioMix`, and `AVAssetExportSession` |
 | Waveforms | Shared Reccy rendering backed by [DSWaveformImage](https://github.com/dmrschmidt/DSWaveformImage) |

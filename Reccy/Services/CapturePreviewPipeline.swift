@@ -1,18 +1,18 @@
-import CoreMedia
+@preconcurrency import CoreMedia
 import CoreVideo
 import Foundation
 
-/// Routes the recorder's existing ScreenCaptureKit pixel buffers to the live
+/// Routes the recorder's existing ScreenCaptureKit sample buffers to the live
 /// monitor without starting another stream or copying frame pixels. Delivery
-/// is coalesced to the newest IOSurface-backed buffer so UI backpressure can
-/// never create an unbounded queue of full-resolution frames.
+/// is coalesced to the newest buffer so UI backpressure can never create an
+/// unbounded queue of full-resolution frames.
 nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
-    typealias FrameHandler = @MainActor @Sendable (CVPixelBuffer?) -> Void
+    typealias FrameHandler = @MainActor @Sendable (CMSampleBuffer?) -> Void
 
     private let lock = NSLock()
     private var attachmentID: UUID?
     private var frameHandler: FrameHandler?
-    private var latestPixelBuffer: CVPixelBuffer?
+    private var latestSampleBuffer: CMSampleBuffer?
     private var generation: UInt64 = 0
     private var deliveryScheduled = false
 
@@ -22,7 +22,7 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
         let shouldSchedule = withLock {
             attachmentID = id
             self.frameHandler = frameHandler
-            guard latestPixelBuffer != nil, !deliveryScheduled else { return false }
+            guard latestSampleBuffer != nil, !deliveryScheduled else { return false }
             deliveryScheduled = true
             return true
         }
@@ -36,7 +36,7 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
             let handler = frameHandler
             attachmentID = nil
             frameHandler = nil
-            latestPixelBuffer = nil
+            latestSampleBuffer = nil
             generation &+= 1
             deliveryScheduled = false
             return handler
@@ -47,9 +47,9 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
     }
 
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
-        guard let pixelBuffer = Self.pixelBuffer(from: sampleBuffer) else { return }
+        guard let displayBuffer = Self.displayBuffer(from: sampleBuffer) else { return }
         let shouldSchedule = withLock {
-            latestPixelBuffer = pixelBuffer
+            latestSampleBuffer = displayBuffer
             generation &+= 1
             guard frameHandler != nil, !deliveryScheduled else { return false }
             deliveryScheduled = true
@@ -60,7 +60,7 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
 
     func clear() {
         let handler = withLock { () -> FrameHandler? in
-            latestPixelBuffer = nil
+            latestSampleBuffer = nil
             generation &+= 1
             return frameHandler
         }
@@ -73,6 +73,37 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
         CMSampleBufferGetImageBuffer(sampleBuffer)
     }
 
+    /// AVSampleBufferVideoRenderer otherwise interprets ScreenCaptureKit's
+    /// host-clock timestamp as a scheduled playback deadline. The buffer is
+    /// already a few milliseconds old when the main actor receives it, so a
+    /// live monitor must explicitly request immediate display. This copies
+    /// only the sample metadata; the IOSurface-backed frame remains shared.
+    static func displayBuffer(from sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
+        guard pixelBuffer(from: sampleBuffer) != nil else { return nil }
+        var copy: CMSampleBuffer?
+        guard CMSampleBufferCreateCopy(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: sampleBuffer,
+            sampleBufferOut: &copy
+        ) == noErr, let copy,
+              let attachments = CMSampleBufferGetSampleAttachmentsArray(
+                copy,
+                createIfNecessary: true
+              ), CFArrayGetCount(attachments) > 0
+        else { return nil }
+
+        let dictionary = unsafeBitCast(
+            CFArrayGetValueAtIndex(attachments, 0),
+            to: CFMutableDictionary.self
+        )
+        CFDictionarySetValue(
+            dictionary,
+            Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+            Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+        )
+        return copy
+    }
+
     private func scheduleDelivery() {
         Task { @MainActor [weak self] in
             self?.deliverLatestFrame()
@@ -81,18 +112,18 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
 
     @MainActor
     private func deliverLatestFrame() {
-        let delivery = withLock { () -> (FrameHandler, CVPixelBuffer, UInt64)? in
-            guard let frameHandler, let latestPixelBuffer else {
+        let delivery = withLock { () -> (FrameHandler, CMSampleBuffer, UInt64)? in
+            guard let frameHandler, let latestSampleBuffer else {
                 deliveryScheduled = false
                 return nil
             }
-            return (frameHandler, latestPixelBuffer, generation)
+            return (frameHandler, latestSampleBuffer, generation)
         }
-        guard let (handler, pixelBuffer, deliveredGeneration) = delivery else { return }
-        handler(pixelBuffer)
+        guard let (handler, sampleBuffer, deliveredGeneration) = delivery else { return }
+        handler(sampleBuffer)
 
         let needsAnotherDelivery = withLock {
-            guard generation != deliveredGeneration, latestPixelBuffer != nil, frameHandler != nil else {
+            guard generation != deliveredGeneration, latestSampleBuffer != nil, frameHandler != nil else {
                 deliveryScheduled = false
                 return false
             }

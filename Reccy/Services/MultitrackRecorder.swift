@@ -137,11 +137,17 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             } else {
                 duration = 0
             }
-            let size = outputURL
-                .flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize }
-                .map(Int64.init) ?? 0
+            let size = outputURL.map(Self.currentFileSize) ?? 0
             return (duration, size, systemAudioLevel, microphoneAudioLevel)
         }
+    }
+
+    /// File URL resource values may be cached while AVAssetWriter is actively
+    /// extending the same file. FileManager performs a fresh stat so monitor
+    /// telemetry reflects each committed movie fragment.
+    static func currentFileSize(at url: URL) -> Int64 {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.int64Value ?? 0
     }
 
     func start(

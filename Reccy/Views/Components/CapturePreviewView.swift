@@ -1,6 +1,6 @@
 import AppKit
-import CoreVideo
-import IOSurface
+@preconcurrency import AVFoundation
+@preconcurrency import CoreMedia
 import SwiftUI
 
 struct CapturePreviewView: NSViewRepresentable {
@@ -38,8 +38,8 @@ struct CapturePreviewView: NSViewRepresentable {
             guard attachedView !== view else { return }
             detach()
             attachedView = view
-            attachmentID = pipeline.attach { [weak view] pixelBuffer in
-                view?.display(pixelBuffer)
+            attachmentID = pipeline.attach { [weak view] sampleBuffer in
+                view?.display(sampleBuffer)
             }
         }
 
@@ -53,13 +53,15 @@ struct CapturePreviewView: NSViewRepresentable {
 }
 
 final class CaptureSurfacePreviewNSView: NSView {
+    private let displayLayer = AVSampleBufferDisplayLayer()
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer = CALayer()
-        layer?.backgroundColor = NSColor.black.cgColor
-        layer?.contentsGravity = .resizeAspect
-        layer?.masksToBounds = true
+        displayLayer.backgroundColor = NSColor.black.cgColor
+        displayLayer.videoGravity = .resizeAspect
+        displayLayer.masksToBounds = true
+        layer = displayLayer
     }
 
     @available(*, unavailable)
@@ -67,15 +69,24 @@ final class CaptureSurfacePreviewNSView: NSView {
         nil
     }
 
+    var isReadyForDisplay: Bool { displayLayer.isReadyForDisplay }
+    var rendererError: Error? { displayLayer.sampleBufferRenderer.error }
+
     @MainActor
-    func display(_ pixelBuffer: CVPixelBuffer?) {
-        guard let pixelBuffer,
-              let surfaceReference = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue()
-        else {
-            layer?.contents = nil
+    func display(_ sampleBuffer: CMSampleBuffer?) {
+        let renderer = displayLayer.sampleBufferRenderer
+        guard let sampleBuffer else {
+            renderer.flush(removingDisplayedImage: true)
             return
         }
-        let surface = unsafeBitCast(surfaceReference, to: IOSurface.self)
-        layer?.contents = surface
+
+        if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
+            renderer.flush()
+        }
+        // The renderer can report backpressure before its first frame. The
+        // pipeline already bounds delivery to one newest frame, and Apple
+        // explicitly permits enqueueing while this value is false, so do not
+        // prevent the renderer from bootstrapping its display queue.
+        renderer.enqueue(sampleBuffer)
     }
 }

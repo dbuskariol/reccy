@@ -873,13 +873,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             region: nil
         )
         isSimulatingRecordingForQA = true
-        Task { [weak self] in
+        let previewPipeline = previewPipeline
+        Task.detached(priority: .userInitiated) {
             try? await Task.sleep(for: .milliseconds(350))
             for _ in 0..<60 {
-                guard !Task.isCancelled,
-                      let sampleBuffer = Self.makePreviewQASampleBuffer()
-                else { return }
-                self?.previewPipeline.enqueue(sampleBuffer)
+                guard let sampleBuffer = Self.makePreviewQASampleBuffer() else { return }
+                previewPipeline.enqueue(sampleBuffer)
                 try? await Task.sleep(for: .milliseconds(33))
             }
         }
@@ -936,7 +935,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
-    private nonisolated static func makePreviewQASampleBuffer() -> CMSampleBuffer? {
+    nonisolated static func makePreviewQASampleBuffer() -> CMSampleBuffer? {
         let width = 960
         let height = 540
         var pixelBuffer: CVPixelBuffer?

@@ -62,6 +62,107 @@ struct ReccyTests {
         #expect(previewPixelBuffer === imageBuffer)
     }
 
+#if DEBUG
+    @Test func monitorVisualHarnessProducesACompleteVideoFrame() throws {
+        let sampleBuffer = try #require(CaptureCoordinator.makePreviewQASampleBuffer())
+        #expect(CMSampleBufferIsValid(sampleBuffer))
+        #expect(CMSampleBufferDataIsReady(sampleBuffer))
+        #expect(CapturePreviewPipeline.pixelBuffer(from: sampleBuffer) != nil)
+    }
+#endif
+
+    @Test @MainActor func livePreviewPipelineSharesPixelsAndMarksFramesForImmediateDisplay() async throws {
+        var pixelBuffer: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            16,
+            16,
+            kCVPixelFormatType_32BGRA,
+            nil,
+            &pixelBuffer
+        ) == kCVReturnSuccess)
+        let imageBuffer = try #require(pixelBuffer)
+
+        var formatDescription: CMVideoFormatDescription?
+        #expect(CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: imageBuffer,
+            formatDescriptionOut: &formatDescription
+        ) == noErr)
+        let description = try #require(formatDescription)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: 30),
+            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+            decodeTimeStamp: .invalid
+        )
+        var sourceBuffer: CMSampleBuffer?
+        #expect(CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: imageBuffer,
+            formatDescription: description,
+            sampleTiming: &timing,
+            sampleBufferOut: &sourceBuffer
+        ) == noErr)
+        let source = try #require(sourceBuffer)
+
+        let pipeline = CapturePreviewPipeline()
+        var delivered: CMSampleBuffer?
+        let attachmentID = pipeline.attach { delivered = $0 }
+        pipeline.enqueue(source)
+        try await Task.sleep(for: .milliseconds(20))
+
+        let deliveredBuffer = try #require(delivered)
+        #expect(deliveredBuffer !== source)
+        #expect(CapturePreviewPipeline.pixelBuffer(from: deliveredBuffer) === imageBuffer)
+        let attachments = try #require(
+            CMSampleBufferGetSampleAttachmentsArray(
+                deliveredBuffer,
+                createIfNecessary: false
+            ) as? [[CFString: Any]]
+        )
+        #expect(attachments.first?[kCMSampleAttachmentKey_DisplayImmediately] as? Bool == true)
+
+        let previewView = CaptureSurfacePreviewNSView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 180)
+        )
+        let window = NSWindow(
+            contentRect: previewView.frame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = previewView
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        previewView.display(deliveredBuffer)
+        for _ in 0..<20 where !previewView.isReadyForDisplay {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        #expect(previewView.rendererError == nil)
+        #expect(previewView.isReadyForDisplay)
+        pipeline.detach(attachmentID)
+        await Task.yield()
+        #expect(delivered == nil)
+    }
+
+    @Test func activeRecordingFileSizeUsesFreshFilesystemMetadata() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Growing File \(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try Data(repeating: 0xAA, count: 64).write(to: url)
+        #expect(MultitrackRecorder.currentFileSize(at: url) == 64)
+
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(repeating: 0xBB, count: 128))
+        try handle.synchronize()
+        try handle.close()
+
+        #expect(MultitrackRecorder.currentFileSize(at: url) == 192)
+    }
+
     @Test func nativeEditorPlayerViewCanBeCreated() {
         let player = AVPlayer()
         let playerView = AVPlayerView()
