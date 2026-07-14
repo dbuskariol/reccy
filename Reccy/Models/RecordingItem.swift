@@ -80,9 +80,13 @@ struct RecordingArtifacts: Equatable, Sendable {
             )
     }
 
+    var transcriptURL: URL {
+        TranscriptStore.sidecarURL(for: mediaURL)
+    }
+
     /// Metadata is moved first and the media last. A failed media operation can
     /// therefore restore the smaller owned artifacts before surfacing the error.
     var trashOrder: [URL] {
-        [projectPackageURL, manifestURL, mediaURL]
+        [projectPackageURL, transcriptURL, manifestURL, mediaURL]
     }
 }

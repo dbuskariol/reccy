@@ -11,6 +11,157 @@ import VideoToolbox
 
 @Suite("Reccy")
 struct ReccyTests {
+    @Test func transcriptProjectionFollowsIndependentTimelineEdits() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Transcript.mov")
+        let track = TranscriptTrack(
+            sourceTrackID: 7,
+            role: .microphone,
+            name: "Microphone",
+            provider: .appleSpeech,
+            localeIdentifier: "en-AU",
+            modelIdentifier: "com.apple.SpeechTranscriber",
+            segments: [
+                TranscriptSegment(
+                    text: " one two three",
+                    sourceStart: 1,
+                    duration: 3,
+                    words: [
+                        TranscriptWord(text: " one", sourceStart: 1, duration: 1),
+                        TranscriptWord(text: " two", sourceStart: 2, duration: 1),
+                        TranscriptWord(text: " three", sourceStart: 3, duration: 1),
+                    ]
+                ),
+            ]
+        )
+        let document = TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: [track])
+        let clip = TimelineClip(
+            sourceURL: mediaURL,
+            sourceTrackID: 7,
+            sourceStart: 2,
+            timelineStart: 10,
+            duration: 2,
+            name: "Microphone"
+        )
+        let lane = TimelineLane(kind: .microphone, name: "Microphone", clips: [clip])
+        let project = TimelineProject(name: "Transcript Projection", lanes: [lane])
+
+        let projected = TranscriptProjection.project(
+            project: project,
+            documentsByMediaURL: [mediaURL: document]
+        )
+
+        #expect(projected.count == 1)
+        #expect(projected[0].text == "two three")
+        #expect(projected[0].timelineStart == 10)
+        #expect(projected[0].duration == 2)
+        #expect(projected[0].role == TranscriptTrackRole.microphone)
+    }
+
+    @Test func transcriptProjectionKeepsDuplicateClipsAsSeparateCues() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Duplicate Transcript.mov")
+        let segment = TranscriptSegment(
+            text: "Hello",
+            sourceStart: 0,
+            duration: 1,
+            words: []
+        )
+        let document = TranscriptDocument(
+            mediaFileName: mediaURL.lastPathComponent,
+            tracks: [
+                TranscriptTrack(
+                    sourceTrackID: 2,
+                    role: .systemAudio,
+                    name: "System Audio",
+                    provider: .whisperKit,
+                    localeIdentifier: "en",
+                    modelIdentifier: "large-v3-v20240930_626MB",
+                    segments: [segment]
+                ),
+            ]
+        )
+        let clips = [0.0, 5.0].map {
+            TimelineClip(
+                sourceURL: mediaURL,
+                sourceTrackID: 2,
+                sourceStart: 0,
+                timelineStart: $0,
+                duration: 1,
+                name: "System Audio"
+            )
+        }
+        let project = TimelineProject(
+            name: "Duplicate Transcript",
+            lanes: [TimelineLane(kind: .systemAudio, name: "System Audio", clips: clips)]
+        )
+
+        let projected = TranscriptProjection.project(
+            project: project,
+            documentsByMediaURL: [mediaURL: document]
+        )
+
+        #expect(projected.map { $0.timelineStart } == [0, 5])
+        #expect(Set(projected.map { $0.id }).count == 2)
+    }
+
+    @Test func transcriptExportsUseTimelineTimecodes() {
+        let segment = ProjectedTranscriptSegment(
+            id: "cue",
+            sourceSegmentID: UUID(),
+            clipID: UUID(),
+            laneID: UUID(),
+            role: .systemAudio,
+            text: "Hello world",
+            timelineStart: 65.25,
+            duration: 2.5
+        )
+
+        let srt = TranscriptExportFormatter.string(segments: [segment], format: .srt)
+        let vtt = TranscriptExportFormatter.string(segments: [segment], format: .webVTT)
+
+        #expect(srt.contains("00:01:05,250 --> 00:01:07,750"))
+        #expect(vtt.contains("00:01:05.250 --> 00:01:07.750"))
+        #expect(vtt.hasPrefix("WEBVTT"))
+    }
+
+    @Test func transcriptStoreRoundTripsAnAtomicSidecar() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Transcript Store \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mediaURL = directory.appendingPathComponent("Recording.mov")
+        let generatedAt = Date(timeIntervalSince1970: 1_234_567.89)
+        let document = TranscriptDocument(
+            mediaFileName: mediaURL.lastPathComponent,
+            modifiedAt: generatedAt,
+            tracks: [
+                TranscriptTrack(
+                    sourceTrackID: 3,
+                    role: .microphone,
+                    name: "Studio Microphone",
+                    provider: .appleSpeech,
+                    localeIdentifier: "en-AU",
+                    modelIdentifier: "com.apple.SpeechTranscriber",
+                    generatedAt: generatedAt,
+                    segments: [
+                        TranscriptSegment(
+                            text: "Testing",
+                            sourceStart: 0.2,
+                            duration: 0.8,
+                            words: []
+                        ),
+                    ]
+                ),
+            ]
+        )
+        let store = TranscriptStore()
+
+        try await store.save(document, for: mediaURL)
+        let restored = try await store.load(for: mediaURL)
+
+        #expect(restored == document)
+        #expect(FileManager.default.fileExists(atPath: TranscriptStore.sidecarURL(for: mediaURL).path))
+    }
+
     @Test func portionCaptureBypassesTheWholeDisplayPicker() {
         #expect(CaptureSourceKind.region.pickerMode == nil)
         #expect(CaptureSourceKind.region.contentStyle == nil)
@@ -303,9 +454,15 @@ struct ReccyTests {
             artifacts.projectPackageURL.path
                 == "/tmp/Projects/Reccy Ownership Test.reccyproject"
         )
+        #expect(artifacts.transcriptURL.path == "/tmp/Reccy Ownership Test.reccytranscript")
         #expect(
             artifacts.trashOrder
-                == [artifacts.projectPackageURL, artifacts.manifestURL, mediaURL]
+                == [
+                    artifacts.projectPackageURL,
+                    artifacts.transcriptURL,
+                    artifacts.manifestURL,
+                    mediaURL,
+                ]
         )
     }
 
