@@ -4,6 +4,7 @@ import Combine
 import SwiftUI
 
 struct LibraryView: View {
+    @EnvironmentObject private var transcription: TranscriptionController
     @ObservedObject var library: RecordingLibrary
     let onEdit: (RecordingItem) -> Void
 
@@ -13,6 +14,7 @@ struct LibraryView: View {
     @State private var player = AVPlayer()
     @State private var isPreviewPlaying = false
     @State private var playbackTime: TimeInterval = 0
+    @State private var searchText = ""
 
     private let playbackTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
@@ -95,9 +97,15 @@ struct LibraryView: View {
         } message: { item in
             Text("This moves \(item.name), its metadata, and its non-destructive editing project to the Trash.")
         }
-        .onAppear { selectFirstRecording() }
+        .onAppear {
+            selectFirstRecording()
+            loadTranscriptDocuments()
+        }
         .onChange(of: selectedID) { _, _ in loadSelectedRecording() }
-        .onChange(of: library.recordings.map(\.id)) { _, _ in selectFirstRecording() }
+        .onChange(of: library.recordings.map(\.id)) { _, _ in
+            selectFirstRecording()
+            loadTranscriptDocuments()
+        }
         .onReceive(player.publisher(for: \.timeControlStatus)) { status in
             isPreviewPlaying = status == .playing
         }
@@ -164,13 +172,37 @@ struct LibraryView: View {
     }
 
     private var recordingBrowser: some View {
-        ScrollView {
-            LazyVStack(spacing: 5) {
-                ForEach(library.recordings) { item in
-                    recordingBrowserRow(item)
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search recordings or spoken words", text: $searchText)
+                    .textFieldStyle(.plain)
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .reccyTooltip("Clear search")
                 }
             }
-            .padding(10)
+            .padding(.horizontal, 12)
+            .frame(height: 44)
+            .background(.bar)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(spacing: 5) {
+                    ForEach(filteredRecordings) { item in
+                        recordingBrowserRow(item)
+                    }
+                }
+                .padding(10)
+            }
         }
         .background(Color(nsColor: .controlBackgroundColor))
     }
@@ -200,6 +232,7 @@ struct LibraryView: View {
             Button("Play") { load(item, autoplay: true) }
             Button("Edit") { onEdit(item) }
             Button("Export As…") { exportItem = item }
+            transcriptionContextActions(item)
             Button("Show in Finder") { library.reveal(item) }
             Divider()
             Button("Move to Trash", role: .destructive) { pendingDelete = item }
@@ -229,6 +262,7 @@ struct LibraryView: View {
                 HStack(spacing: 5) {
                     compactBadge(item.sourceKindTitle, systemImage: item.manifest.source.kind.systemImage)
                     compactBadge(item.audioSummary, systemImage: "waveform")
+                    transcriptStatusBadge(item)
                 }
             }
 
@@ -254,6 +288,7 @@ struct LibraryView: View {
                     detailHeader(item)
                     compactPreview(item)
                     playbackControls(item)
+                    transcriptCard(item)
                     recordingDetailsCard(item)
                 }
                 .padding(22)
@@ -351,6 +386,127 @@ struct LibraryView: View {
             }
             .frame(maxWidth: .infinity, alignment: .center)
             .accessibilityLabel("Preview of \(item.name)")
+    }
+
+    @ViewBuilder
+    private func transcriptCard(_ item: RecordingItem) -> some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    SectionHeading(
+                        "Transcript",
+                        subtitle: "On-device, source-aligned, and searchable."
+                    )
+                    Spacer()
+                    transcriptActions(item)
+                }
+
+                switch transcription.jobState(for: item.url) {
+                case .queued:
+                    transcriptProgress(nil, label: "Queued")
+                case .working(let update):
+                    transcriptProgress(update.fractionCompleted, label: update.detail ?? "Transcribing")
+                case .failed(let message):
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                case .idle:
+                    Text(item.audioTrackIDs.isEmpty ? "This recording has no audio tracks." : "No transcript yet.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                case .ready:
+                    if let document = transcription.document(for: item.url) {
+                        transcriptDocument(document)
+                    } else {
+                        Text("Transcript metadata is loading…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func transcriptActions(_ item: RecordingItem) -> some View {
+        let state = transcription.jobState(for: item.url)
+        if state.isWorking {
+            Button {
+                transcription.cancelTranscription(for: item.url)
+            } label: {
+                Image(systemName: "xmark")
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.bordered)
+            .reccyAccessibleControl("Cancel Transcription")
+        } else {
+            Button {
+                transcription.transcribe(item)
+            } label: {
+                Image(systemName: transcription.document(for: item.url) == nil
+                    ? "captions.bubble"
+                    : "arrow.clockwise")
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.bordered)
+            .disabled(item.audioTrackIDs.isEmpty)
+            .reccyAccessibleControl(
+                transcription.document(for: item.url) == nil ? "Transcribe" : "Transcribe Again"
+            )
+
+            if transcription.document(for: item.url) != nil {
+                Menu {
+                    ForEach(TranscriptExportFormat.allCases) { format in
+                        Button(format.title) { exportTranscript(item, format: format) }
+                    }
+                } label: {
+                    Image(systemName: "text.badge.arrow.up")
+                        .frame(width: 18, height: 18)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 32)
+                .reccyTooltip("Export transcript")
+                .accessibilityLabel("Export transcript")
+            }
+        }
+    }
+
+    private func transcriptDocument(_ document: TranscriptDocument) -> some View {
+        VStack(alignment: .leading, spacing: 15) {
+            ForEach(document.tracks) { track in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label(track.role.title, systemImage: track.role.systemImage)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(track.role == .systemAudio ? .teal : .orange)
+                        Spacer()
+                        Text(track.provider.title)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    FlowTranscriptView(segments: track.segments) { segment in
+                        seek(to: segment.sourceStart)
+                    }
+                }
+            }
+        }
+        .textSelection(.enabled)
+    }
+
+    private func transcriptProgress(_ fraction: Double?, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(label)
+                    .font(.callout)
+                Spacer()
+                if let fraction {
+                    Text(fraction, format: .percent.precision(.fractionLength(0)))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let fraction { ProgressView(value: fraction) } else { ProgressView() }
+        }
     }
 
     private func playbackControls(_ item: RecordingItem) -> some View {
@@ -515,6 +671,16 @@ struct LibraryView: View {
         return library.recordings.first(where: { $0.id == selectedID })
     }
 
+    private var filteredRecordings: [RecordingItem] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return library.recordings }
+        return library.recordings.filter { item in
+            item.name.localizedCaseInsensitiveContains(query)
+                || item.sourceName.localizedCaseInsensitiveContains(query)
+                || (transcription.document(for: item.url)?.searchableText.localizedCaseInsensitiveContains(query) == true)
+        }
+    }
+
     private func selectFirstRecording() {
         if let selectedID, library.recordings.contains(where: { $0.id == selectedID }) {
             return
@@ -537,7 +703,83 @@ struct LibraryView: View {
         isPreviewPlaying = false
         playbackTime = 0
         player.replaceCurrentItem(with: AVPlayerItem(url: item.url))
+        transcription.loadDocument(for: item.url)
         if autoplay { player.play() }
+    }
+
+    private func loadTranscriptDocuments() {
+        for recording in library.recordings {
+            transcription.loadDocument(for: recording.url)
+        }
+    }
+
+    @ViewBuilder
+    private func transcriptStatusBadge(_ item: RecordingItem) -> some View {
+        switch transcription.jobState(for: item.url) {
+        case .queued, .working:
+            Image(systemName: "captions.bubble.fill")
+                .font(.caption2)
+                .foregroundStyle(.tint)
+                .accessibilityLabel("Transcribing")
+        case .ready:
+            Image(systemName: "captions.bubble.fill")
+                .font(.caption2)
+                .foregroundStyle(.green)
+                .accessibilityLabel("Transcript ready")
+        case .failed:
+            Image(systemName: "exclamationmark.bubble.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .accessibilityLabel("Transcription failed")
+        case .idle:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func transcriptionContextActions(_ item: RecordingItem) -> some View {
+        if transcription.jobState(for: item.url).isWorking {
+            Button("Cancel Transcription") { transcription.cancelTranscription(for: item.url) }
+        } else {
+            Button(transcription.document(for: item.url) == nil ? "Transcribe" : "Transcribe Again") {
+                transcription.transcribe(item)
+            }
+            .disabled(item.audioTrackIDs.isEmpty)
+        }
+    }
+
+    private func exportTranscript(_ item: RecordingItem, format: TranscriptExportFormat) {
+        guard let document = transcription.document(for: item.url) else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export Transcript"
+        panel.nameFieldStringValue = "\(item.name).\(format.fileExtension)"
+        panel.allowedContentTypes = []
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let segments = document.tracks.flatMap { track in
+            track.segments.map { segment in
+                ProjectedTranscriptSegment(
+                    id: "\(track.id):\(segment.id)",
+                    sourceSegmentID: segment.id,
+                    clipID: track.id,
+                    laneID: track.id,
+                    role: track.role,
+                    text: segment.displayText,
+                    timelineStart: segment.sourceStart,
+                    duration: segment.duration
+                )
+            }
+        }.sorted { $0.timelineStart < $1.timelineStart }
+        do {
+            try TranscriptExportFormatter.string(segments: segments, format: format)
+                .write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            library.presentNotice(
+                kind: .warning,
+                title: "Transcript Couldn’t Be Exported",
+                message: error.localizedDescription,
+                fileURL: item.url
+            )
+        }
     }
 
     private func togglePlayback() {
@@ -591,5 +833,41 @@ private struct NativeLibraryVideoPlayer: NSViewRepresentable {
 
     static func dismantleNSView(_ view: AVPlayerView, coordinator: Void) {
         view.player = nil
+    }
+}
+
+private struct FlowTranscriptView: View {
+    let segments: [TranscriptSegment]
+    let onSelect: (TranscriptSegment) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(segments) { segment in
+                Button {
+                    onSelect(segment)
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 9) {
+                        Text(timecode(segment.sourceStart))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 38, alignment: .trailing)
+                        Text(segment.displayText)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .reccyTooltip("Play from \(timecode(segment.sourceStart))")
+                .accessibilityLabel("Play transcript from \(timecode(segment.sourceStart)): \(segment.displayText)")
+            }
+        }
+    }
+
+    private func timecode(_ seconds: TimeInterval) -> String {
+        let value = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d", value / 60, value % 60)
     }
 }

@@ -103,6 +103,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     let library: RecordingLibrary
     let previewPipeline = CapturePreviewPipeline()
+    let transcription: TranscriptionController
 
     private let logger = Logger(subsystem: "com.reccy.mac", category: "Capture")
     private var selectedFilter: SCContentFilter?
@@ -126,10 +127,11 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var isSimulatingRecordingForQA = false
 #endif
 
-    override init() {
+    init(transcription: TranscriptionController = TranscriptionController()) {
         let savedSettings = CaptureSettings.load()
         settings = savedSettings
         library = RecordingLibrary(directoryURL: Self.outputDirectory(for: savedSettings))
+        self.transcription = transcription
         super.init()
 
         let picker = SCContentSharingPicker.shared
@@ -608,6 +610,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             )
 
             let recorder = MultitrackRecorder()
+            transcription.beginLive(
+                systemAudio: settings.includeSystemAudio,
+                microphone: settings.includeMicrophone,
+                microphoneName: selectedMicrophoneName
+            )
+            let liveRouter = transcription.liveRouter
             recorder.onStarted = { [weak self] in
                 Task { @MainActor in
                     guard let self,
@@ -628,6 +636,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             }
             recorder.onVideoFrame = { [previewPipeline] sampleBuffer in
                 previewPipeline.enqueue(sampleBuffer)
+            }
+            recorder.onAudioPacket = { role, packet in
+                Task { await liveRouter.ingest(packet, role: role) }
             }
             multitrackRecorder = recorder
             activeOutputURL = outputURL
@@ -825,6 +836,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             }
             lastRecordingURL = completedURL
         }
+        let completedManifest = activeRecordingManifest
         activeOutputURL = nil
         activeRecordingManifest = nil
         clearSourceSelection()
@@ -850,11 +862,17 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         recordingLease = nil
         NSApp.requestUserAttention(.informationalRequest)
         if let completedURL {
+            if let completedManifest {
+                transcription.finishLive(mediaURL: completedURL, manifest: completedManifest)
+            } else {
+                transcription.cancelLive()
+            }
             sessionCompletion = CaptureSessionCompletion(outcome: .saved(completedURL))
         }
     }
 
     private func discardIncompleteRecording(at outputURL: URL?) {
+        transcription.cancelLive()
         if let outputURL {
             try? RecordingRecoveryJournal.remove(
                 from: outputURL.deletingLastPathComponent()
@@ -923,6 +941,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     private func handleFailure(_ error: Error) {
+        transcription.cancelLive()
         logCaptureFailure(error)
         sessionGeneration &+= 1
         deactivateSystemPicker()

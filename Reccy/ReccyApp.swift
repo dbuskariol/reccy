@@ -22,6 +22,7 @@ struct ReccyApp: App {
                 .environmentObject(navigation)
                 .environmentObject(preferences)
                 .environmentObject(softwareUpdates)
+                .environmentObject(coordinator.transcription)
                 .frame(minWidth: minimumWindowWidth, minHeight: minimumWindowHeight)
         }
         .defaultSize(width: defaultWindowWidth, height: defaultWindowHeight)
@@ -103,6 +104,7 @@ struct ReccyApp: App {
                 .environmentObject(editor)
                 .environmentObject(navigation)
                 .environmentObject(softwareUpdates)
+                .environmentObject(coordinator.transcription)
         } label: {
             if coordinator.state == .paused {
                 Label(coordinator.formattedDuration, systemImage: "pause.circle.fill")
@@ -120,6 +122,7 @@ struct ReccyApp: App {
                 .environmentObject(navigation)
                 .environmentObject(preferences)
                 .environmentObject(softwareUpdates)
+                .environmentObject(coordinator.transcription)
                 .frame(width: 720, height: 620)
         }
     }
@@ -198,11 +201,21 @@ struct ReccyApp: App {
         } else if CommandLine.arguments.contains("-ReccyMonitorActiveQA") {
             coordinator.installActiveMonitorQAScenario()
             navigation.section = .monitor
+        } else if CommandLine.arguments.contains("-ReccyMonitorTranscriptionQA") {
+            coordinator.installActiveMonitorQAScenario()
+            coordinator.transcription.installMonitorQAScenario()
+            navigation.section = .monitor
         } else if CommandLine.arguments.contains("-ReccyRecordReadyQA") {
             coordinator.installRecordReadyQAScenario()
             navigation.section = .record
         } else if CommandLine.arguments.contains("-ReccyLibraryQA") {
             coordinator.library.refresh()
+            navigation.section = .library
+        } else if CommandLine.arguments.contains("-ReccyLibraryTranscriptionQA") {
+            coordinator.library.refresh()
+            if let recording = coordinator.library.recordings.first {
+                coordinator.transcription.installRecordingQAScenario(recording)
+            }
             navigation.section = .library
         } else if CommandLine.arguments.contains("-ReccyRecoveryQA") {
             coordinator.library.refresh()
@@ -221,6 +234,19 @@ struct ReccyApp: App {
             }
             await editor.open(recording)
             navigation.section = .editor
+        } else if CommandLine.arguments.contains("-ReccyEditorTranscriptionQA") {
+            coordinator.library.refresh()
+            guard let recording = coordinator.library.recordings.first else {
+                navigation.section = .editor
+                return
+            }
+            await editor.open(recording)
+            if let project = editor.project {
+                coordinator.transcription.installProjectQAScenario(project)
+            }
+            navigation.section = .editor
+        } else if CommandLine.arguments.contains("-ReccyTranscriptionSettingsQA") {
+            navigation.openSettings(.transcription)
         } else if CommandLine.arguments.contains("-ReccyPermissionsQA") {
             coordinator.installPermissionsQAScenario()
             navigation.openSettings(.permissions)

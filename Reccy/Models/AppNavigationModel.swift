@@ -33,6 +33,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case general
     case recording
+    case transcription
     case permissions
     case shortcuts
     case updates
@@ -45,6 +46,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general: "gearshape"
         case .recording: "record.circle"
+        case .transcription: "captions.bubble"
         case .permissions: "hand.raised"
         case .shortcuts: "command"
         case .updates: "arrow.triangle.2.circlepath"

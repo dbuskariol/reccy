@@ -29,15 +29,16 @@ nonisolated enum TranscriptionAudioReader {
         output.alwaysCopiesSampleData = false
         guard reader.canAdd(output) else { throw TranscriptionEngineError.cannotReadAudio }
         reader.add(output)
+        let context = TranscriptionReaderContext(reader: reader, output: output)
 
         return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(256)) { continuation in
             let task = Task.detached(priority: .userInitiated) {
-                guard reader.startReading() else {
-                    continuation.finish(throwing: reader.error ?? TranscriptionEngineError.cannotReadAudio)
+                guard context.reader.startReading() else {
+                    continuation.finish(throwing: context.reader.error ?? TranscriptionEngineError.cannotReadAudio)
                     return
                 }
 
-                while !Task.isCancelled, let sampleBuffer = output.copyNextSampleBuffer() {
+                while !Task.isCancelled, let sampleBuffer = context.output.copyNextSampleBuffer() {
                     do {
                         let buffer = try pcmBuffer(from: sampleBuffer)
                         let result = continuation.yield(TimedAudioBuffer(
@@ -45,21 +46,21 @@ nonisolated enum TranscriptionAudioReader {
                             startTime: sampleBuffer.presentationTimeStamp
                         ))
                         if case .terminated = result {
-                            reader.cancelReading()
+                            context.reader.cancelReading()
                             return
                         }
                     } catch {
-                        reader.cancelReading()
+                        context.reader.cancelReading()
                         continuation.finish(throwing: error)
                         return
                     }
                 }
 
                 if Task.isCancelled {
-                    reader.cancelReading()
+                    context.reader.cancelReading()
                     continuation.finish(throwing: CancellationError())
-                } else if reader.status == .failed {
-                    continuation.finish(throwing: reader.error ?? TranscriptionEngineError.cannotReadAudio)
+                } else if context.reader.status == .failed {
+                    continuation.finish(throwing: context.reader.error ?? TranscriptionEngineError.cannotReadAudio)
                 } else {
                     continuation.finish()
                 }
@@ -110,15 +111,13 @@ nonisolated enum TranscriptionAudioReader {
         let inputState = OSAllocatedUnfairLock(initialState: false)
         var conversionError: NSError?
         let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
-            inputState.withLock { suppliedInput in
-                guard !suppliedInput else {
-                    inputStatus.pointee = .endOfStream
-                    return nil
-                }
+            let shouldSupply = inputState.withLock { suppliedInput in
+                if suppliedInput { return false }
                 suppliedInput = true
-                inputStatus.pointee = .haveData
-                return input
+                return true
             }
+            inputStatus.pointee = shouldSupply ? .haveData : .endOfStream
+            return shouldSupply ? input : nil
         }
         guard status != .error, conversionError == nil else {
             throw conversionError ?? TranscriptionEngineError.cannotConvertAudio
@@ -138,5 +137,15 @@ nonisolated enum TranscriptionAudioReader {
             throw TranscriptionEngineError.cannotConvertAudio
         }
         return Array(UnsafeBufferPointer(start: channel, count: Int(converted.frameLength)))
+    }
+}
+
+private nonisolated final class TranscriptionReaderContext: @unchecked Sendable {
+    let reader: AVAssetReader
+    let output: AVAssetReaderTrackOutput
+
+    init(reader: AVAssetReader, output: AVAssetReaderTrackOutput) {
+        self.reader = reader
+        self.output = output
     }
 }

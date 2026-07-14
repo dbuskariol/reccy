@@ -11,6 +11,69 @@ import VideoToolbox
 
 @Suite("Reccy")
 struct ReccyTests {
+    @Test func audioReaderProducesExactTrackPCMForTranscription() async throws {
+        let url = try makeWaveformTestAudio(duration: 1) { frame, sampleRate in
+            Float(sin(2 * Double.pi * 440 * Double(frame) / sampleRate) * 0.25)
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+        let asset = AVURLAsset(url: url)
+        let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let stream = try await TranscriptionAudioReader.stream(
+            mediaURL: url,
+            sourceTrackID: track.trackID,
+            outputFormat: format
+        )
+        var sampleCount = 0
+        var firstStart: TimeInterval?
+        for try await packet in stream {
+            firstStart = firstStart ?? packet.startTime.seconds
+            let samples = try TranscriptionAudioReader.monoFloatSamples(from: packet)
+            sampleCount += samples.count
+        }
+
+        #expect(abs((firstStart ?? -1)) < 0.001)
+        #expect(abs(sampleCount - 16_000) < 128)
+    }
+
+    @Test func appleSpeechAdvertisesTheCurrentLocaleWithoutCloudAuthorization() async {
+        let engine = AppleSpeechTranscriptionEngine()
+        let availability = await engine.availability(localeIdentifier: Locale.current.identifier)
+        if case .unavailable(let reason) = availability {
+            Issue.record("Apple Speech should support the current macOS locale: \(reason)")
+        }
+    }
+
+    @Test @MainActor func transcriptionPreferencesPersistTheSelectedOnDeviceEngine() {
+        let suiteName = "ReccyTests.Transcription.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let modelDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Model Test \(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: modelDirectory) }
+        var controller: TranscriptionController? = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory)
+        )
+        controller?.provider = .whisperKit
+        controller?.whisperModelIdentifier = WhisperModelManager.compactModel
+        controller?.showLiveTranscript = false
+        controller = nil
+
+        let restored = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory)
+        )
+        #expect(restored.provider == .whisperKit)
+        #expect(restored.whisperModelIdentifier == WhisperModelManager.compactModel)
+        #expect(restored.showLiveTranscript == false)
+    }
+
     @Test func transcriptProjectionFollowsIndependentTimelineEdits() {
         let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Transcript.mov")
         let track = TranscriptTrack(

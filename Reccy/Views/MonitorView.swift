@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MonitorView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
+    @EnvironmentObject private var transcription: TranscriptionController
 
     private let meterColumns = [
         GridItem(.flexible(), spacing: 16),
@@ -16,6 +17,9 @@ struct MonitorView: View {
                         header
                         monitoringOverview
                         audioSection
+                        if transcription.showLiveTranscript {
+                            liveTranscriptSection
+                        }
                     }
                     .padding(28)
                     .frame(maxWidth: 980)
@@ -262,6 +266,77 @@ struct MonitorView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var liveTranscriptSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(
+                "Live transcript",
+                subtitle: "On-device words are aligned to their independent recording tracks."
+            )
+
+            if let notice = transcription.liveNotice {
+                CardContainer {
+                    Label(notice, systemImage: "captions.bubble")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                LazyVGrid(columns: meterColumns, alignment: .leading, spacing: 16) {
+                    if coordinator.settings.includeSystemAudio && transcription.transcribeSystemAudio {
+                        liveTranscriptCard(role: .systemAudio, color: .teal)
+                    }
+                    if coordinator.settings.includeMicrophone && transcription.transcribeMicrophone {
+                        liveTranscriptCard(role: .microphone, color: .orange)
+                    }
+                }
+            }
+        }
+    }
+
+    private func liveTranscriptCard(role: TranscriptTrackRole, color: Color) -> some View {
+        let update = transcription.liveUpdates[role]
+        let finalized = update?.finalizedSegments.suffix(5) ?? []
+        let volatile = update?.volatileSegments.suffix(2) ?? []
+        return CardContainer {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label(role.title, systemImage: role.systemImage)
+                        .font(.headline)
+                    Spacer()
+                    Circle()
+                        .fill(color)
+                        .frame(width: 7, height: 7)
+                    Text(update == nil ? "LISTENING" : "LIVE")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
+
+                if finalized.isEmpty && volatile.isEmpty {
+                    Text("Waiting for speech…")
+                        .font(.body)
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, minHeight: 72, alignment: .topLeading)
+                } else {
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(Array(finalized)) { segment in
+                            Text(segment.displayText)
+                                .font(.body)
+                                .textSelection(.enabled)
+                        }
+                        ForEach(Array(volatile)) { segment in
+                            Text(segment.displayText)
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .italic()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 72, alignment: .bottomLeading)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Live \(role.title) transcript")
     }
 
     private func metadataPill(_ text: String, systemImage: String) -> some View {

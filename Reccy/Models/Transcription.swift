@@ -209,6 +209,15 @@ nonisolated enum TranscriptProjection {
 }
 
 nonisolated extension TranscriptTrackRole {
+    var timelineLaneKind: TimelineLaneKind {
+        switch self {
+        case .systemAudio: .systemAudio
+        case .microphone: .microphone
+        case .voiceover: .voiceover
+        case .unknown: .systemAudio
+        }
+    }
+
     fileprivate var sortOrder: Int {
         switch self {
         case .systemAudio: 0

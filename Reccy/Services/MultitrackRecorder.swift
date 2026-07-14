@@ -143,10 +143,15 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     var onStarted: (@Sendable () -> Void)?
     var onFailure: (@Sendable (Error) -> Void)?
     var onVideoFrame: (@Sendable (CMSampleBuffer) -> Void)?
+    var onAudioPacket: (@Sendable (TranscriptTrackRole, TimedAudioBuffer) -> Void)?
 
     private let sampleQueue = DispatchQueue(
         label: "com.reccy.capture.samples",
         qos: .userInteractive
+    )
+    private let transcriptionQueue = DispatchQueue(
+        label: "com.reccy.capture.transcription",
+        qos: .userInitiated
     )
     private let streamLifecycleLock = NSLock()
 
@@ -557,9 +562,19 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                 fallbackDuration: nominalVideoFrameDuration
             )
         case .audio:
-            handleAudio(writerBuffer, pending: &pendingSystemAudio, input: systemAudioInput)
+            handleAudio(
+                writerBuffer,
+                pending: &pendingSystemAudio,
+                input: systemAudioInput,
+                role: .systemAudio
+            )
         case .microphone:
-            handleAudio(writerBuffer, pending: &pendingMicrophone, input: microphoneInput)
+            handleAudio(
+                writerBuffer,
+                pending: &pendingMicrophone,
+                input: microphoneInput,
+                role: .microphone
+            )
         @unknown default:
             return
         }
@@ -592,15 +607,16 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         writer.startSession(atSourceTime: time)
         sessionStartTime = time
 
-        flush(&pendingSystemAudio, to: systemAudioInput, startingAt: time)
-        flush(&pendingMicrophone, to: microphoneInput, startingAt: time)
+        flush(&pendingSystemAudio, to: systemAudioInput, startingAt: time, role: .systemAudio)
+        flush(&pendingMicrophone, to: microphoneInput, startingAt: time, role: .microphone)
         onStarted?()
     }
 
     private func handleAudio(
         _ sampleBuffer: CMSampleBuffer,
         pending: inout [CMSampleBuffer],
-        input: AVAssetWriterInput?
+        input: AVAssetWriterInput?,
+        role: TranscriptTrackRole
     ) {
         guard let sessionStartTime else {
             pending.append(sampleBuffer)
@@ -610,30 +626,52 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             return
         }
         guard CMTimeCompare(sampleBuffer.presentationTimeStamp, sessionStartTime) >= 0 else { return }
-        append(sampleBuffer, to: input)
+        if append(sampleBuffer, to: input) {
+            emitAudioPacket(sampleBuffer, role: role)
+        }
     }
 
     private func flush(
         _ buffers: inout [CMSampleBuffer],
         to input: AVAssetWriterInput?,
-        startingAt startTime: CMTime
+        startingAt startTime: CMTime,
+        role: TranscriptTrackRole
     ) {
         for sample in buffers where CMTimeCompare(sample.presentationTimeStamp, startTime) >= 0 {
-            append(sample, to: input)
+            if append(sample, to: input) {
+                emitAudioPacket(sample, role: role)
+            }
         }
         buffers.removeAll(keepingCapacity: true)
     }
 
+    @discardableResult
     private func append(
         _ sampleBuffer: CMSampleBuffer,
         to input: AVAssetWriterInput?,
         fallbackDuration: CMTime = .invalid
-    ) {
-        guard let input, input.isReadyForMoreMediaData else { return }
+    ) -> Bool {
+        guard let input, input.isReadyForMoreMediaData else { return false }
         if input.append(sampleBuffer) {
             recordAppendedSample(sampleBuffer, fallbackDuration: fallbackDuration)
+            return true
         } else if writer?.status == .failed {
             notifyFailure(MultitrackRecorderError.writerFailed(writer?.error))
+        }
+        return false
+    }
+
+    /// Copies accepted writer audio away from the real-time sample queue. The
+    /// recording path never waits for conversion, model loading, or inference.
+    private func emitAudioPacket(_ sampleBuffer: CMSampleBuffer, role: TranscriptTrackRole) {
+        guard let onAudioPacket, let sessionStartTime else { return }
+        let retainedSample = RetainedSampleBuffer(sampleBuffer)
+        transcriptionQueue.async {
+            let sampleBuffer = retainedSample.value
+            guard let buffer = try? TranscriptionAudioReader.pcmBuffer(from: sampleBuffer) else { return }
+            let relativeTime = CMTimeSubtract(sampleBuffer.presentationTimeStamp, sessionStartTime)
+            guard relativeTime.isValid, CMTimeCompare(relativeTime, .zero) >= 0 else { return }
+            onAudioPacket(role, TimedAudioBuffer(buffer: buffer, startTime: relativeTime))
         }
     }
 
@@ -830,6 +868,14 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         if !keepOutputURL {
             outputURL = nil
         }
+    }
+}
+
+private nonisolated final class RetainedSampleBuffer: @unchecked Sendable {
+    let value: CMSampleBuffer
+
+    init(_ value: CMSampleBuffer) {
+        self.value = value
     }
 }
 
