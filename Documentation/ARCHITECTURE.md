@@ -32,7 +32,7 @@ Region selection overlay ├── approved SCContentFilter
 
 ## Capture
 
-`CaptureCoordinator` owns user-visible state, persisted settings, privacy authorization, output naming, and the transition into the library. Display, application, and window approval use `SCContentSharingPicker`. Portion capture bypasses the whole-display picker and presents one coordinated, non-capturable selection panel per connected display; the accepted rectangle becomes the `sourceRect` of a display `SCContentFilter`.
+`CaptureCoordinator` owns user-visible state, persisted settings, privacy authorization, output naming, and the transition into the library. Display, application, and window approval use `SCContentSharingPicker` and remain available without a direct-capture grant. Portion capture needs the one-time Direct Screen & System Audio Access approval that macOS describes as bypassing the private window picker; Reccy then presents one coordinated, non-capturable selection panel per connected display, and the accepted rectangle becomes the `sourceRect` of a display `SCContentFilter`.
 
 `MultitrackRecorder` consumes ScreenCaptureKit sample buffers on one serial, user-interactive queue. The first complete video frame establishes the asset-writer session time. Early audio is buffered briefly and flushed from that same timestamp, preventing microphone or system-audio lead-in from shifting sync.
 
@@ -54,7 +54,7 @@ On macOS 26, `SCScreenshotConfiguration` captures the already-approved content f
 
 `TimelineEditorController` materializes that model as an `AVMutableComposition` for AVPlayer preview and export. Video, system audio, microphone, and voiceover remain independent lanes. A user can split only the selected clip or split every lane at the playhead, delete one clip, or ripple-delete a range across the project. Lane mute and volume are represented by `AVAudioMix` parameters.
 
-Voiceover uses `AVAudioRecorder` to write AAC into the project's `Media` directory. Each take becomes an independent audio clip at the current playhead, so it can be split, muted, deleted, or replaced without altering the screen recording.
+Voiceover uses an explicitly configured `AVCaptureSession` and `AVCaptureAudioFileOutput` so the user can choose a real input device instead of being limited to the current system default. The session commits its configuration before capture starts and writes mono 48 kHz AAC into the project's `Media` directory. Each take becomes an independent audio clip at the current playhead, so it can be moved, trimmed, split, muted, deleted, or replaced without altering the screen recording.
 
 Project packages use this shape:
 
@@ -83,7 +83,7 @@ Capture and editing are local. The only network surface is Sparkle's signed upda
 
 Release builds originate from an `.xcarchive`, include a dSYM archive, and are universal, timestamped Developer ID-signed, notarized, stapled, and checked by Gatekeeper. Sparkle archives and the feed are independently EdDSA-signed and published with a phased appcast through GitHub Releases. One shared validator gates local and CI releases on the exact bundle identity, version/tag, minimum OS, both architectures, Hardened Runtime, production entitlements, updater configuration, matching Sparkle key, notarization ticket, expanded-archive identity, and cryptographic archive/feed verification. Final artifacts include SHA-256 checksums and a commit-addressed machine-readable manifest.
 
-Local capture builds use the same identity principle. `Scripts/install-development.sh` refuses ad-hoc signing and requires a stable Apple Development or Developer ID certificate, ensuring macOS TCC sees rebuilt `/Applications/Reccy.app` bundles as the same application. It rejects a different team or designated code requirement and performs a staged same-volume replacement with rollback, preventing both privacy-identity churn and a half-installed app.
+Local capture builds use the same identity principle. `scripts/install-development.sh` refuses ad-hoc signing and requires a stable Apple Development or Developer ID certificate, ensuring macOS TCC sees rebuilt `/Applications/Reccy.app` bundles as the same application. It rejects a different team or designated code requirement and performs a staged same-volume replacement with rollback, preventing both privacy-identity churn and a half-installed app.
 
 ## Testing strategy
 
@@ -103,6 +103,7 @@ The automated suite covers Retina-aware resolution capping, no-upscale behavior,
 - [SCScreenshotConfiguration](https://developer.apple.com/documentation/screencapturekit/scscreenshotconfiguration)
 - [AVMutableComposition](https://developer.apple.com/documentation/avfoundation/avmutablecomposition)
 - [AVAssetExportSession](https://developer.apple.com/documentation/avfoundation/avassetexportsession)
-- [AVAudioRecorder](https://developer.apple.com/documentation/avfaudio/avaudiorecorder)
+- [AVCaptureSession](https://developer.apple.com/documentation/avfoundation/avcapturesession)
+- [AVCaptureAudioFileOutput](https://developer.apple.com/documentation/avfoundation/avcaptureaudiofileoutput)
 - [VideoToolbox](https://developer.apple.com/documentation/videotoolbox)
 - [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

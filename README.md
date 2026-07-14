@@ -6,7 +6,7 @@ Reccy is a native screen recorder and non-destructive multitrack editor for macO
 
 ## Capture the right thing
 
-Choose an entire display, every window from one application, or one specific window through Apple's private system picker. Portion capture uses a direct QuickTime-style overlay across connected displays. Reccy keeps the approved source obvious in the workspace and draws a local capture boundary that never appears in the recorded video.
+Choose an entire display, every window from one application, or one specific window through Apple's private system picker. Portion capture uses a direct QuickTime-style overlay across connected displays and a one-time approval that macOS describes as bypassing the private window picker. Reccy keeps the approved source obvious in the workspace and draws a local capture boundary that never appears in the recorded video.
 
 - Record system audio and a chosen microphone as separate editable tracks.
 - Monitor the live picture, elapsed time, safe-write status, and detailed audio levels from another display.
@@ -15,6 +15,12 @@ Choose an entire display, every window from one application, or one specific win
 - Choose 24, 30, or 60 fps and efficient HEVC, compatible H.264, or editing-oriented MOV capture.
 - Record HDR10 or save native HEIC, JPEG, and PNG screenshots in SDR or HDR.
 - Preflight free space from the selected capture bitrate, preserve a runtime filesystem reserve, and recover playable fragmented recordings after interruption.
+
+## Monitor without guessing
+
+![Reccy live recording monitor](Documentation/Screenshots/live-monitor.jpg)
+
+Monitor shows the exact incoming picture from the writer's shared ScreenCaptureKit surface, elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Pause, resume, or stop from this window while it remains open on another display.
 
 ## Edit without flattening the recording
 
@@ -90,19 +96,19 @@ Requirements:
 Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repository's CI-equivalent verification builds Debug, runs the automated suite, validates configuration and scripts, and builds Release:
 
 ```sh
-Scripts/verify-ci.sh
+scripts/verify-ci.sh
 ```
 
 The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, and cancellation. Installed-app Computer Use QA covers every workspace plus the real Library transport, timeline interactions, accessible editor actions, menu-bar pause/resume/stop, and end-to-end export progress.
 
 ### Permission identity matters
 
-macOS privacy grants are tied to the installed app's signing identity. Ad-hoc development builds are suitable for compilation, unit tests, and interface QA, but rebuilding them can invalidate Screen & System Audio Recording or Microphone grants. Reliable end-to-end capture testing requires a stable Apple Development or Developer ID signature.
+macOS privacy grants are tied to the installed app's signing identity. Ad-hoc development builds are suitable for compilation, unit tests, and interface QA, but rebuilding them can invalidate Direct Screen & System Audio Access or Microphone grants. Reliable end-to-end capture testing requires a stable Apple Development or Developer ID signature.
 
 After adding an Apple Account and Apple Development certificate in Xcode, use the guarded development installer:
 
 ```sh
-Scripts/install-development.sh
+scripts/install-development.sh
 ```
 
 It automatically selects an Apple Development or Developer ID identity, verifies the team identifier, refuses accidental ad-hoc installation, prevents replacing an install from a different team, and installs to `/Applications/Reccy.app`. Grant capture permissions once after the first stable-signed install; later local builds and signed Sparkle updates retain the same app identity. Local development installs on this machine use the Developer ID identity for team `BJCVJ5G7MJ`.

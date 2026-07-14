@@ -2,7 +2,7 @@
 
 Reccy ships outside the Mac App Store as a universal, hardened, Developer ID-signed and notarized app. Sparkle verifies both the signed appcast and the EdDSA-signed update archive before extraction.
 
-`Scripts/release.sh` is the single release entry point. Local and GitHub releases use the same fail-closed validators; no separate “CI-only” signing path exists.
+`scripts/release.sh` is the single release entry point. Local and GitHub releases use the same fail-closed validators; no separate “CI-only” signing path exists.
 
 ## Release invariants
 
@@ -22,7 +22,7 @@ Update `MARKETING_VERSION`, `CURRENT_PROJECT_VERSION`, and `Documentation/RELEAS
 ```sh
 RECCY_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 RECCY_DEVELOPMENT_TEAM="TEAMID" \
-Scripts/release.sh prepare
+scripts/release.sh prepare
 ```
 
 This creates and validates the universal `.xcarchive`, signed app, dSYM archive, and notarization ZIP. It does not contact Apple, create a GitHub release, or mutate any publishing state.
@@ -47,7 +47,7 @@ RECCY_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 RECCY_DEVELOPMENT_TEAM="TEAMID" \
 RECCY_NOTARY_KEYCHAIN_PROFILE="Reccy Notary" \
 RECCY_SPARKLE_KEY_ACCOUNT="ed25519" \
-Scripts/release.sh finalize
+scripts/release.sh finalize
 ```
 
 The final command submits to Apple, staples the accepted ticket, creates and signs the phased Sparkle feed, expands and re-verifies the update, and writes:
@@ -64,7 +64,7 @@ Never upload a Sparkle private key, Developer ID certificate, notarization crede
 
 ## GitHub Actions
 
-Pushing a `v*` tag starts `.github/workflows/release.yml` on GitHub’s macOS 26 runner. It imports the certificate into an ephemeral keychain, runs the same `Scripts/release.sh finalize` gate, preserves notarization evidence and dSYMs as a private workflow artifact, publishes only verified update assets, and removes every materialized credential even after failure.
+Pushing a `v*` tag starts `.github/workflows/release.yml` on GitHub’s macOS 26 runner. It imports the certificate into an ephemeral keychain, runs the same `scripts/release.sh finalize` gate, preserves notarization evidence and dSYMs as a private workflow artifact, publishes only verified update assets, and removes every materialized credential even after failure.
 
 The repository requires these Actions secrets:
 
@@ -77,4 +77,4 @@ Protect the release environment with required reviewers, restrict tag creation, 
 
 ## Stable development installs
 
-Use `Scripts/install-development.sh` for `/Applications/Reccy.app`. It refuses ad-hoc signing, verifies the bundle identity and team, compares the designated code requirement with the installed app, stages the replacement on the same volume, and restores the prior app if the swap fails. This stable identity is what lets macOS retain Screen Recording and Microphone privacy grants across rebuilds.
+Use `scripts/install-development.sh` for `/Applications/Reccy.app`. It refuses ad-hoc signing, verifies the bundle identity and team, compares the designated code requirement with the installed app, stages the replacement on the same volume, and restores the prior app if the swap fails. This stable identity is what lets macOS retain Direct Screen & System Audio Access and Microphone grants across rebuilds.
