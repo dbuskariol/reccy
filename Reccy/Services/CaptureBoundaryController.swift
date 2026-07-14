@@ -17,6 +17,7 @@ final class CaptureBoundaryController {
     private var duration: TimeInterval = 0
     private var panels: [NSPanel] = []
     private var refreshTask: Task<Void, Never>?
+    private var presentationGeneration: UInt = 0
 
     func show(target: CaptureBoundaryTarget, sourceName: String) {
         hide()
@@ -25,10 +26,11 @@ final class CaptureBoundaryController {
         isRecording = false
         isPaused = false
         duration = 0
+        let generation = presentationGeneration
         refreshTask = Task { [weak self] in
             guard let self else { return }
             repeat {
-                await refreshFrames()
+                await refreshFrames(for: target, generation: generation)
                 guard target.needsPolling, !Task.isCancelled else { return }
                 try? await Task.sleep(for: .milliseconds(400))
             } while !Task.isCancelled
@@ -47,15 +49,18 @@ final class CaptureBoundaryController {
     }
 
     func hide() {
+        presentationGeneration &+= 1
         refreshTask?.cancel()
         refreshTask = nil
         target = nil
-        for panel in panels { panel.orderOut(nil) }
+        for panel in panels { panel.close() }
         panels.removeAll()
     }
 
-    private func refreshFrames() async {
-        guard let target else { return }
+    private func refreshFrames(
+        for target: CaptureBoundaryTarget,
+        generation: UInt
+    ) async {
         let frames: [CGRect]
         switch target {
         case .display(let displayID):
@@ -80,7 +85,30 @@ final class CaptureBoundaryController {
         case .application(let bundleIdentifier):
             frames = await windowFrames(windowIDs: nil, bundleIdentifier: bundleIdentifier)
         }
+        guard Self.shouldApplyRefresh(
+            generation: generation,
+            currentGeneration: presentationGeneration,
+            target: target,
+            currentTarget: self.target,
+            isCancelled: Task.isCancelled
+        ) else { return }
         display(frames: frames)
+    }
+
+    /// ScreenCaptureKit content discovery is not cooperatively cancellable.
+    /// The generation and target together form the presentation's ownership
+    /// lease, preventing a completed lookup from resurrecting panels after a
+    /// source change or terminal recording cleanup.
+    nonisolated static func shouldApplyRefresh(
+        generation: UInt,
+        currentGeneration: UInt,
+        target: CaptureBoundaryTarget,
+        currentTarget: CaptureBoundaryTarget?,
+        isCancelled: Bool
+    ) -> Bool {
+        !isCancelled
+            && generation == currentGeneration
+            && currentTarget == target
     }
 
     private func windowFrames(

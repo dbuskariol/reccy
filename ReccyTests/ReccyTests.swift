@@ -26,6 +26,39 @@ struct ReccyTests {
         #expect(converted == CGRect(x: 100, y: 520, width: 640, height: 360))
     }
 
+    @Test func staleBoundaryRefreshesCannotRestoreOverlaysAfterSessionCleanup() {
+        let targets: [CaptureBoundaryTarget] = [
+            .display(1),
+            .region(1, CaptureRegion(CGRect(x: 20, y: 40, width: 640, height: 360))),
+            .application("com.example.Editor"),
+            .windows([41, 42]),
+        ]
+
+        for target in targets {
+            #expect(CaptureBoundaryController.shouldApplyRefresh(
+                generation: 7,
+                currentGeneration: 7,
+                target: target,
+                currentTarget: target,
+                isCancelled: false
+            ))
+            #expect(!CaptureBoundaryController.shouldApplyRefresh(
+                generation: 7,
+                currentGeneration: 8,
+                target: target,
+                currentTarget: nil,
+                isCancelled: true
+            ))
+            #expect(!CaptureBoundaryController.shouldApplyRefresh(
+                generation: 7,
+                currentGeneration: 8,
+                target: target,
+                currentTarget: .display(99),
+                isCancelled: false
+            ))
+        }
+    }
+
     @Test func everyCapturePhaseHasOneDeterministicStopOperation() {
         #expect(CaptureState.idle.stopOperation == .none)
         #expect(CaptureState.sourceSelected.stopOperation == .none)
