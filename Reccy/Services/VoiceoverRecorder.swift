@@ -55,26 +55,7 @@ nonisolated final class VoiceoverRecorder: NSObject, AVCaptureFileOutputRecordin
                         device = defaultDevice
                     }
 
-                    session.beginConfiguration()
-                    defer { session.commitConfiguration() }
-
-                    let input = try AVCaptureDeviceInput(device: device)
-                    guard session.canAddInput(input) else {
-                        throw VoiceoverRecorderError.cannotAddInput
-                    }
-                    session.addInput(input)
-
-                    guard session.canAddOutput(output) else {
-                        throw VoiceoverRecorderError.cannotAddOutput
-                    }
-                    session.addOutput(output)
-                    output.audioSettings = [
-                        AVFormatIDKey: kAudioFormatMPEG4AAC,
-                        AVSampleRateKey: 48_000,
-                        AVNumberOfChannelsKey: 1,
-                        AVEncoderBitRateKey: 128_000,
-                        AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-                    ]
+                    try configureSession(for: device)
 
                     outputURL = url
                     session.startRunning()
@@ -88,6 +69,35 @@ nonisolated final class VoiceoverRecorder: NSObject, AVCaptureFileOutputRecordin
                     continuation.resume(throwing: error)
                 }
             }
+        }
+    }
+
+    private func configureSession(for device: AVCaptureDevice) throws {
+        session.beginConfiguration()
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else {
+                throw VoiceoverRecorderError.cannotAddInput
+            }
+            session.addInput(input)
+
+            guard session.canAddOutput(output) else {
+                throw VoiceoverRecorderError.cannotAddOutput
+            }
+            session.addOutput(output)
+            output.audioSettings = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 128_000,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            ]
+            session.commitConfiguration()
+        } catch {
+            // AVCaptureSession must leave its configuration transaction before
+            // any subsequent lifecycle operation, including error recovery.
+            session.commitConfiguration()
+            throw error
         }
     }
 
