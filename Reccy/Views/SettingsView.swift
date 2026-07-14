@@ -363,19 +363,10 @@ struct SettingsView: View {
                     }
                 }
             }
+            .accessibilityElement(children: .combine)
 
-            HStack {
-                Button {
-                    coordinator.refreshPermissionStatus()
-                } label: {
-                    Label("Check Again", systemImage: "arrow.clockwise")
-                }
-                Spacer()
-                Text("Permission changes are refreshed whenever Reccy becomes active.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
+        .accessibilityElement(children: .contain)
     }
 
     private var shortcutSettings: some View {
@@ -396,6 +387,10 @@ struct SettingsView: View {
             }
 
             SettingsCard(title: "Editor Shortcuts") {
+                Text("Available whenever the timeline editor is active.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Divider()
                 editorShortcutRow("Play or pause", keys: "Space", systemImage: "playpause")
                 SettingsDivider()
                 editorShortcutRow("Previous frame", keys: "⌃←", systemImage: "backward.frame.fill")
@@ -582,11 +577,15 @@ struct SettingsView: View {
     }
 
     private func editorShortcutRow(_ title: String, keys: String, systemImage: String) -> some View {
-        SettingsValueRow(
-            title: title,
-            detail: "Available whenever the timeline editor is active.",
-            systemImage: systemImage
-        ) {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+            Text(title)
+                .font(.headline)
+            Spacer()
             Text(keys)
                 .font(.callout.monospaced().weight(.semibold))
                 .padding(.horizontal, 9)
@@ -628,6 +627,32 @@ private struct SettingsDivider: View {
     }
 }
 
+private struct SettingsRowDescription: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.headline)
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .layoutPriority(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 private struct SettingsValueRow<Control: View>: View {
     let title: String
     let detail: String
@@ -648,20 +673,7 @@ private struct SettingsValueRow<Control: View>: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: systemImage)
-                .font(.title3)
-                .foregroundStyle(.tint)
-                .frame(width: 28)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.headline)
-                Text(detail)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .layoutPriority(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            SettingsRowDescription(title: title, detail: detail, systemImage: systemImage)
             control
                 .fixedSize(horizontal: true, vertical: false)
         }
@@ -767,13 +779,18 @@ private struct SettingsPermissionRow<Actions: View>: View {
     }
 
     var body: some View {
-        SettingsValueRow(title: title, detail: detail, systemImage: systemImage) {
-            HStack(spacing: 8) {
+        HStack(spacing: 14) {
+            HStack(spacing: 12) {
+                SettingsRowDescription(title: title, detail: detail, systemImage: systemImage)
                 Label(status.title, systemImage: status.systemImage)
                     .font(.callout.weight(.medium))
                     .foregroundStyle(status.color)
-                actions
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(title), \(status.title)")
+            .accessibilityHint(detail)
+            actions
+                .fixedSize(horizontal: true, vertical: false)
         }
     }
 }
