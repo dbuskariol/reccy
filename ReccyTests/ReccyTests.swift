@@ -199,6 +199,55 @@ struct ReccyTests {
         #expect(playerView.player === player)
     }
 
+    @Test @MainActor func unsupportedEditorProjectCanResetWithoutTouchingSourceMedia() async throws {
+        let mediaURL = try await makeColorTestVideo()
+        let packageURL = mediaURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("Projects", isDirectory: true)
+            .appendingPathComponent(
+                "\(mediaURL.deletingPathExtension().lastPathComponent).reccyproject",
+                isDirectory: true
+            )
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+        }
+
+        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+        try Data("{\"formatVersion\":2}".utf8).write(
+            to: packageURL.appendingPathComponent("project.json")
+        )
+        let sourceData = try Data(contentsOf: mediaURL)
+        let fileSize = try mediaURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: Int64(fileSize),
+            duration: 3,
+            manifest: makeRecoveryManifest()
+        )
+        let controller = TimelineEditorController()
+
+        await controller.open(item)
+
+        #expect(controller.project == nil)
+        #expect(controller.canResetUnsupportedProject)
+        #expect(controller.errorMessage != nil)
+        #expect(FileManager.default.fileExists(atPath: packageURL.path))
+
+        await controller.resetUnsupportedProject()
+
+        #expect(controller.project?.formatVersion == TimelineProject.currentFormatVersion)
+        #expect(controller.errorMessage == nil)
+        #expect(!controller.canResetUnsupportedProject)
+        #expect(try Data(contentsOf: mediaURL) == sourceData)
+        let savedData = try Data(contentsOf: packageURL.appendingPathComponent("project.json"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        #expect(try decoder.decode(TimelineProject.self, from: savedData).formatVersion
+            == TimelineProject.currentFormatVersion)
+    }
+
     @Test func resolutionCapsRetinaSourceWithoutChangingAspectRatio() {
         let size = CaptureResolution.quadHD.outputSize(
             contentRect: CGRect(x: 0, y: 0, width: 2560, height: 1440),

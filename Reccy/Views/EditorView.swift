@@ -43,11 +43,21 @@ struct EditorView: View {
         } message: {
             Text(exportError ?? "Unknown error")
         }
-        .alert("Editor Couldn’t Apply Change", isPresented: Binding(
-            get: { editor.errorMessage != nil },
-            set: { if !$0 { editor.errorMessage = nil } }
-        )) {
-            Button("OK") { editor.errorMessage = nil }
+        .alert(
+            editor.canResetUnsupportedProject ? "Reset Editor Project?" : "Editor Couldn’t Apply Change",
+            isPresented: Binding(
+                get: { editor.errorMessage != nil },
+                set: { if !$0 { editor.dismissError() } }
+            )
+        ) {
+            if editor.canResetUnsupportedProject {
+                Button("Reset Project", role: .destructive) {
+                    Task { await editor.resetUnsupportedProject() }
+                }
+                Button("Cancel", role: .cancel) { editor.dismissError() }
+            } else {
+                Button("OK") { editor.dismissError() }
+            }
         } message: {
             Text(editor.errorMessage ?? "Unknown error")
         }

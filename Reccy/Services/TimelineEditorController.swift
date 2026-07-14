@@ -19,7 +19,7 @@ enum TimelineEditorError: LocalizedError {
         case .microphonePermissionDenied: "Microphone access is required to record a voiceover."
         case .voiceoverCouldNotStart: "The voiceover recorder couldn’t start."
         case .exportUnsupported: "That export format isn’t compatible with this project."
-        case .projectFormatUnsupported: "This timeline uses an unsupported development format. Remove its project package and open the recording again."
+        case .projectFormatUnsupported: "This timeline was created by an incompatible development build. Reset its non-destructive edits to reopen it; the source recording stays untouched."
         }
     }
 }
@@ -36,6 +36,7 @@ final class TimelineEditorController: ObservableObject {
     @Published var playhead: TimeInterval = 0
     @Published var pixelsPerSecond: Double = 72
     @Published var errorMessage: String?
+    @Published private(set) var canResetUnsupportedProject = false
     @Published var moveLinkedClips = false
     @Published private(set) var voiceoverInputDevices: [AudioInputDevice] = []
     @Published var selectedVoiceoverInputID: String? = UserDefaults.standard.string(
@@ -67,6 +68,7 @@ final class TimelineEditorController: ObservableObject {
     private var interactionSnapTime: TimeInterval = 0
     private var interactionPreviewVideoID: UUID?
     private var rebuildGeneration: UInt = 0
+    private var unsupportedProjectRecovery: UnsupportedProjectRecovery?
 
     init() {
         refreshVoiceoverInputDevices()
@@ -101,115 +103,193 @@ final class TimelineEditorController: ObservableObject {
 
     func open(_ item: RecordingItem) async {
         isLoading = true
-        errorMessage = nil
+        dismissError()
         defer { isLoading = false }
 
+        let packageURL = Self.projectPackageURL(for: item)
         do {
-            let packageURL = item.url
-                .deletingLastPathComponent()
-                .appendingPathComponent("Projects", isDirectory: true)
-                .appendingPathComponent("\(item.name).reccyproject", isDirectory: true)
-            try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
-            projectPackageURL = packageURL
-            let savedProjectURL = packageURL.appendingPathComponent("project.json")
+            let loaded = try await loadProject(for: item, packageURL: packageURL)
+            try await installLoadedProject(loaded, packageURL: packageURL)
+        } catch TimelineEditorError.projectFormatUnsupported {
+            unsupportedProjectRecovery = UnsupportedProjectRecovery(
+                item: item,
+                packageURL: packageURL
+            )
+            canResetUnsupportedProject = true
+            errorMessage = TimelineEditorError.projectFormatUnsupported.localizedDescription
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
 
-            if FileManager.default.fileExists(atPath: savedProjectURL.path) {
-                let data = try Data(contentsOf: savedProjectURL)
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .iso8601
-                let header = try decoder.decode(TimelineProjectHeader.self, from: data)
-                guard header.formatVersion == TimelineProject.currentFormatVersion else {
-                    throw TimelineEditorError.projectFormatUnsupported
-                }
-                let savedProject = try decoder.decode(TimelineProject.self, from: data)
+    func dismissError() {
+        errorMessage = nil
+        canResetUnsupportedProject = false
+        unsupportedProjectRecovery = nil
+    }
 
-                sourceDurations.removeAll(keepingCapacity: true)
-                for url in Set(savedProject.lanes.flatMap(\.clips).map(\.sourceURL)) {
-                    let sourceAsset = AVURLAsset(url: url)
-                    sourceDurations[url] = try await sourceAsset.load(.duration).seconds
-                }
-                project = savedProject
-                playhead = 0
-                selectedClipID = savedProject.lanes.flatMap(\.clips).first?.id
-                selectedGapID = nil
-                try await rebuildComposition()
-                return
+    func resetUnsupportedProject() async {
+        guard let recovery = unsupportedProjectRecovery else { return }
+        dismissError()
+
+        do {
+            if FileManager.default.fileExists(atPath: recovery.packageURL.path) {
+                try FileManager.default.removeItem(at: recovery.packageURL)
             }
+            await open(recovery.item)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
 
-            let asset = AVURLAsset(url: item.url)
-            let duration = try await asset.load(.duration).seconds
-            let videoTracks = try await asset.loadTracks(withMediaType: .video)
-            let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-            guard !videoTracks.isEmpty || !audioTracks.isEmpty else {
-                throw TimelineEditorError.noMedia
+    private static func projectPackageURL(for item: RecordingItem) -> URL {
+        item.url
+            .deletingLastPathComponent()
+            .appendingPathComponent("Projects", isDirectory: true)
+            .appendingPathComponent("\(item.name).reccyproject", isDirectory: true)
+    }
+
+    private func loadProject(
+        for item: RecordingItem,
+        packageURL: URL
+    ) async throws -> LoadedTimelineProject {
+        let savedProjectURL = packageURL.appendingPathComponent("project.json")
+        if FileManager.default.fileExists(atPath: savedProjectURL.path) {
+            let data = try Data(contentsOf: savedProjectURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let header = try decoder.decode(TimelineProjectHeader.self, from: data)
+            guard header.formatVersion == TimelineProject.currentFormatVersion else {
+                throw TimelineEditorError.projectFormatUnsupported
             }
+            let savedProject = try decoder.decode(TimelineProject.self, from: data)
+            var durations: [URL: TimeInterval] = [:]
+            for url in Set(savedProject.lanes.flatMap(\.clips).map(\.sourceURL)) {
+                let sourceAsset = AVURLAsset(url: url)
+                durations[url] = try await sourceAsset.load(.duration).seconds
+            }
+            return LoadedTimelineProject(
+                project: savedProject,
+                sourceDurations: durations,
+                needsInitialSave: false
+            )
+        }
 
-            let linkedGroupID = UUID()
-            var lanes: [TimelineLane] = []
-            if let videoTrack = videoTracks.first {
-                lanes.append(
-                    TimelineLane(
-                        kind: .video,
-                        name: "Screen",
-                        clips: [
-                            TimelineClip(
-                                sourceURL: item.url,
-                                sourceTrackID: videoTrack.trackID,
-                                sourceStart: 0,
-                                timelineStart: 0,
-                                duration: duration,
-                                name: item.name,
-                                linkedGroupID: linkedGroupID
-                            ),
-                        ]
-                    )
+        let asset = AVURLAsset(url: item.url)
+        let duration = try await asset.load(.duration).seconds
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        guard !videoTracks.isEmpty || !audioTracks.isEmpty else {
+            throw TimelineEditorError.noMedia
+        }
+
+        let linkedGroupID = UUID()
+        var lanes: [TimelineLane] = []
+        if let videoTrack = videoTracks.first {
+            lanes.append(
+                TimelineLane(
+                    kind: .video,
+                    name: "Screen",
+                    clips: [
+                        TimelineClip(
+                            sourceURL: item.url,
+                            sourceTrackID: videoTrack.trackID,
+                            sourceStart: 0,
+                            timelineStart: 0,
+                            duration: duration,
+                            name: item.name,
+                            linkedGroupID: linkedGroupID
+                        ),
+                    ]
                 )
-            }
+            )
+        }
 
-            var audioLaneDescriptions: [(kind: TimelineLaneKind, name: String)] = []
-            if item.manifest.includesSystemAudio {
-                audioLaneDescriptions.append((.systemAudio, "System Audio"))
-            }
-            if item.manifest.includesMicrophone {
-                audioLaneDescriptions.append((
-                    .microphone,
-                    item.manifest.microphoneName ?? "Microphone"
-                ))
-            }
+        var audioLaneDescriptions: [(kind: TimelineLaneKind, name: String)] = []
+        if item.manifest.includesSystemAudio {
+            audioLaneDescriptions.append((.systemAudio, "System Audio"))
+        }
+        if item.manifest.includesMicrophone {
+            audioLaneDescriptions.append((
+                .microphone,
+                item.manifest.microphoneName ?? "Microphone"
+            ))
+        }
 
-            for (track, description) in zip(audioTracks, audioLaneDescriptions) {
-                lanes.append(
-                    TimelineLane(
-                        kind: description.kind,
-                        name: description.name,
-                        clips: [
-                            TimelineClip(
-                                sourceURL: item.url,
-                                sourceTrackID: track.trackID,
-                                sourceStart: 0,
-                                timelineStart: 0,
-                                duration: duration,
-                                name: description.name,
-                                linkedGroupID: linkedGroupID
-                            ),
-                        ]
-                    )
+        for (track, description) in zip(audioTracks, audioLaneDescriptions) {
+            lanes.append(
+                TimelineLane(
+                    kind: description.kind,
+                    name: description.name,
+                    clips: [
+                        TimelineClip(
+                            sourceURL: item.url,
+                            sourceTrackID: track.trackID,
+                            sourceStart: 0,
+                            timelineStart: 0,
+                            duration: duration,
+                            name: description.name,
+                            linkedGroupID: linkedGroupID
+                        ),
+                    ]
                 )
-            }
+            )
+        }
 
-            project = TimelineProject(
+        return LoadedTimelineProject(
+            project: TimelineProject(
                 name: item.name,
                 frameRate: Double(item.manifest.frameRate),
                 lanes: lanes
-            )
-            sourceDurations = [item.url: duration]
-            playhead = 0
-            selectedClipID = lanes.first?.clips.first?.id
-            selectedGapID = nil
+            ),
+            sourceDurations: [item.url: duration],
+            needsInitialSave: true
+        )
+    }
+
+    private func installLoadedProject(
+        _ loaded: LoadedTimelineProject,
+        packageURL: URL
+    ) async throws {
+        let previous = EditorProjectSnapshot(
+            project: project,
+            projectPackageURL: projectPackageURL,
+            sourceDurations: sourceDurations,
+            selectedClipID: selectedClipID,
+            selectedGapID: selectedGapID,
+            playhead: playhead
+        )
+
+        project = loaded.project
+        projectPackageURL = packageURL
+        sourceDurations = loaded.sourceDurations
+        playhead = 0
+        selectedClipID = loaded.project.lanes.flatMap(\.clips).first?.id
+        selectedGapID = nil
+
+        do {
             try await rebuildComposition()
-            try save()
+            if loaded.needsInitialSave {
+                try save()
+            }
         } catch {
-            errorMessage = error.localizedDescription
+            project = previous.project
+            projectPackageURL = previous.projectPackageURL
+            sourceDurations = previous.sourceDurations
+            selectedClipID = previous.selectedClipID
+            selectedGapID = previous.selectedGapID
+            playhead = previous.playhead
+
+            if previous.project != nil {
+                try? await rebuildComposition()
+            } else {
+                rebuildGeneration &+= 1
+                composition = nil
+                compositionVideoComposition = nil
+                compositionAudioMix = nil
+                player.replaceCurrentItem(with: nil)
+            }
+            throw error
         }
     }
 
@@ -697,6 +777,26 @@ final class TimelineEditorController: ObservableObject {
 
 private struct TimelineProjectHeader: Decodable {
     let formatVersion: Int
+}
+
+private struct LoadedTimelineProject {
+    let project: TimelineProject
+    let sourceDurations: [URL: TimeInterval]
+    let needsInitialSave: Bool
+}
+
+private struct EditorProjectSnapshot {
+    let project: TimelineProject?
+    let projectPackageURL: URL?
+    let sourceDurations: [URL: TimeInterval]
+    let selectedClipID: UUID?
+    let selectedGapID: UUID?
+    let playhead: TimeInterval
+}
+
+private struct UnsupportedProjectRecovery {
+    let item: RecordingItem
+    let packageURL: URL
 }
 
 private enum TimelineInteractionKind: Equatable {
