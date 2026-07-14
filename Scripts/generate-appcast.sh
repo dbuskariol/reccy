@@ -2,25 +2,22 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/Scripts/lib/reccy-release.sh"
+
 DERIVED_DATA="${RECCY_DERIVED_DATA:-$ROOT_DIR/.build/ReleaseDerivedData}"
 UPDATES_DIR="$ROOT_DIR/dist/updates"
-GENERATE_APPCAST="$DERIVED_DATA/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast"
+APP="$ROOT_DIR/dist/Reccy.app"
 REPOSITORY="${RECCY_GITHUB_REPOSITORY:-dbuskariol/reccy}"
 DOWNLOAD_PREFIX="https://github.com/$REPOSITORY/releases/latest/download/"
 
-if [[ ! -x "$GENERATE_APPCAST" ]]; then
-  /usr/bin/xcodebuild \
-    -project "$ROOT_DIR/Reccy.xcodeproj" \
-    -scheme Reccy \
-    -configuration Release \
-    -destination 'platform=macOS' \
-    -derivedDataPath "$DERIVED_DATA" \
-    -resolvePackageDependencies
+[[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+  || reccy_fail "invalid GitHub repository: $REPOSITORY"
+reccy_assert_release_app "$APP" "${RECCY_DEVELOPMENT_TEAM:-}"
+if [[ "${RECCY_ALLOW_UNNOTARIZED_PACKAGE:-0}" != "1" ]]; then
+  reccy_assert_notarized_app "$APP"
 fi
-[[ -x "$GENERATE_APPCAST" ]] || {
-  printf 'Sparkle generate_appcast was not resolved at %s\n' "$GENERATE_APPCAST" >&2
-  exit 1
-}
+GENERATE_APPCAST="$(reccy_resolve_sparkle_tool "$ROOT_DIR" "$DERIVED_DATA" generate_appcast)"
+reccy_assert_sparkle_signing_key "$ROOT_DIR" "$APP" "$DERIVED_DATA"
 
 if [[ ! -d "$UPDATES_DIR" || -z "$(/usr/bin/find "$UPDATES_DIR" -maxdepth 1 -name 'Reccy-*.zip' -print -quit)" ]]; then
   "$ROOT_DIR/Scripts/package-update.sh"
@@ -42,4 +39,4 @@ fi
   --auto-prune-update-files \
   "$UPDATES_DIR"
 
-printf 'Generated %s/appcast.xml\n' "$UPDATES_DIR"
+reccy_note "Generated $UPDATES_DIR/appcast.xml"

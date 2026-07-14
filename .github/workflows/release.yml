@@ -15,15 +15,14 @@ jobs:
   release:
     name: Sign, notarize, and publish
     runs-on: macos-26
+    environment: release
     timeout-minutes: 60
     steps:
       - name: Check out
-        uses: actions/checkout@v6
-
-      - name: Validate tag version
-        run: |
-          VERSION="$(xcodebuild -project Reccy.xcodeproj -scheme Reccy -configuration Release -showBuildSettings | awk '/MARKETING_VERSION =/{print $3; exit}')"
-          test "${GITHUB_REF_NAME}" = "v${VERSION}"
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Import Developer ID certificate
         env:
@@ -33,6 +32,8 @@ jobs:
           KEYCHAIN="$RUNNER_TEMP/reccy-signing.keychain-db"
           CERTIFICATE="$RUNNER_TEMP/developer-id.p12"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          echo "RECCY_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          echo "RECCY_SIGNING_CERTIFICATE=$CERTIFICATE" >> "$GITHUB_ENV"
           printf '%s' "$CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
@@ -53,26 +54,28 @@ jobs:
           printf '%s' "$SPARKLE_KEY_BASE64" | base64 -D > "$RUNNER_TEMP/reccy-sparkle-key"
           chmod 600 "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/reccy-sparkle-key"
 
-      - name: Build Developer ID release
+      - name: Build, notarize, and verify release
         env:
           RECCY_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
-          RECCY_REQUIRE_DEVELOPER_ID: '1'
-        run: Scripts/build-release.sh
-
-      - name: Notarize, staple, and generate Sparkle feed
-        env:
           RECCY_NOTARY_KEY_PATH: ${{ runner.temp }}/AuthKey_${{ secrets.APP_STORE_CONNECT_KEY_ID }}.p8
           RECCY_NOTARY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           RECCY_NOTARY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           RECCY_SPARKLE_PRIVATE_KEY_FILE: ${{ runner.temp }}/reccy-sparkle-key
           RECCY_GITHUB_REPOSITORY: ${{ github.repository }}
-        run: Scripts/notarize-release.sh
+          RECCY_RELEASE_TAG: ${{ github.ref_name }}
+        run: Scripts/release.sh finalize
 
-      - name: Verify release artifacts
-        env:
-          RECCY_GITHUB_REPOSITORY: ${{ github.repository }}
-          RECCY_REQUIRE_DEVELOPER_ID: '1'
-        run: Scripts/verify-sparkle-update.sh
+      - name: Preserve release evidence and debug symbols
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: reccy-${{ github.ref_name }}-release-evidence
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            dist/notarization/*.json
+            dist/symbols/*.zip
+            dist/updates/release.json
+            dist/updates/SHA256SUMS
 
       - name: Publish GitHub release
         env:
@@ -82,7 +85,20 @@ jobs:
             dist/updates/appcast.xml \
             dist/updates/Reccy-*.zip \
             dist/updates/Reccy-*.md \
+            dist/updates/release.json \
+            dist/updates/SHA256SUMS \
             --title "Reccy ${GITHUB_REF_NAME#v}" \
             --notes-file Documentation/RELEASE_NOTES.md \
             --verify-tag \
             --latest
+
+      - name: Remove release credentials
+        if: always()
+        run: |
+          if [[ -n "${RECCY_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$RECCY_SIGNING_KEYCHAIN" || true
+          fi
+          rm -f \
+            "${RECCY_SIGNING_CERTIFICATE:-}" \
+            "$RUNNER_TEMP"/AuthKey_*.p8 \
+            "$RUNNER_TEMP/reccy-sparkle-key"

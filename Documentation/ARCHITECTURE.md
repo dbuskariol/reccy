@@ -81,9 +81,9 @@ Icon controls use one shared semantic-label and tooltip primitive so the visible
 
 Capture and editing are local. The only network surface is Sparkle's signed update feed. Hardened Runtime is enabled. App Sandbox is intentionally disabled for direct distribution so ScreenCaptureKit, the default Movies folder, persisted custom output directories, and imported media remain first-class without broad security-scoped-bookmark plumbing.
 
-Release builds are universal, Developer ID-signed, notarized, stapled, and checked by Gatekeeper. Sparkle archives are independently EdDSA-signed and published with a phased appcast through GitHub Releases. The release scripts fail closed when the app is missing either architecture, the embedded updater, a matching version, a valid archive signature, or the notarization ticket.
+Release builds originate from an `.xcarchive`, include a dSYM archive, and are universal, timestamped Developer ID-signed, notarized, stapled, and checked by Gatekeeper. Sparkle archives and the feed are independently EdDSA-signed and published with a phased appcast through GitHub Releases. One shared validator gates local and CI releases on the exact bundle identity, version/tag, minimum OS, both architectures, Hardened Runtime, production entitlements, updater configuration, matching Sparkle key, notarization ticket, expanded-archive identity, and cryptographic archive/feed verification. Final artifacts include SHA-256 checksums and a commit-addressed machine-readable manifest.
 
-Local capture builds use the same identity principle. `Scripts/install-development.sh` refuses ad-hoc signing and requires a stable Apple Development or Developer ID certificate, ensuring macOS TCC sees rebuilt `/Applications/Reccy.app` bundles as the same application. It also rejects an installed Reccy signed by a different team.
+Local capture builds use the same identity principle. `Scripts/install-development.sh` refuses ad-hoc signing and requires a stable Apple Development or Developer ID certificate, ensuring macOS TCC sees rebuilt `/Applications/Reccy.app` bundles as the same application. It rejects a different team or designated code requirement and performs a staged same-volume replacement with rollback, preventing both privacy-identity churn and a half-installed app.
 
 ## Testing strategy
 

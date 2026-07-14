@@ -109,7 +109,7 @@ It automatically selects an Apple Development or Developer ID identity, verifies
 
 ## Release
 
-Release automation builds a universal app, imports an ephemeral signing identity, enables Hardened Runtime, notarizes and staples the bundle, signs the Sparkle archive, verifies the appcast and Gatekeeper result, and publishes a tagged GitHub release. See [Documentation/RELEASING.md](Documentation/RELEASING.md) for required secrets and the local release procedure.
+Release automation builds an `.xcarchive`, validates a timestamped universal Developer ID app and production entitlements, notarizes and staples the bundle, proves that the Sparkle key matches the app, cryptographically verifies the archive and appcast, re-validates the expanded update, and emits checksums plus a machine-readable release manifest. The tag workflow preserves dSYMs and Apple evidence privately before publishing only verified assets. See [Documentation/RELEASING.md](Documentation/RELEASING.md) for the rehearsal, finalization, trust gates, and required secrets.
 
 ## Privacy
 

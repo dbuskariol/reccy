@@ -2,9 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/Scripts/lib/reccy-release.sh"
+
 APP="${1:-$ROOT_DIR/dist/Reccy.app}"
 UPDATES_DIR="${2:-$ROOT_DIR/dist/updates}"
 APPCAST="$UPDATES_DIR/appcast.xml"
+DERIVED_DATA="${RECCY_DERIVED_DATA:-$ROOT_DIR/.build/ReleaseDerivedData}"
 REPOSITORY="${RECCY_GITHUB_REPOSITORY:-dbuskariol/reccy}"
 DOWNLOAD_PREFIX="https://github.com/$REPOSITORY/releases/latest/download/"
 
@@ -21,6 +24,11 @@ xml_value() {
 
 [[ -d "$APP" ]] || fail "missing app bundle $APP"
 [[ -f "$APPCAST" ]] || fail "missing appcast $APPCAST"
+reccy_assert_release_app "$APP" "${RECCY_DEVELOPMENT_TEAM:-}"
+if [[ "${RECCY_ALLOW_UNNOTARIZED_PACKAGE:-0}" != "1" ]]; then
+  reccy_assert_notarized_app "$APP"
+fi
+reccy_assert_sparkle_signing_key "$ROOT_DIR" "$APP" "$DERIVED_DATA"
 
 INFO="$APP/Contents/Info.plist"
 BUNDLE_ID="$(plist_value CFBundleIdentifier "$INFO")"
@@ -68,15 +76,27 @@ APPCAST_SIGNATURE="$(xml_value '/*[local-name()="rss"]/*[local-name()="channel"]
 [[ "$APPCAST_LENGTH" == "$(/usr/bin/stat -f%z "$ARCHIVE")" ]] || fail 'appcast archive length mismatch'
 [[ "$APPCAST_SIGNATURE" =~ ^[A-Za-z0-9+/=]{40,}$ ]] || fail 'appcast is missing an EdDSA signature'
 
-/usr/bin/codesign --verify --strict --deep --verbose=2 "$APP"
-ARCHITECTURES="$(/usr/bin/lipo -archs "$APP/Contents/MacOS/Reccy")"
-[[ " $ARCHITECTURES " == *' arm64 '* ]] || fail 'release app is missing arm64'
-[[ " $ARCHITECTURES " == *' x86_64 '* ]] || fail 'release app is missing x86_64'
-if [[ "${RECCY_REQUIRE_DEVELOPER_ID:-0}" == "1" ]]; then
-  SIGNING_DETAILS="$(/usr/bin/codesign -dvv "$APP" 2>&1)"
-  /usr/bin/grep -q '^Authority=Developer ID Application:' <<<"$SIGNING_DETAILS" || fail 'Developer ID signature missing'
-  /usr/bin/xcrun stapler validate "$APP" >/dev/null || fail 'stapled notarization ticket missing'
-  /usr/sbin/spctl --assess --type execute "$APP" || fail 'Gatekeeper rejected the app'
+SIGN_UPDATE="$(reccy_resolve_sparkle_tool "$ROOT_DIR" "$DERIVED_DATA" sign_update)"
+VERIFY_KEY_ARGS=(--account "${RECCY_SPARKLE_KEY_ACCOUNT:-ed25519}")
+if [[ -n "${RECCY_SPARKLE_PRIVATE_KEY_FILE:-}" ]]; then
+  VERIFY_KEY_ARGS=(--ed-key-file "$RECCY_SPARKLE_PRIVATE_KEY_FILE")
 fi
+"$SIGN_UPDATE" --verify "${VERIFY_KEY_ARGS[@]}" "$ARCHIVE" "$APPCAST_SIGNATURE" >/dev/null \
+  || fail 'Sparkle rejected the update archive signature'
+"$SIGN_UPDATE" --verify "${VERIFY_KEY_ARGS[@]}" "$APPCAST" >/dev/null \
+  || fail 'Sparkle rejected the signed appcast'
+
+EXTRACTED_DIR="$(/usr/bin/mktemp -d -t reccy-update.XXXXXX)"
+trap '/bin/rm -rf "$EXTRACTED_DIR"' EXIT
+/usr/bin/ditto -x -k "$ARCHIVE" "$EXTRACTED_DIR"
+EXTRACTED_APP="$EXTRACTED_DIR/Reccy.app"
+reccy_assert_release_app "$EXTRACTED_APP" "${RECCY_DEVELOPMENT_TEAM:-}"
+if [[ "${RECCY_ALLOW_UNNOTARIZED_PACKAGE:-0}" != "1" ]]; then
+  reccy_assert_notarized_app "$EXTRACTED_APP"
+fi
+
+APP_HASH="$(/usr/bin/shasum -a 256 "$APP/Contents/MacOS/Reccy" | /usr/bin/awk '{print $1}')"
+EXTRACTED_HASH="$(/usr/bin/shasum -a 256 "$EXTRACTED_APP/Contents/MacOS/Reccy" | /usr/bin/awk '{print $1}')"
+[[ "$APP_HASH" == "$EXTRACTED_HASH" ]] || fail 'archive executable differs from the verified app'
 
 printf 'Verified %s and its signed Sparkle feed.\n' "$BASE_NAME"
