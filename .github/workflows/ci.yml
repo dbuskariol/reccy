@@ -28,4 +28,4 @@ jobs:
           xcodebuild -version
           swift --version
       - name: Run verification gate
-        run: Scripts/verify-ci.sh
+        run: scripts/verify-ci.sh

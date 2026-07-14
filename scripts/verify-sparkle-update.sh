@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/Scripts/lib/reccy-release.sh"
+source "$ROOT_DIR/scripts/lib/reccy-release.sh"
 
 APP="${1:-$ROOT_DIR/dist/Reccy.app}"
 UPDATES_DIR="${2:-$ROOT_DIR/dist/updates}"

@@ -63,7 +63,7 @@ jobs:
           RECCY_SPARKLE_PRIVATE_KEY_FILE: ${{ runner.temp }}/reccy-sparkle-key
           RECCY_GITHUB_REPOSITORY: ${{ github.repository }}
           RECCY_RELEASE_TAG: ${{ github.ref_name }}
-        run: Scripts/release.sh finalize
+        run: scripts/release.sh finalize
 
       - name: Preserve release evidence and debug symbols
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

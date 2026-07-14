@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/Scripts/lib/reccy-release.sh"
+source "$ROOT_DIR/scripts/lib/reccy-release.sh"
 
 APP="${RECCY_RELEASE_APP:-$ROOT_DIR/dist/Reccy.app}"
 UPDATES_DIR="${RECCY_UPDATES_DIR:-$ROOT_DIR/dist/updates}"
@@ -12,7 +12,7 @@ reccy_assert_release_app "$APP" "${RECCY_DEVELOPMENT_TEAM:-}"
 if [[ "${RECCY_ALLOW_UNNOTARIZED_PACKAGE:-0}" != "1" ]]; then
   reccy_assert_notarized_app "$APP"
 fi
-"$ROOT_DIR/Scripts/verify-sparkle-update.sh" "$APP" "$UPDATES_DIR"
+"$ROOT_DIR/scripts/verify-sparkle-update.sh" "$APP" "$UPDATES_DIR"
 
 VERSION="$(reccy_plist_value CFBundleShortVersionString "$INFO")"
 BUILD="$(reccy_plist_value CFBundleVersion "$INFO")"

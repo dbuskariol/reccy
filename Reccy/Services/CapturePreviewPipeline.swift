@@ -109,14 +109,10 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
             return nil
         }
 
-        let contentRect: CGRect
-        if let value = attachments?[.contentRect],
-           let rect = CGRect(dictionaryRepresentation: value as! CFDictionary)
-        {
-            contentRect = rect
-        } else {
-            contentRect = pixelSize
-        }
+        let contentRect = contentRect(
+            from: attachments?[.contentRect],
+            fallback: pixelSize
+        )
 
         return CapturePreviewFrame(
             surface: surface,
@@ -124,6 +120,20 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
             contentScale: attachments?[.contentScale] as? CGFloat ?? 1,
             scaleFactor: attachments?[.scaleFactor] as? CGFloat ?? 1
         )
+    }
+
+    /// ScreenCaptureKit currently supplies a Core Graphics dictionary for
+    /// `.contentRect`, but capture attachments cross an Objective-C boundary
+    /// and therefore arrive as `Any`. Treat malformed or future attachment
+    /// values as absent instead of allowing an invalid bridge to crash the
+    /// recording stream.
+    static func contentRect(from attachment: Any?, fallback: CGRect) -> CGRect {
+        guard let dictionary = attachment as? NSDictionary,
+              let rect = CGRect(dictionaryRepresentation: dictionary),
+              rect.width > 0,
+              rect.height > 0
+        else { return fallback }
+        return rect
     }
 
     private func scheduleDelivery() {

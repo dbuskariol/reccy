@@ -108,6 +108,28 @@ struct ReccyTests {
         )
     }
 
+    @Test func livePreviewRejectsMalformedContentRectAttachmentsWithoutCrashing() {
+        let fallback = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let expected = CGRect(x: 12, y: 24, width: 1280, height: 720)
+
+        #expect(
+            CapturePreviewPipeline.contentRect(
+                from: expected.dictionaryRepresentation,
+                fallback: fallback
+            ) == expected
+        )
+        #expect(
+            CapturePreviewPipeline.contentRect(from: "not a rectangle", fallback: fallback)
+                == fallback
+        )
+        #expect(
+            CapturePreviewPipeline.contentRect(
+                from: CGRect.zero.dictionaryRepresentation,
+                fallback: fallback
+            ) == fallback
+        )
+    }
+
 #if DEBUG
     @Test func monitorVisualHarnessProducesACompleteVideoFrame() throws {
         let sampleBuffer = try #require(CaptureCoordinator.makePreviewQASampleBuffer())

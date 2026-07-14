@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/Scripts/lib/reccy-release.sh"
+source "$ROOT_DIR/scripts/lib/reccy-release.sh"
 
 APP="${RECCY_NOTARY_APP:-$ROOT_DIR/dist/Reccy.app}"
 OUTPUT_DIR="${RECCY_NOTARY_OUTPUT_DIR:-$ROOT_DIR/dist/notarization}"
@@ -41,7 +41,7 @@ else
   /bin/cat >&2 <<'EOF'
 Notarization credentials are not configured. Use a stored Keychain profile:
 
-  RECCY_NOTARY_KEYCHAIN_PROFILE="Reccy Notary" Scripts/notarize-release.sh
+  RECCY_NOTARY_KEYCHAIN_PROFILE="Reccy Notary" scripts/notarize-release.sh
 
 CI may instead provide RECCY_NOTARY_KEY_PATH, RECCY_NOTARY_KEY_ID, and
 RECCY_NOTARY_ISSUER_ID. Passwords and Apple IDs are never accepted inline.
@@ -65,7 +65,7 @@ fi
 reccy_assert_release_app "$APP" "${RECCY_DEVELOPMENT_TEAM:-}"
 reccy_assert_notarized_app "$APP"
 
-RECCY_SKIP_BUILD=1 "$ROOT_DIR/Scripts/package-update.sh"
-"$ROOT_DIR/Scripts/generate-appcast.sh"
+RECCY_SKIP_BUILD=1 "$ROOT_DIR/scripts/package-update.sh"
+"$ROOT_DIR/scripts/generate-appcast.sh"
 
 reccy_note "Notarized, stapled, and packaged $APP"

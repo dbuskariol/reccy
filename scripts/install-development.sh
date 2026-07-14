@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/Scripts/lib/reccy-release.sh"
+source "$ROOT_DIR/scripts/lib/reccy-release.sh"
 
 DERIVED_DATA="${RECCY_DERIVED_DATA:-$ROOT_DIR/.build/DevelopmentDerivedData}"
 INSTALL_PATH="${RECCY_INSTALL_PATH:-/Applications/Reccy.app}"
@@ -27,7 +27,7 @@ One-time setup:
   1. Open Xcode → Settings → Accounts and add your Apple Account.
   2. Select the account's team and choose Manage Certificates.
   3. Create or install an Apple Development certificate.
-  4. Run Scripts/install-development.sh again.
+  4. Run scripts/install-development.sh again.
 
 Use Developer ID Application for release artifacts; the local development
 installer accepts Apple Development so TCC recognizes rebuilt apps consistently.

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/Scripts/lib/reccy-release.sh"
+source "$ROOT_DIR/scripts/lib/reccy-release.sh"
 
 DERIVED_DATA="${RECCY_DERIVED_DATA:-$ROOT_DIR/.build/ReleaseDerivedData}"
 UPDATES_DIR="$ROOT_DIR/dist/updates"
@@ -20,7 +20,7 @@ GENERATE_APPCAST="$(reccy_resolve_sparkle_tool "$ROOT_DIR" "$DERIVED_DATA" gener
 reccy_assert_sparkle_signing_key "$ROOT_DIR" "$APP" "$DERIVED_DATA"
 
 if [[ ! -d "$UPDATES_DIR" || -z "$(/usr/bin/find "$UPDATES_DIR" -maxdepth 1 -name 'Reccy-*.zip' -print -quit)" ]]; then
-  "$ROOT_DIR/Scripts/package-update.sh"
+  "$ROOT_DIR/scripts/package-update.sh"
 fi
 
 SIGNING_ARGS=(--account "${RECCY_SPARKLE_KEY_ACCOUNT:-ed25519}")

@@ -200,7 +200,7 @@ reccy_assert_sparkle_signing_key() {
   if [[ -n "${RECCY_SPARKLE_PRIVATE_KEY_FILE:-}" ]]; then
     [[ -f "$RECCY_SPARKLE_PRIVATE_KEY_FILE" ]] \
       || reccy_fail "Sparkle private key file is missing: $RECCY_SPARKLE_PRIVATE_KEY_FILE"
-    actual_key="$(/usr/bin/xcrun swift "$root/Scripts/sparkle-public-key.swift" "$RECCY_SPARKLE_PRIVATE_KEY_FILE")" \
+    actual_key="$(/usr/bin/xcrun swift "$root/scripts/sparkle-public-key.swift" "$RECCY_SPARKLE_PRIVATE_KEY_FILE")" \
       || reccy_fail 'unable to derive the Sparkle public key'
   else
     generate_keys="$(reccy_resolve_sparkle_tool "$root" "$derived_data" generate_keys)"
