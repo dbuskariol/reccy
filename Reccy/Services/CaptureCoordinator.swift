@@ -5,6 +5,7 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import KeyboardShortcuts
+import OSLog
 @preconcurrency import ScreenCaptureKit
 
 enum CaptureState: Equatable, Sendable {
@@ -103,6 +104,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     let library: RecordingLibrary
     let previewPipeline = CapturePreviewPipeline()
 
+    private let logger = Logger(subsystem: "com.reccy.mac", category: "Capture")
     private var selectedFilter: SCContentFilter?
     private var selectedSourceRect: CGRect?
     private var multitrackRecorder: MultitrackRecorder?
@@ -447,11 +449,11 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         guard let multitrackRecorder else { return }
         switch state {
         case .recording:
-            multitrackRecorder.pause()
+            guard multitrackRecorder.pause() else { return }
             state = .paused
             boundaryController.setRecording(true, isPaused: true, duration: recordedDuration)
         case .paused:
-            multitrackRecorder.resume()
+            guard multitrackRecorder.resume() else { return }
             state = .recording
             boundaryController.setRecording(true, duration: recordedDuration)
         default:
@@ -909,6 +911,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     private func handleFailure(_ error: Error) {
+        logCaptureFailure(error)
         sessionGeneration &+= 1
         deactivateSystemPicker()
         countdownTask?.cancel()
@@ -938,6 +941,24 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         previewPipeline.clear()
         pendingCompletionNotice = nil
         state = .failed(error.localizedDescription)
+    }
+
+    private func logCaptureFailure(_ error: Error) {
+        let nsError = error as NSError
+        let underlying: NSError?
+        switch error {
+        case let MultitrackRecorderError.writerCouldNotStart(error),
+             let MultitrackRecorderError.writerFailed(error):
+            underlying = error as NSError?
+        default:
+            underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        let underlyingDomain = underlying?.domain ?? "none"
+        let underlyingCode = underlying?.code ?? 0
+        let detail = "Capture failed domain=\(nsError.domain) code=\(nsError.code) "
+            + "description=\(nsError.localizedDescription) "
+            + "underlyingDomain=\(underlyingDomain) underlyingCode=\(underlyingCode)"
+        logger.error("\(detail, privacy: .public)")
     }
 
     private static func outputDirectory(for settings: CaptureSettings) -> URL {

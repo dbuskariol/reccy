@@ -999,7 +999,7 @@ struct ReccyTests {
         )
         let initialOffset = try #require(initialOffsetValue)
         #expect(initialOffset.seconds == 0)
-        timeline.pause(at: CMTime(seconds: 4, preferredTimescale: 600))
+        timeline.pause(resumingAt: CMTime(seconds: 4.02, preferredTimescale: 48_000))
         let pausedAudioOffset = timeline.offset(
             for: CMTime(seconds: 7, preferredTimescale: 600),
             isVideo: false
@@ -1017,7 +1017,7 @@ struct ReccyTests {
             isVideo: true
         )
         let videoOffset = try #require(videoOffsetValue)
-        #expect(abs(videoOffset.seconds - 6) < 0.001)
+        #expect(abs(videoOffset.seconds - 5.98) < 0.001)
         let bufferedAudioOffset = timeline.offset(
             for: CMTime(seconds: 9.99, preferredTimescale: 600),
             isVideo: false
@@ -1030,7 +1030,30 @@ struct ReccyTests {
         )
         let audioOffset = try #require(audioOffsetValue)
         #expect(audioOffset == videoOffset)
-        #expect(abs(CMTimeSubtract(CMTime(seconds: 10.02, preferredTimescale: 600), audioOffset).seconds - 4.02) < 0.001)
+        #expect(abs(CMTimeSubtract(CMTime(seconds: 10.02, preferredTimescale: 600), audioOffset).seconds - 4.04) < 0.001)
+    }
+
+    @Test func recordingPauseTimelineNeverOverlapsThePreviousAudioSample() throws {
+        var timeline = RecordingPauseTimeline()
+        let previousAudioEnd = CMTime(seconds: 4.021_333, preferredTimescale: 48_000)
+
+        timeline.pause(resumingAt: previousAudioEnd)
+        timeline.requestResume()
+        let videoOffsetValue = timeline.offset(
+            for: CMTime(seconds: 10, preferredTimescale: 600),
+            isVideo: true
+        )
+        let videoOffset = try #require(videoOffsetValue)
+        let audioSourceTime = CMTime(seconds: 10.001, preferredTimescale: 48_000)
+        let audioOffsetValue = timeline.offset(
+            for: audioSourceTime,
+            isVideo: false
+        )
+        let audioOffset = try #require(audioOffsetValue)
+        let resumedAudioTime = CMTimeSubtract(audioSourceTime, audioOffset)
+
+        #expect(audioOffset == videoOffset)
+        #expect(CMTimeCompare(resumedAudioTime, previousAudioEnd) > 0)
     }
 
     @Test func waveformRepositoryUsesTheExactTrimmedSourceRange() async throws {
