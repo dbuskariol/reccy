@@ -512,9 +512,14 @@ struct RecordView: View {
                         .contentTransition(.numericText())
                     Text("Get ready")
                         .foregroundStyle(.secondary)
-                    Button("Cancel") { coordinator.cancelCountdown() }
+                    Button(coordinator.state.stopButtonTitle) {
+                        coordinator.stopRecording()
+                    }
                 case .starting:
                     ProgressView("Starting recording…")
+                    Button(coordinator.state.stopButtonTitle) {
+                        coordinator.stopRecording()
+                    }
                 case .stopping:
                     ProgressView("Finishing the file…")
                 default:
@@ -533,7 +538,7 @@ struct RecordView: View {
                     Button {
                         coordinator.stopRecording()
                     } label: {
-                        Label("Stop Recording", systemImage: "stop.fill")
+                        Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
                             .frame(minWidth: 150)
                     }
                     .buttonStyle(.borderedProminent)

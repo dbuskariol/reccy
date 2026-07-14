@@ -107,8 +107,12 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         label: "com.reccy.capture.samples",
         qos: .userInteractive
     )
+    private let streamLifecycleLock = NSLock()
 
     private var stream: SCStream?
+    private var isStreamStartInFlight = false
+    private var isStreamCancellationRequested = false
+    private var streamStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var systemAudioInput: AVAssetWriterInput?
@@ -156,27 +160,58 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         outputURL: URL,
         options: MultitrackRecordingOptions
     ) async throws {
+        try Task.checkCancellation()
         try configureWriter(outputURL: outputURL, options: options)
+        var startingStream: SCStream?
+        do {
+            try Task.checkCancellation()
+            let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+            startingStream = stream
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
+            if options.includesSystemAudio {
+                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
+            }
+            if options.includesMicrophone {
+                try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
+            }
+            guard installStartingStream(stream) else { throw CancellationError() }
 
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
-        if options.includesSystemAudio {
-            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
+            try Task.checkCancellation()
+            try await stream.startCapture()
+            let mustStop = completeStreamStart(stream)
+            if mustStop {
+                try? await stream.stopCapture()
+                completeCancelledStreamStart(stream)
+                throw CancellationError()
+            }
+        } catch {
+            if let startingStream {
+                completeFailedStreamStart(startingStream)
+            }
+            cancelWriter()
+            throw error
         }
-        if options.includesMicrophone {
-            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
-        }
-        self.stream = stream
-        try await stream.startCapture()
     }
 
     func stop() async throws {
-        guard let stream else {
+        let request = requestStreamStop()
+        guard let stream = request.stream else {
             throw MultitrackRecorderError.noVideoFrames
         }
-        try await stream.stopCapture()
-        self.stream = nil
-        try await finishWriting()
+        if request.startWasInFlight {
+            try? await stream.stopCapture()
+            await waitForStreamStartToSettle()
+            try await finishWriting()
+            return
+        }
+        do {
+            try await stream.stopCapture()
+            clearStreamIfOwned(stream)
+            try await finishWriting()
+        } catch {
+            clearStreamIfOwned(stream)
+            throw error
+        }
     }
 
     func pause() {
@@ -192,8 +227,112 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     }
 
     func cancel() async {
-        try? await stream?.stopCapture()
-        stream = nil
+        let cancellation = requestStreamCancellation()
+        try? await cancellation.stream?.stopCapture()
+        if !cancellation.startWasInFlight, let stream = cancellation.stream {
+            clearStreamIfOwned(stream)
+        }
+        cancelWriter()
+    }
+
+    /// Installs the stream without losing a cancellation that arrived between
+    /// coordinator task cancellation and stream construction.
+    private func installStartingStream(_ stream: SCStream) -> Bool {
+        streamLifecycleLock.lock()
+        guard !isStreamCancellationRequested else {
+            streamLifecycleLock.unlock()
+            return false
+        }
+        self.stream = stream
+        isStreamStartInFlight = true
+        streamStartWaiters.removeAll(keepingCapacity: true)
+        streamLifecycleLock.unlock()
+        return true
+    }
+
+    /// Returns true when cancellation arrived while `startCapture()` was
+    /// suspended. The starter remains responsible for the final stop so a
+    /// failed early `stopCapture()` cannot leave a late-starting stream alive.
+    private func completeStreamStart(_ stream: SCStream) -> Bool {
+        streamLifecycleLock.lock()
+        guard self.stream === stream else {
+            streamLifecycleLock.unlock()
+            return true
+        }
+        if isStreamCancellationRequested {
+            streamLifecycleLock.unlock()
+            return true
+        }
+        isStreamStartInFlight = false
+        let waiters = streamStartWaiters
+        streamStartWaiters.removeAll(keepingCapacity: true)
+        streamLifecycleLock.unlock()
+        waiters.forEach { $0.resume() }
+        return false
+    }
+
+    private func completeFailedStreamStart(_ stream: SCStream) {
+        streamLifecycleLock.lock()
+        guard self.stream === stream else {
+            streamLifecycleLock.unlock()
+            return
+        }
+        self.stream = nil
+        isStreamStartInFlight = false
+        isStreamCancellationRequested = false
+        let waiters = streamStartWaiters
+        streamStartWaiters.removeAll(keepingCapacity: true)
+        streamLifecycleLock.unlock()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func completeCancelledStreamStart(_ stream: SCStream) {
+        completeFailedStreamStart(stream)
+    }
+
+    private func requestStreamStop() -> (stream: SCStream?, startWasInFlight: Bool) {
+        streamLifecycleLock.lock()
+        defer { streamLifecycleLock.unlock() }
+        isStreamCancellationRequested = true
+        return (stream, isStreamStartInFlight)
+    }
+
+    private func requestStreamCancellation() -> (stream: SCStream?, startWasInFlight: Bool) {
+        streamLifecycleLock.lock()
+        defer { streamLifecycleLock.unlock() }
+        isStreamCancellationRequested = true
+        return (stream, isStreamStartInFlight)
+    }
+
+    private func clearStreamIfOwned(_ stream: SCStream) {
+        streamLifecycleLock.lock()
+        guard self.stream === stream else {
+            streamLifecycleLock.unlock()
+            return
+        }
+        self.stream = nil
+        isStreamStartInFlight = false
+        isStreamCancellationRequested = false
+        let waiters = streamStartWaiters
+        streamStartWaiters.removeAll(keepingCapacity: true)
+        streamLifecycleLock.unlock()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForStreamStartToSettle() async {
+        await withCheckedContinuation { continuation in
+            streamLifecycleLock.lock()
+            if isStreamStartInFlight {
+                streamStartWaiters.append(continuation)
+                streamLifecycleLock.unlock()
+            } else {
+                streamLifecycleLock.unlock()
+                continuation.resume()
+            }
+        }
+    }
+
+    private func cancelWriter() {
         sampleQueue.sync {
             writer?.cancelWriting()
             resetWriterState()

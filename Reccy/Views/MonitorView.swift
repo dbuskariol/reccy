@@ -172,7 +172,7 @@ struct MonitorView: View {
                 Button {
                     coordinator.stopRecording()
                 } label: {
-                    Label(stopButtonTitle, systemImage: "stop.fill")
+                    Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
                         .frame(minWidth: 130)
                 }
                 .buttonStyle(.borderedProminent)
@@ -288,14 +288,6 @@ struct MonitorView: View {
             return "00:00:\(String(format: "%02d", seconds))"
         }
         return coordinator.formattedDuration
-    }
-
-    private var stopButtonTitle: String {
-        switch coordinator.state {
-        case .countingDown: "Cancel"
-        case .stopping: "Finishing…"
-        default: "Stop Recording"
-        }
     }
 
     private func levelLabel(_ level: Double) -> String {

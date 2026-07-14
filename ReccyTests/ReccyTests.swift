@@ -25,6 +25,45 @@ struct ReccyTests {
         #expect(converted == CGRect(x: 100, y: 520, width: 640, height: 360))
     }
 
+    @Test func everyCapturePhaseHasOneDeterministicStopOperation() {
+        #expect(CaptureState.idle.stopOperation == .none)
+        #expect(CaptureState.sourceSelected.stopOperation == .none)
+        #expect(CaptureState.countingDown(3).stopOperation == .cancelCountdown)
+        #expect(CaptureState.starting.stopOperation == .cancelStartup)
+        #expect(CaptureState.recording.stopOperation == .finishRecording)
+        #expect(CaptureState.paused.stopOperation == .finishRecording)
+        #expect(CaptureState.stopping.stopOperation == .none)
+        #expect(CaptureState.failed("test").stopOperation == .none)
+
+        #expect(CaptureState.countingDown(3).stopButtonTitle == "Cancel")
+        #expect(CaptureState.starting.stopButtonTitle == "Cancel Start")
+        #expect(CaptureState.recording.stopButtonTitle == "Stop Recording")
+        #expect(CaptureState.stopping.stopButtonTitle == "Finishing…")
+    }
+
+    @Test func captureCompletionRoutesOnlySavedMediaToPostRecordingDestinations() {
+        let url = URL(fileURLWithPath: "/tmp/Reccy Completion.mov")
+
+        for preference in RecordingCompletionDestination.allCases {
+            #expect(
+                CaptureSessionCompletion.Outcome.cancelled.navigation(for: preference)
+                    == CaptureCompletionNavigation(section: .record, recordingURL: nil)
+            )
+        }
+        #expect(
+            CaptureSessionCompletion.Outcome.saved(url).navigation(for: .library)
+                == CaptureCompletionNavigation(section: .library, recordingURL: url)
+        )
+        #expect(
+            CaptureSessionCompletion.Outcome.saved(url).navigation(for: .editor)
+                == CaptureCompletionNavigation(section: .editor, recordingURL: url)
+        )
+        #expect(
+            CaptureSessionCompletion.Outcome.saved(url).navigation(for: .record)
+                == CaptureCompletionNavigation(section: .record, recordingURL: url)
+        )
+    }
+
     @Test func livePreviewRoutesTheWritersIOSurfaceWithoutCopyingIt() throws {
         var pixelBuffer: CVPixelBuffer?
         #expect(CVPixelBufferCreate(

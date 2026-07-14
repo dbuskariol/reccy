@@ -49,13 +49,14 @@ struct ReccyApp: App {
 
                 Divider()
 
-                Button(coordinator.state.isRecording ? "Stop Recording" : "Start Recording") {
+                Button(coordinator.state.isRecording ? coordinator.state.stopButtonTitle : "Start Recording") {
                     if coordinator.state.isRecording {
                         coordinator.stopRecording()
                     } else {
                         coordinator.startRecording()
                     }
                 }
+                .disabled(coordinator.state == .stopping)
                 .keyboardShortcut("r", modifiers: [.command, .shift])
 
                 Button(coordinator.state == .paused ? "Resume Recording" : "Pause Recording") {

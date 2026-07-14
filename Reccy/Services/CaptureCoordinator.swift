@@ -25,6 +25,41 @@ enum CaptureState: Equatable, Sendable {
     }
 
     var canChangeSettings: Bool { !isRecording }
+
+    var stopOperation: CaptureStopOperation {
+        switch self {
+        case .countingDown: .cancelCountdown
+        case .starting: .cancelStartup
+        case .recording, .paused: .finishRecording
+        case .idle, .sourceSelected, .stopping, .failed: .none
+        }
+    }
+
+    var stopButtonTitle: String {
+        switch self {
+        case .countingDown: "Cancel"
+        case .starting: "Cancel Start"
+        case .stopping: "Finishing…"
+        default: "Stop Recording"
+        }
+    }
+}
+
+enum CaptureStopOperation: Equatable, Sendable {
+    case none
+    case cancelCountdown
+    case cancelStartup
+    case finishRecording
+}
+
+struct CaptureSessionCompletion: Equatable, Identifiable, Sendable {
+    enum Outcome: Equatable, Sendable {
+        case saved(URL)
+        case cancelled
+    }
+
+    let id = UUID()
+    let outcome: Outcome
 }
 
 enum CapturePermissionStatus: Equatable, Sendable {
@@ -63,6 +98,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var microphoneAudioLevel: Double = 0
     @Published private(set) var systemAudioHistory: [Double] = []
     @Published private(set) var microphoneAudioHistory: [Double] = []
+    @Published private(set) var sessionCompletion: CaptureSessionCompletion?
 
     let library: RecordingLibrary
     let previewPipeline = CapturePreviewPipeline()
@@ -75,7 +111,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var activeRecordingManifest: RecordingManifest?
     private var pendingCompletionNotice: String?
     private var countdownTask: Task<Void, Never>?
+    private var recordingStartTask: Task<Void, Never>?
+    private var recordingStopTask: Task<Void, Never>?
     private var meterTask: Task<Void, Never>?
+    private var sessionGeneration: UInt = 0
     private var activationCancellable: AnyCancellable?
     private var observesSystemPicker = false
     private let regionSelectionController = RegionSelectionController()
@@ -267,6 +306,13 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func openFilesAndFoldersPrivacySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     func quitForPermissionRestart() {
         NSApp.terminate(nil)
     }
@@ -291,9 +337,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
 
         countdownTask?.cancel()
+        sessionCompletion = nil
         let seconds = settings.countdown.rawValue
         guard seconds > 0 else {
-            Task { await beginRecording(with: filter) }
+            launchRecordingStart(with: filter)
             return
         }
 
@@ -302,10 +349,15 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             for remaining in stride(from: seconds, through: 1, by: -1) {
                 guard !Task.isCancelled else { return }
                 state = .countingDown(remaining)
-                try? await Task.sleep(for: .seconds(1))
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                } catch {
+                    return
+                }
             }
             guard !Task.isCancelled else { return }
-            await beginRecording(with: filter)
+            countdownTask = nil
+            launchRecordingStart(with: filter)
         }
     }
 
@@ -313,6 +365,51 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         countdownTask?.cancel()
         countdownTask = nil
         state = hasSelectedSource ? .sourceSelected : .idle
+        sessionCompletion = CaptureSessionCompletion(outcome: .cancelled)
+    }
+
+    private func cancelRecordingStartup() {
+        guard state == .starting else { return }
+
+        sessionGeneration &+= 1
+        let startTask = recordingStartTask
+        let recorder = multitrackRecorder
+        let outputURL = activeOutputURL
+        recordingStartTask = nil
+        startTask?.cancel()
+        state = .stopping
+        meterTask?.cancel()
+
+        recordingStopTask = Task { [weak self] in
+            await recorder?.cancel()
+            await startTask?.value
+            guard let self, self.state == .stopping else { return }
+            self.discardIncompleteRecording(at: outputURL)
+        }
+    }
+
+    private func finishActiveRecording() {
+        guard recordingStopTask == nil,
+              let recorder = multitrackRecorder,
+              state == .recording || state == .paused
+        else { return }
+
+        sessionGeneration &+= 1
+        recordingStartTask?.cancel()
+        recordingStartTask = nil
+        state = .stopping
+        meterTask?.cancel()
+
+        recordingStopTask = Task { [weak self] in
+            do {
+                try await recorder.stop()
+                guard let self else { return }
+                self.finishRecording()
+            } catch {
+                guard let self else { return }
+                self.handleFailure(error)
+            }
+        }
     }
 
     func stopRecording() {
@@ -323,24 +420,19 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             clearSourceSelection()
             resetSessionTelemetry()
             state = .idle
+            sessionCompletion = CaptureSessionCompletion(outcome: .cancelled)
             return
         }
 #endif
-        if case .countingDown = state {
+        switch state.stopOperation {
+        case .cancelCountdown:
             cancelCountdown()
-            return
-        }
-        guard let multitrackRecorder, state.isRecording else { return }
-        state = .stopping
-        meterTask?.cancel()
-
-        Task {
-            do {
-                try await multitrackRecorder.stop()
-                finishRecording()
-            } catch {
-                handleFailure(error)
-            }
+        case .cancelStartup:
+            cancelRecordingStartup()
+        case .finishRecording:
+            finishActiveRecording()
+        case .none:
+            break
         }
     }
 
@@ -428,14 +520,28 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         settings.outputFolderPath = nil
     }
 
-    private func beginRecording(with filter: SCContentFilter) async {
+    private func launchRecordingStart(with filter: SCContentFilter) {
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
+        state = .starting
+        recordingStartTask = Task { [weak self] in
+            await self?.beginRecording(with: filter, generation: generation)
+        }
+    }
+
+    private func beginRecording(
+        with filter: SCContentFilter,
+        generation: UInt
+    ) async {
         guard await requestMicrophonePermissionIfNeeded() else {
+            guard isCurrentSession(generation) else { return }
+            recordingStartTask = nil
             handleFailure(CaptureError.microphonePermissionDenied)
             return
         }
+        guard isCurrentSession(generation), !Task.isCancelled else { return }
 
         do {
-            state = .starting
             recordedDuration = 0
             recordedFileSize = 0
             systemAudioLevel = 0
@@ -488,13 +594,21 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             let recorder = MultitrackRecorder()
             recorder.onStarted = { [weak self] in
                 Task { @MainActor in
-                    self?.state = .recording
-                    self?.boundaryController.setRecording(true)
-                    self?.beginMetering()
+                    guard let self,
+                          self.isCurrentSession(generation),
+                          self.state == .starting
+                    else { return }
+                    self.recordingStartTask = nil
+                    self.state = .recording
+                    self.boundaryController.setRecording(true)
+                    self.beginMetering()
                 }
             }
             recorder.onFailure = { [weak self] error in
-                Task { @MainActor in self?.handleFailure(error) }
+                Task { @MainActor in
+                    guard let self, self.isCurrentSession(generation) else { return }
+                    self.handleFailure(error)
+                }
             }
             recorder.onVideoFrame = { [previewPipeline] sampleBuffer in
                 previewPipeline.enqueue(sampleBuffer)
@@ -508,7 +622,14 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 outputURL: outputURL,
                 options: options
             )
+            guard isCurrentSession(generation), !Task.isCancelled else {
+                await recorder.cancel()
+                return
+            }
+            recordingStartTask = nil
         } catch {
+            guard isCurrentSession(generation), !Task.isCancelled else { return }
+            recordingStartTask = nil
             handleFailure(error)
         }
     }
@@ -658,13 +779,18 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     private func finishRecording() {
+        sessionGeneration &+= 1
+        recordingStartTask?.cancel()
+        recordingStartTask = nil
+        recordingStopTask = nil
         meterTask?.cancel()
         meterTask = nil
         multitrackRecorder = nil
         previewPipeline.clear()
 
+        let completedURL = activeOutputURL
         var indexingError: Error?
-        if let activeOutputURL {
+        if let completedURL {
             if let activeRecordingManifest {
                 do {
                     let encoder = JSONEncoder()
@@ -672,17 +798,17 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                     encoder.dateEncodingStrategy = .iso8601
                     let data = try encoder.encode(activeRecordingManifest)
                     try data.write(
-                        to: RecordingManifest.sidecarURL(for: activeOutputURL),
+                        to: RecordingManifest.sidecarURL(for: completedURL),
                         options: .atomic
                     )
                     try RecordingRecoveryJournal.remove(
-                        from: activeOutputURL.deletingLastPathComponent()
+                        from: completedURL.deletingLastPathComponent()
                     )
                 } catch {
                     indexingError = error
                 }
             }
-            lastRecordingURL = activeOutputURL
+            lastRecordingURL = completedURL
         }
         activeOutputURL = nil
         activeRecordingManifest = nil
@@ -708,6 +834,37 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         pendingCompletionNotice = nil
         recordingLease = nil
         NSApp.requestUserAttention(.informationalRequest)
+        if let completedURL {
+            sessionCompletion = CaptureSessionCompletion(outcome: .saved(completedURL))
+        }
+    }
+
+    private func discardIncompleteRecording(at outputURL: URL?) {
+        if let outputURL {
+            try? RecordingRecoveryJournal.remove(
+                from: outputURL.deletingLastPathComponent()
+            )
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        recordingStartTask = nil
+        recordingStopTask = nil
+        meterTask?.cancel()
+        meterTask = nil
+        multitrackRecorder = nil
+        activeOutputURL = nil
+        activeRecordingManifest = nil
+        pendingCompletionNotice = nil
+        recordingLease = nil
+        previewPipeline.clear()
+        clearSourceSelection()
+        resetSessionTelemetry()
+        state = .idle
+        sessionCompletion = CaptureSessionCompletion(outcome: .cancelled)
+    }
+
+    private func isCurrentSession(_ generation: UInt) -> Bool {
+        generation == sessionGeneration
     }
 
     /// Ends the privacy-sensitive capture session as one atomic lifecycle
@@ -751,9 +908,15 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     private func handleFailure(_ error: Error) {
+        sessionGeneration &+= 1
         deactivateSystemPicker()
         countdownTask?.cancel()
+        countdownTask = nil
+        recordingStartTask?.cancel()
+        recordingStartTask = nil
+        recordingStopTask = nil
         meterTask?.cancel()
+        meterTask = nil
         let shouldInspectRecovery = activeOutputURL != nil
         if let multitrackRecorder {
             Task {

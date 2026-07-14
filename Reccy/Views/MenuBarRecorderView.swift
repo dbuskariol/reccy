@@ -311,7 +311,7 @@ struct MenuBarRecorderView: View {
                 Button {
                     coordinator.stopRecording()
                 } label: {
-                    Label(activeStopTitle, systemImage: "stop.fill")
+                    Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -511,14 +511,6 @@ struct MenuBarRecorderView: View {
             return "00:00:\(String(format: "%02d", seconds))"
         }
         return coordinator.formattedDuration
-    }
-
-    private var activeStopTitle: String {
-        switch coordinator.state {
-        case .countingDown: "Cancel"
-        case .stopping: "Finishing…"
-        default: "Stop"
-        }
     }
 
     private func chooseSource(_ kind: CaptureSourceKind) {

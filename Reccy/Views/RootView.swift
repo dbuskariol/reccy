@@ -42,9 +42,13 @@ struct RootView: View {
         .onChange(of: coordinator.state) { oldState, newState in
             if newState.isRecording, !oldState.isRecording {
                 navigation.section = .monitor
-            } else if oldState.isRecording, !newState.isRecording {
-                handleRecordingCompletion(newState)
+            } else if case .failed = newState {
+                navigation.section = .record
             }
+        }
+        .onChange(of: coordinator.sessionCompletion) { _, completion in
+            guard let completion else { return }
+            handleSessionCompletion(completion)
         }
     }
 
@@ -67,27 +71,19 @@ struct RootView: View {
         }
     }
 
-    private func handleRecordingCompletion(_ state: CaptureState) {
-        if case .failed = state {
-            navigation.section = .record
-            return
-        }
+    private func handleSessionCompletion(_ completion: CaptureSessionCompletion) {
+        let destination = completion.outcome.navigation(for: preferences.completionDestination)
+        navigation.section = destination.section
 
-        switch preferences.completionDestination {
-        case .library:
-            navigation.section = .library
-        case .record:
-            navigation.section = .record
-        case .editor:
+        if destination.section == .editor {
             coordinator.library.refresh()
             guard
-                let url = coordinator.lastRecordingURL,
+                let url = destination.recordingURL,
                 let item = coordinator.library.recordings.first(where: { $0.url == url })
             else {
                 navigation.section = .library
                 return
             }
-            navigation.section = .editor
             Task { await editor.open(item) }
         }
     }

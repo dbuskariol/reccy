@@ -314,7 +314,7 @@ struct SettingsView: View {
             SettingsCard(title: "Capture Access") {
                 SettingsPermissionRow(
                     title: "Screen & System Audio Recording",
-                    detail: "Required for displays, portions, applications, windows, and their system audio.",
+                    detail: "Required for every capture source. Portion uses this permission too; it has no separate grant.",
                     systemImage: "rectangle.inset.filled.and.person.filled",
                     status: screenPermissionPresentation
                 ) {
@@ -328,6 +328,21 @@ struct SettingsView: View {
                     status: microphonePermissionPresentation
                 ) {
                     microphonePermissionActions
+                }
+            }
+
+            SettingsCard(title: "Storage Access") {
+                SettingsPermissionRow(
+                    title: "Files & Folders",
+                    detail: recordingFolderPermissionDetail,
+                    systemImage: "folder.badge.gearshape",
+                    status: coordinator.settings.outputFolderPath == nil
+                        ? .notRequired
+                        : .managedByMacOS
+                ) {
+                    Button("System Settings") {
+                        coordinator.openFilesAndFoldersPrivacySettings()
+                    }
                 }
             }
 
@@ -506,6 +521,14 @@ struct SettingsView: View {
         case .denied, .restricted: .notAllowed
         @unknown default: .notAllowed
         }
+    }
+
+    private var recordingFolderPermissionDetail: String {
+        if let path = coordinator.settings.outputFolderPath {
+            let name = URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
+            return "macOS manages access to your chosen “\(name)” folder and may ask once if it’s protected."
+        }
+        return "Default Movies/Reccy needs no extra access. macOS asks only if you choose a protected folder."
     }
 
     @ViewBuilder
@@ -694,6 +717,8 @@ private enum PermissionPresentation {
     case notRequested
     case notAllowed
     case restartRequired
+    case notRequired
+    case managedByMacOS
 
     var title: String {
         switch self {
@@ -701,6 +726,8 @@ private enum PermissionPresentation {
         case .notRequested: "Not requested"
         case .notAllowed: "Not allowed"
         case .restartRequired: "Restart required"
+        case .notRequired: "Not required"
+        case .managedByMacOS: "Managed by macOS"
         }
     }
 
@@ -710,13 +737,15 @@ private enum PermissionPresentation {
         case .notRequested: "circle.dashed"
         case .notAllowed: "exclamationmark.circle.fill"
         case .restartRequired: "arrow.clockwise.circle.fill"
+        case .notRequired: "checkmark.circle"
+        case .managedByMacOS: "gearshape.circle"
         }
     }
 
     var color: Color {
         switch self {
         case .ready: .green
-        case .notRequested: .secondary
+        case .notRequested, .notRequired, .managedByMacOS: .secondary
         case .notAllowed, .restartRequired: .orange
         }
     }

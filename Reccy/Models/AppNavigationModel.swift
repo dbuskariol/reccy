@@ -52,6 +52,29 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     }
 }
 
+struct CaptureCompletionNavigation: Equatable {
+    let section: AppSection
+    let recordingURL: URL?
+}
+
+extension CaptureSessionCompletion.Outcome {
+    func navigation(for preference: RecordingCompletionDestination) -> CaptureCompletionNavigation {
+        switch self {
+        case .cancelled:
+            CaptureCompletionNavigation(section: .record, recordingURL: nil)
+        case let .saved(url):
+            switch preference {
+            case .library:
+                CaptureCompletionNavigation(section: .library, recordingURL: url)
+            case .editor:
+                CaptureCompletionNavigation(section: .editor, recordingURL: url)
+            case .record:
+                CaptureCompletionNavigation(section: .record, recordingURL: url)
+            }
+        }
+    }
+}
+
 @MainActor
 final class AppNavigationModel: ObservableObject {
     @Published var section: AppSection = .record
