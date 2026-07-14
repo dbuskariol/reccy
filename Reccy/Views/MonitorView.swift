@@ -160,7 +160,7 @@ struct MonitorView: View {
                     }
                 }
 
-                Text("\(coordinator.formattedFileSize) written")
+                Text(coordinator.liveStorageStatus)
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
 

@@ -64,6 +64,36 @@ struct ReccyApp: App {
                 .disabled(coordinator.state != .recording && coordinator.state != .paused)
                 .keyboardShortcut("p", modifiers: [.command, .shift])
             }
+
+            CommandMenu("Editor") {
+                Button("Previous Frame") {
+                    editor.stepFrames(-1)
+                }
+                .disabled(!editor.hasProject)
+                .keyboardShortcut(.leftArrow, modifiers: .control)
+
+                Button("Next Frame") {
+                    editor.stepFrames(1)
+                }
+                .disabled(!editor.hasProject)
+                .keyboardShortcut(.rightArrow, modifiers: .control)
+
+                Divider()
+
+                Button("Nudge Selected Clip Earlier") {
+                    guard let id = editor.selectedClipID else { return }
+                    editor.nudgeClip(id: id, byFrames: -1)
+                }
+                .disabled(editor.selectedClipID == nil)
+                .keyboardShortcut(.leftArrow, modifiers: .option)
+
+                Button("Nudge Selected Clip Later") {
+                    guard let id = editor.selectedClipID else { return }
+                    editor.nudgeClip(id: id, byFrames: 1)
+                }
+                .disabled(editor.selectedClipID == nil)
+                .keyboardShortcut(.rightArrow, modifiers: .option)
+            }
         }
 
         MenuBarExtra(isInserted: menuBarExtraInsertion) {

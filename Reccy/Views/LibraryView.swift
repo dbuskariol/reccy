@@ -321,8 +321,7 @@ struct LibraryView: View {
                             .frame(width: 18, height: 18)
                     }
                     .buttonStyle(.borderedProminent)
-                    .reccyTooltip("Edit recording")
-                    .accessibilityLabel("Edit Recording")
+                    .reccyAccessibleControl("Edit Recording", help: "Edit recording")
 
                     Button {
                         exportItem = item
@@ -331,16 +330,14 @@ struct LibraryView: View {
                             .frame(width: 18, height: 18)
                     }
                     .buttonStyle(.bordered)
-                    .reccyTooltip("Export recording")
-                    .accessibilityLabel("Export Recording")
+                    .reccyAccessibleControl("Export Recording", help: "Export recording")
 
                     ShareLink(item: item.url) {
                         Image(systemName: "square.and.arrow.up")
                             .frame(width: 18, height: 18)
                     }
                     .buttonStyle(.bordered)
-                    .reccyTooltip("Share recording")
-                    .accessibilityLabel("Share Recording")
+                    .reccyAccessibleControl("Share Recording", help: "Share recording")
 
                     Button(role: .destructive) {
                         pendingDelete = item
@@ -349,7 +346,7 @@ struct LibraryView: View {
                             .frame(width: 18, height: 18)
                     }
                     .buttonStyle(.bordered)
-                    .reccyTooltip("Move to Trash")
+                    .reccyAccessibleControl("Move to Trash")
                 }
             }
 
@@ -388,8 +385,7 @@ struct LibraryView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .clipShape(Circle())
-                .reccyTooltip(isPreviewPlaying ? "Pause" : "Play")
-                .accessibilityLabel(isPreviewPlaying ? "Pause" : "Play")
+                .reccyAccessibleControl(isPreviewPlaying ? "Pause" : "Play")
 
                 playbackButton("goforward.5", help: "Forward 5 seconds") { seekBy(5) }
 
@@ -406,8 +402,7 @@ struct LibraryView: View {
                         .frame(width: 18, height: 18)
                 }
                 .buttonStyle(.borderless)
-                .reccyTooltip("Show in Finder")
-                .accessibilityLabel("Show in Finder")
+                .reccyAccessibleControl("Show in Finder")
             }
 
             waveformScrubber(item)
@@ -432,8 +427,7 @@ struct LibraryView: View {
                 .frame(width: 18, height: 18)
         }
         .buttonStyle(.borderless)
-        .reccyTooltip(help)
-        .accessibilityLabel(help)
+        .reccyAccessibleControl(help)
     }
 
     private func waveformScrubber(_ item: RecordingItem) -> some View {

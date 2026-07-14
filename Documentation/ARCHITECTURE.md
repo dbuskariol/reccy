@@ -38,9 +38,9 @@ Region selection overlay ├── approved SCContentFilter
 
 The writer creates separate, titled tracks for screen, system audio, and microphone. A five-second movie-fragment interval limits how much unwritten media is exposed during an interruption. HEVC is the default because it gives markedly better screen-content size efficiency; H.264 remains available for compatibility, and MOV is available for editing-oriented masters.
 
-Before capture starts, `RecordingStoragePolicy` derives a five-minute safety window from the exact configured video and audio bitrates and adds a 512 MB filesystem reserve. While recording, Reccy checks that reserve every two seconds and stops through the normal writer-finalization path before the volume is exhausted. An atomic journal beside the media records the intended manifest before `SCStream` starts. On the next launch, Library validates an interrupted fragmented file: playable video is re-indexed automatically, while invalid media is preserved under an explicit Interrupted filename and surfaced in a first-class recovery banner.
+Before capture starts, `RecordingStoragePolicy` derives a five-minute safety window from the exact configured video and audio bitrates and adds a 512 MB filesystem reserve. While recording, Reccy checks that reserve every two seconds and stops through the normal writer-finalization path before the volume is exhausted. An atomic journal beside the media records the intended manifest before `SCStream` starts. A kernel-backed `fcntl` lease makes writing and recovery mutually exclusive across installed, Xcode, and QA processes; recovery waits while a live writer owns the directory and the OS releases the lease automatically after a crash. On the next safe recovery pass, Library validates the fragmented file: playable video is re-indexed automatically, while invalid media is preserved under an explicit Interrupted filename and surfaced in a first-class recovery banner.
 
-The live monitor does not start a second stream. Complete ScreenCaptureKit frames feed the writer and a shared preview pipeline. That pipeline coalesces UI backpressure to the newest sample buffer, makes a metadata-only copy marked for immediate display, and enqueues it into the macOS 26 `AVSampleBufferVideoRenderer` attached to the monitor layer. The IOSurface-backed frame remains shared, renderer failures are flushed before recovery, and writer timestamps are never mutated. In-progress file size uses a fresh filesystem stat rather than cacheable URL resource values, so every committed movie fragment reaches the monitor telemetry.
+The live monitor does not start a second stream. Complete ScreenCaptureKit frames feed the writer and a shared preview pipeline. Following Apple’s current ScreenCaptureKit sample architecture, that pipeline validates frame metadata, retains the existing IOSurface and content geometry, coalesces UI backpressure to the newest frame, and presents the surface through a layer-hosting AppKit view whose backing layer is installed before layer hosting is enabled. The recording pixels remain GPU-shared, no timed-playback renderer or pixel copy sits in the path, and writer timestamps are never mutated. AVAssetWriter uses a safe-save staging file while recording; Reccy reports an honest safe-write state until the destination exposes a committed size rather than showing a misleading zero-byte value.
 
 HDR recording begins with ScreenCaptureKit's `.captureHDRRecordingPreservedSDRHDR10` configuration. Reccy then writes HEVC Main 10 with PQ transfer, Rec. 2020 primaries/matrix, and VideoToolbox's SDR-range-preservation metadata request. Mouse-click highlighting is disabled in HDR because ScreenCaptureKit currently supports that overlay for BGRA SDR capture.
 
@@ -75,6 +75,8 @@ The service writes into a private, same-volume staging directory and reserves ca
 
 The application uses SwiftUI scenes, an app-owned fixed-width workspace sidebar, native toolbars, AppKit file panels, AVKit rendering surfaces, a menu-bar extra, standard materials, semantic colors, SF Symbols, and system content sharing. Owning the root split geometry keeps every section aligned even when detail toolbars change, while the controls and window chrome still inherit the native macOS treatment.
 
+Icon controls use one shared semantic-label and tooltip primitive so the visible interface, hover help, and assistive descriptions cannot drift. The timeline exposes each clip and gap as one adjustable accessibility object instead of leaking decorative handles. Frame-accurate move, trim, and gap-fill operations are available through VoiceOver custom actions and matching Editor-menu keyboard commands.
+
 ## Privacy and distribution
 
 Capture and editing are local. The only network surface is Sparkle's signed update feed. Hardened Runtime is enabled. App Sandbox is intentionally disabled for direct distribution so ScreenCaptureKit, the default Movies folder, persisted custom output directories, and imported media remain first-class without broad security-scoped-bookmark plumbing.
@@ -85,7 +87,7 @@ Local capture builds use the same identity principle. `Scripts/install-developme
 
 ## Testing strategy
 
-The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, codec bitrate policy, storage preflight, atomic recovery journals, playable interruption recovery, invalid-file preservation, the complete export preset matrix, safe destination replacement, cancellation, and rendered audio mixes. Installed-app Computer Use QA exercises the main navigation, recovery banner, library transport, timeline seeking, movement, reorder, trimming, gap fills, voiceover sources, zoom, and real export progress/completion. Remaining release acceptance includes:
+The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, codec bitrate policy, storage preflight, cross-process recording/recovery exclusion, atomic recovery journals, playable interruption recovery, invalid-file preservation, the complete export preset matrix, safe destination replacement, cancellation, and rendered audio mixes. Installed-app Computer Use QA exercises the main navigation, recovery banner, library transport, timeline seeking, movement, reorder, trimming, gap fills, VoiceOver custom actions, keyboard nudging, voiceover sources, zoom, menu-bar pause/resume/stop, and real export progress/completion. Remaining release acceptance includes:
 
 - signed capture runs for every source and audio combination;
 - long-duration A/V drift measurements;
@@ -93,7 +95,7 @@ The automated suite covers Retina-aware resolution capping, no-upscale behavior,
 - encoder fallback under sustained capture load;
 - multichannel and external microphone fixtures;
 - export matrix tests across Intel and Apple silicon;
-- UI automation for picker, timeline, VoiceOver, and keyboard navigation.
+- signed picker automation and a complete spoken VoiceOver acceptance pass.
 
 ## Primary Apple technologies
 

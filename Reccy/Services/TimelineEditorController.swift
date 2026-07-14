@@ -73,6 +73,7 @@ final class TimelineEditorController: ObservableObject {
     }
 
     var duration: TimeInterval { max(project?.duration ?? 0, 0.01) }
+    var frameDuration: TimeInterval { project?.frameDuration ?? 1 / 30 }
     var hasProject: Bool { project != nil }
     var isPlaying: Bool { player.timeControlStatus == .playing }
     var selectedClip: TimelineClip? {
@@ -95,14 +96,7 @@ final class TimelineEditorController: ObservableObject {
     }
 
     func refreshVoiceoverInputDevices() {
-        let session = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone, .external],
-            mediaType: .audio,
-            position: .unspecified
-        )
-        voiceoverInputDevices = session.devices
-            .map { AudioInputDevice(id: $0.uniqueID, name: $0.localizedName) }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        voiceoverInputDevices = AudioInputDevice.discoverAvailable()
     }
 
     func open(_ item: RecordingItem) async {
@@ -203,7 +197,11 @@ final class TimelineEditorController: ObservableObject {
                 )
             }
 
-            project = TimelineProject(name: item.name, lanes: lanes)
+            project = TimelineProject(
+                name: item.name,
+                frameRate: Double(item.manifest.frameRate),
+                lanes: lanes
+            )
             sourceDurations = [item.url: duration]
             playhead = 0
             selectedClipID = lanes.first?.clips.first?.id
@@ -328,6 +326,44 @@ final class TimelineEditorController: ObservableObject {
         finishTimelineInteraction()
     }
 
+    /// Frame-accurate, atomic movement for keyboard and assistive-technology
+    /// actions. Pointer drags keep their live interaction preview; discrete
+    /// actions edit the canonical project directly and save once.
+    func nudgeClip(id: UUID, byFrames frameCount: Int) {
+        let delta = TimeInterval(frameCount) * frameDuration
+        guard delta.isFinite, delta != 0, var project, let clip = project.clip(id: id) else { return }
+        guard let finalStart = project.moveClip(
+            id: id,
+            to: clip.timelineStart + delta,
+            includeLinked: moveLinkedClips
+        ) else { return }
+        self.project = project
+        selectedClipID = id
+        selectedGapID = nil
+        playhead = finalStart
+        rebuildAndSave()
+    }
+
+    func nudgeClipTrim(id: UUID, edge: TimelineTrimEdge, byFrames frameCount: Int) {
+        let delta = TimeInterval(frameCount) * frameDuration
+        guard delta.isFinite, delta != 0, var project, let clip = project.clip(id: id) else { return }
+        let boundary = edge == .leading ? clip.timelineStart : clip.timelineEnd
+        let sourceDuration = sourceDurations[clip.sourceURL]
+            ?? max(clip.sourceStart + clip.duration, 1 / 30)
+        guard let finalBoundary = project.trimClip(
+            id: id,
+            edge: edge,
+            to: boundary + delta,
+            sourceDuration: sourceDuration,
+            includeLinked: moveLinkedClips
+        ) else { return }
+        self.project = project
+        selectedClipID = id
+        selectedGapID = nil
+        playhead = finalBoundary
+        rebuildAndSave()
+    }
+
     func setSelectedGapFillMode(_ mode: TimelineGapFillMode) {
         guard var project, let selectedGapID, selectedGap?.fillMode != mode else { return }
         project.setGapFillMode(mode, gapID: selectedGapID)
@@ -375,7 +411,7 @@ final class TimelineEditorController: ObservableObject {
 
     func stepFrames(_ frameCount: Int) {
         player.pause()
-        seekBy(TimeInterval(frameCount) / 30)
+        seekBy(TimeInterval(frameCount) * frameDuration)
         objectWillChange.send()
     }
 

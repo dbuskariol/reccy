@@ -4,6 +4,7 @@ import CoreGraphics
 import CoreImage
 import CoreVideo
 import Foundation
+import IOSurface
 import Testing
 @testable import Reccy
 
@@ -24,14 +25,14 @@ struct ReccyTests {
         #expect(converted == CGRect(x: 100, y: 520, width: 640, height: 360))
     }
 
-    @Test func livePreviewRoutesTheWritersPixelBufferWithoutCopyingIt() throws {
+    @Test func livePreviewRoutesTheWritersIOSurfaceWithoutCopyingIt() throws {
         var pixelBuffer: CVPixelBuffer?
         #expect(CVPixelBufferCreate(
             kCFAllocatorDefault,
             16,
             16,
             kCVPixelFormatType_32BGRA,
-            nil,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
             &pixelBuffer
         ) == kCVReturnSuccess)
         let imageBuffer = try #require(pixelBuffer)
@@ -58,8 +59,14 @@ struct ReccyTests {
         ) == noErr)
 
         let source = try #require(sourceBuffer)
-        let previewPixelBuffer = try #require(CapturePreviewPipeline.pixelBuffer(from: source))
-        #expect(previewPixelBuffer === imageBuffer)
+        let previewFrame = try #require(CapturePreviewPipeline.frame(from: source))
+        let sourceSurface = try #require(
+            CVPixelBufferGetIOSurface(imageBuffer)?.takeUnretainedValue()
+        )
+        #expect(
+            IOSurfaceGetID(unsafeBitCast(previewFrame.surface, to: IOSurfaceRef.self))
+                == IOSurfaceGetID(sourceSurface)
+        )
     }
 
 #if DEBUG
@@ -67,18 +74,40 @@ struct ReccyTests {
         let sampleBuffer = try #require(CaptureCoordinator.makePreviewQASampleBuffer())
         #expect(CMSampleBufferIsValid(sampleBuffer))
         #expect(CMSampleBufferDataIsReady(sampleBuffer))
-        #expect(CapturePreviewPipeline.pixelBuffer(from: sampleBuffer) != nil)
+        #expect(CapturePreviewPipeline.frame(from: sampleBuffer) != nil)
+    }
+
+    @Test @MainActor func detachingAnAdaptivePreviewCandidateKeepsTheVisibleConsumerAttached() async throws {
+        let pipeline = CapturePreviewPipeline()
+        var visibleFrameCount = 0
+        var discardedFrameCount = 0
+        let visibleID = pipeline.attach { frame in
+            if frame != nil { visibleFrameCount += 1 }
+        }
+        let discardedID = pipeline.attach { frame in
+            if frame != nil { discardedFrameCount += 1 }
+        }
+
+        // ViewThatFits can construct both layout candidates, then dismantle
+        // the unused one. Detaching it must not remove the visible preview.
+        pipeline.detach(discardedID)
+        pipeline.enqueue(try #require(CaptureCoordinator.makePreviewQASampleBuffer()))
+        try await Task.sleep(for: .milliseconds(20))
+
+        #expect(visibleFrameCount == 1)
+        #expect(discardedFrameCount == 0)
+        pipeline.detach(visibleID)
     }
 #endif
 
-    @Test @MainActor func livePreviewPipelineSharesPixelsAndMarksFramesForImmediateDisplay() async throws {
+    @Test @MainActor func livePreviewPipelineSharesTheIOSurfaceWithTheHostedLayer() async throws {
         var pixelBuffer: CVPixelBuffer?
         #expect(CVPixelBufferCreate(
             kCFAllocatorDefault,
             16,
             16,
             kCVPixelFormatType_32BGRA,
-            nil,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
             &pixelBuffer
         ) == kCVReturnSuccess)
         let imageBuffer = try #require(pixelBuffer)
@@ -106,21 +135,20 @@ struct ReccyTests {
         let source = try #require(sourceBuffer)
 
         let pipeline = CapturePreviewPipeline()
-        var delivered: CMSampleBuffer?
+        var delivered: CapturePreviewFrame?
         let attachmentID = pipeline.attach { delivered = $0 }
         pipeline.enqueue(source)
         try await Task.sleep(for: .milliseconds(20))
 
-        let deliveredBuffer = try #require(delivered)
-        #expect(deliveredBuffer !== source)
-        #expect(CapturePreviewPipeline.pixelBuffer(from: deliveredBuffer) === imageBuffer)
-        let attachments = try #require(
-            CMSampleBufferGetSampleAttachmentsArray(
-                deliveredBuffer,
-                createIfNecessary: false
-            ) as? [[CFString: Any]]
+        let deliveredFrame = try #require(delivered)
+        let sourceSurface = try #require(
+            CVPixelBufferGetIOSurface(imageBuffer)?.takeUnretainedValue()
         )
-        #expect(attachments.first?[kCMSampleAttachmentKey_DisplayImmediately] as? Bool == true)
+        #expect(
+            IOSurfaceGetID(unsafeBitCast(deliveredFrame.surface, to: IOSurfaceRef.self))
+                == IOSurfaceGetID(sourceSurface)
+        )
+        #expect(deliveredFrame.contentRect == CGRect(x: 0, y: 0, width: 16, height: 16))
 
         let previewView = CaptureSurfacePreviewNSView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 180)
@@ -134,7 +162,7 @@ struct ReccyTests {
         window.contentView = previewView
         window.orderFrontRegardless()
         defer { window.orderOut(nil) }
-        previewView.display(deliveredBuffer)
+        previewView.display(deliveredFrame)
         for _ in 0..<20 where !previewView.isReadyForDisplay {
             try await Task.sleep(for: .milliseconds(25))
         }
@@ -646,6 +674,99 @@ struct ReccyTests {
         #expect(removed == nil)
     }
 
+    @Test func recordingLeaseSerializesCaptureAndRecoveryWithinOneProcess() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Lease \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writerLease = try RecordingSessionLease.acquire(in: directory)
+        #expect(throws: RecordingLeaseError.alreadyHeld) {
+            _ = try RecordingSessionLease.acquire(in: directory)
+        }
+
+        writerLease.release()
+        let recoveryLease = try RecordingSessionLease.acquire(in: directory)
+        recoveryLease.release()
+    }
+
+    @Test func recordingLeaseRejectsAnIndependentWriterProcess() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Cross Process Lease \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let child = Process()
+        let childInput = Pipe()
+        let childOutput = Pipe()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        child.arguments = [
+            "-c",
+            """
+            import fcntl, os, sys
+            descriptor = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            sys.stdout.write("locked\\n")
+            sys.stdout.flush()
+            sys.stdin.read(1)
+            os.close(descriptor)
+            """,
+            directory.appendingPathComponent(RecordingSessionLease.fileName).path,
+        ]
+        child.standardInput = childInput
+        child.standardOutput = childOutput
+        try child.run()
+        defer {
+            if child.isRunning {
+                child.terminate()
+                child.waitUntilExit()
+            }
+        }
+
+        let acknowledgementData = try childOutput.fileHandleForReading.read(upToCount: 7)
+        let acknowledgement = try #require(acknowledgementData)
+        #expect(String(decoding: acknowledgement, as: UTF8.self) == "locked\n")
+        #expect(throws: RecordingLeaseError.alreadyHeld) {
+            _ = try RecordingSessionLease.acquire(in: directory)
+        }
+
+        try childInput.fileHandleForWriting.write(contentsOf: Data([0]))
+        childInput.fileHandleForWriting.closeFile()
+        child.waitUntilExit()
+        #expect(child.terminationStatus == 0)
+
+        let lease = try RecordingSessionLease.acquire(in: directory)
+        lease.release()
+    }
+
+    @Test func recoveryWaitsForTheActiveWriterLease() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Leased Recovery \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let generated = try await makeColorTestVideo()
+        let mediaURL = directory.appendingPathComponent("Still Recording.mov")
+        try FileManager.default.moveItem(at: generated, to: mediaURL)
+        _ = try RecordingRecoveryJournal.write(
+            mediaURL: mediaURL,
+            manifest: makeRecoveryManifest()
+        )
+        let writerLease = try RecordingSessionLease.acquire(in: directory)
+        let library = RecordingLibrary(directoryURL: directory)
+
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(library.recoveryNotice == nil)
+        #expect(try RecordingRecoveryJournal.load(from: directory) != nil)
+
+        writerLease.release()
+        for _ in 0..<200 where library.recoveryNotice == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(library.recoveryNotice?.kind == .recovered)
+        #expect(try RecordingRecoveryJournal.load(from: directory) == nil)
+    }
+
     @Test func interruptedPlayableRecordingIsRestoredToTheLibrary() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Playable Recovery \(UUID().uuidString)", isDirectory: true)
@@ -956,9 +1077,13 @@ struct ReccyTests {
         ]
         var project = TimelineProject(
             name: "Rendered Gaps",
+            frameRate: 60,
             lanes: [TimelineLane(kind: .video, name: "Screen", clips: clips)]
         )
         let gapID = try #require(project.videoGaps.first?.id)
+        let cadenceBuild = try await TimelineCompositionBuilder.build(project)
+        let videoComposition = try #require(cadenceBuild.videoComposition)
+        #expect(abs(videoComposition.frameDuration.seconds - (1 / 60)) < 0.000_1)
 
         let expectedColors: [(TimelineGapFillMode, RGBAColor)] = [
             (.black, RGBAColor(red: 0, green: 0, blue: 0)),

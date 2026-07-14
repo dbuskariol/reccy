@@ -1,6 +1,4 @@
 import AppKit
-@preconcurrency import AVFoundation
-@preconcurrency import CoreMedia
 import SwiftUI
 
 struct CapturePreviewView: NSViewRepresentable {
@@ -38,8 +36,8 @@ struct CapturePreviewView: NSViewRepresentable {
             guard attachedView !== view else { return }
             detach()
             attachedView = view
-            attachmentID = pipeline.attach { [weak view] sampleBuffer in
-                view?.display(sampleBuffer)
+            attachmentID = pipeline.attach { [weak view] frame in
+                view?.display(frame)
             }
         }
 
@@ -53,15 +51,18 @@ struct CapturePreviewView: NSViewRepresentable {
 }
 
 final class CaptureSurfacePreviewNSView: NSView {
-    private let displayLayer = AVSampleBufferDisplayLayer()
+    private let contentLayer = CALayer()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        contentLayer.backgroundColor = NSColor.black.cgColor
+        contentLayer.contentsGravity = .resizeAspect
+        contentLayer.masksToBounds = true
+        // A layer-hosting AppKit view must receive its backing layer before
+        // enabling layer hosting. This order is required by Apple's current
+        // ScreenCaptureKit sample and keeps IOSurface contents presentable.
+        layer = contentLayer
         wantsLayer = true
-        displayLayer.backgroundColor = NSColor.black.cgColor
-        displayLayer.videoGravity = .resizeAspect
-        displayLayer.masksToBounds = true
-        layer = displayLayer
     }
 
     @available(*, unavailable)
@@ -69,24 +70,11 @@ final class CaptureSurfacePreviewNSView: NSView {
         nil
     }
 
-    var isReadyForDisplay: Bool { displayLayer.isReadyForDisplay }
-    var rendererError: Error? { displayLayer.sampleBufferRenderer.error }
+    var isReadyForDisplay: Bool { contentLayer.contents != nil }
+    var rendererError: Error? { nil }
 
     @MainActor
-    func display(_ sampleBuffer: CMSampleBuffer?) {
-        let renderer = displayLayer.sampleBufferRenderer
-        guard let sampleBuffer else {
-            renderer.flush(removingDisplayedImage: true)
-            return
-        }
-
-        if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
-            renderer.flush()
-        }
-        // The renderer can report backpressure before its first frame. The
-        // pipeline already bounds delivery to one newest frame, and Apple
-        // explicitly permits enqueueing while this value is false, so do not
-        // prevent the renderer from bootstrapping its display queue.
-        renderer.enqueue(sampleBuffer)
+    func display(_ frame: CapturePreviewFrame?) {
+        contentLayer.contents = frame?.surface
     }
 }

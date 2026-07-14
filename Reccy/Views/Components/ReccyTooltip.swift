@@ -20,6 +20,14 @@ extension View {
     func reccyTooltip(_ text: String) -> some View {
         modifier(ReccyTooltipModifier(text: text))
     }
+
+    /// One source of truth for icon-only controls: a concise spoken label and
+    /// a richer optional tooltip/VoiceOver hint. This prevents SF Symbol names
+    /// from leaking into the accessibility tree.
+    func reccyAccessibleControl(_ label: String, help: String? = nil) -> some View {
+        accessibilityLabel(Text(label))
+            .reccyTooltip(help ?? label)
+    }
 }
 
 private struct ReccyTooltipAnchor: NSViewRepresentable {

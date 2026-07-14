@@ -127,7 +127,28 @@ final class RecordingLibrary: ObservableObject {
                 }
             }
             do {
-                guard let journal = try RecordingRecoveryJournal.load(from: directory) else { return }
+                guard try RecordingRecoveryJournal.load(from: directory) != nil else { return }
+
+                // A live writer owns this same lease. Wait for it to complete
+                // instead of mistaking its necessarily incomplete destination
+                // for crash debris. The lease is released by the kernel even
+                // if the writer process terminates unexpectedly.
+                let lease: RecordingSessionLease
+                while true {
+                    guard !Task.isCancelled, directoryURL == directory else { return }
+                    do {
+                        lease = try RecordingSessionLease.acquire(in: directory)
+                        break
+                    } catch RecordingLeaseError.alreadyHeld {
+                        try await Task.sleep(for: .milliseconds(250))
+                    }
+                }
+
+                guard let journal = try RecordingRecoveryJournal.load(from: directory) else {
+                    lease.release()
+                    return
+                }
+                defer { lease.release() }
                 let mediaURL = directory.appendingPathComponent(journal.mediaFileName)
                 guard !Task.isCancelled, directoryURL == directory else { return }
                 guard FileManager.default.fileExists(atPath: mediaURL.path) else {

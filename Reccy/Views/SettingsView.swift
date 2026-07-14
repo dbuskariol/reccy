@@ -337,6 +337,7 @@ struct SettingsView: View {
                         .font(.title3)
                         .foregroundStyle(.tint)
                         .frame(width: 28)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 5) {
                         Text("System audio uses the selected screen source")
                             .font(.headline)
@@ -381,6 +382,14 @@ struct SettingsView: View {
 
             SettingsCard(title: "Editor Shortcuts") {
                 editorShortcutRow("Play or pause", keys: "Space", systemImage: "playpause")
+                SettingsDivider()
+                editorShortcutRow("Previous frame", keys: "⌃←", systemImage: "backward.frame.fill")
+                SettingsDivider()
+                editorShortcutRow("Next frame", keys: "⌃→", systemImage: "forward.frame.fill")
+                SettingsDivider()
+                editorShortcutRow("Nudge selected clip earlier", keys: "⌥←", systemImage: "arrow.left.to.line")
+                SettingsDivider()
+                editorShortcutRow("Nudge selected clip later", keys: "⌥→", systemImage: "arrow.right.to.line")
                 SettingsDivider()
                 editorShortcutRow("Split selected clip", keys: "⌘B", systemImage: "scissors")
                 SettingsDivider()
@@ -623,6 +632,7 @@ private struct SettingsValueRow<Control: View>: View {
                 .font(.title3)
                 .foregroundStyle(.tint)
                 .frame(width: 28)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.headline)
                 Text(detail)

@@ -100,6 +100,7 @@ enum TimelineCompositionBuilder {
                         try fillVideoGap(
                             gap,
                             mode: fillMode,
+                            frameDuration: project.frameDuration,
                             compositionTrack: compositionTrack,
                             previous: previousVideoSource,
                             next: (clip, sourceTrack)
@@ -150,6 +151,7 @@ enum TimelineCompositionBuilder {
                         try fillVideoGap(
                             gap,
                             mode: fillMode,
+                            frameDuration: project.frameDuration,
                             compositionTrack: compositionTrack,
                             previous: previousVideoSource,
                             next: nil
@@ -173,7 +175,8 @@ enum TimelineCompositionBuilder {
             track: videoCompositionTrack,
             renderSize: videoRenderSize,
             transform: videoTransform,
-            duration: project.duration
+            duration: project.duration,
+            frameDuration: project.frameDuration
         )
         let audioMix: AVAudioMix?
         if audioParameters.isEmpty {
@@ -221,6 +224,7 @@ enum TimelineCompositionBuilder {
     private static func fillVideoGap(
         _ gap: Range<TimeInterval>,
         mode: TimelineGapFillMode,
+        frameDuration: TimeInterval,
         compositionTrack: AVMutableCompositionTrack,
         previous: (clip: TimelineClip, track: AVAssetTrack)?,
         next: (clip: TimelineClip, track: AVAssetTrack)?
@@ -244,8 +248,9 @@ enum TimelineCompositionBuilder {
             try insertHeldFrame(
                 from: previous.clip,
                 sourceTrack: previous.track,
-                sourceTime: previous.clip.sourceStart + max(0, previous.clip.duration - 1 / 30),
+                sourceTime: previous.clip.sourceStart + max(0, previous.clip.duration - frameDuration),
                 into: gap,
+                frameDuration: frameDuration,
                 compositionTrack: compositionTrack
             )
 
@@ -261,6 +266,7 @@ enum TimelineCompositionBuilder {
                 sourceTrack: next.track,
                 sourceTime: next.clip.sourceStart,
                 into: gap,
+                frameDuration: frameDuration,
                 compositionTrack: compositionTrack
             )
         }
@@ -281,9 +287,10 @@ enum TimelineCompositionBuilder {
         sourceTrack: AVAssetTrack,
         sourceTime: TimeInterval,
         into gap: Range<TimeInterval>,
+        frameDuration: TimeInterval,
         compositionTrack: AVMutableCompositionTrack
     ) throws {
-        let frameDuration = min(1 / 30, clip.duration)
+        let frameDuration = min(frameDuration, clip.duration)
         let insertionTime = timelineTime(gap.lowerBound)
         let insertedRange = CMTimeRange(
             start: insertionTime,
@@ -304,7 +311,8 @@ enum TimelineCompositionBuilder {
         track: AVMutableCompositionTrack?,
         renderSize: CGSize?,
         transform: CGAffineTransform,
-        duration: TimeInterval
+        duration: TimeInterval,
+        frameDuration: TimeInterval
     ) -> AVVideoComposition? {
         guard
             let track,
@@ -329,7 +337,7 @@ enum TimelineCompositionBuilder {
 
         var configuration = AVVideoComposition.Configuration()
         configuration.renderSize = renderSize
-        configuration.frameDuration = CMTime(value: 1, timescale: 30)
+        configuration.frameDuration = timelineTime(frameDuration)
         configuration.instructions = [instruction]
         return AVVideoComposition(configuration: configuration)
     }

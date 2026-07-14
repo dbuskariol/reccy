@@ -70,12 +70,14 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var selectedFilter: SCContentFilter?
     private var selectedSourceRect: CGRect?
     private var multitrackRecorder: MultitrackRecorder?
+    private var recordingLease: RecordingSessionLease?
     private var activeOutputURL: URL?
     private var activeRecordingManifest: RecordingManifest?
     private var pendingCompletionNotice: String?
     private var countdownTask: Task<Void, Never>?
     private var meterTask: Task<Void, Never>?
     private var activationCancellable: AnyCancellable?
+    private var observesSystemPicker = false
     private let regionSelectionController = RegionSelectionController()
     private let boundaryController = CaptureBoundaryController()
 #if DEBUG
@@ -90,15 +92,21 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         super.init()
 
         let picker = SCContentSharingPicker.shared
-        picker.add(self)
-        picker.isActive = true
+        // Reccy presents the picker explicitly from its own source controls.
+        // Do not publish an additional persistent Control Center entry for an
+        // unassociated stream.
+        picker.maximumStreamCount = 0
+        picker.isActive = false
         refreshAudioInputDevices()
         refreshPermissionStatus()
         registerGlobalShortcuts()
         activationCancellable = NotificationCenter.default
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in
-                Task { @MainActor in self?.refreshPermissionStatus() }
+                Task { @MainActor in
+                    self?.refreshPermissionStatus()
+                    self?.refreshAudioInputDevices()
+                }
             }
     }
 
@@ -110,6 +118,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     var formattedFileSize: String {
         ByteCountFormatter.string(fromByteCount: recordedFileSize, countStyle: .file)
+    }
+
+    var liveStorageStatus: String {
+        recordedFileSize > 0 ? "\(formattedFileSize) written" : "Writing safely"
     }
 
     var selectedMicrophoneName: String {
@@ -178,13 +190,19 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
         var pickerConfiguration = SCContentSharingPickerConfiguration()
         pickerConfiguration.allowedPickerModes = pickerMode
-        pickerConfiguration.allowsChangingSelectedContent = true
+        // The picker is used to create a new filter, not to mutate the
+        // recorder's private SCStream after capture has begun.
+        pickerConfiguration.allowsChangingSelectedContent = false
         if let bundleID = Bundle.main.bundleIdentifier {
             pickerConfiguration.excludedBundleIDs = [bundleID]
         }
 
         let picker = SCContentSharingPicker.shared
         picker.defaultConfiguration = pickerConfiguration
+        if !observesSystemPicker {
+            picker.add(self)
+            observesSystemPicker = true
+        }
         picker.isActive = true
         picker.present(using: contentStyle)
     }
@@ -303,8 +321,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             isSimulatingRecordingForQA = false
             previewPipeline.clear()
             clearSourceSelection()
-            recordedDuration = 0
-            recordedFileSize = 0
+            resetSessionTelemetry()
             state = .idle
             return
         }
@@ -391,14 +408,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     func refreshAudioInputDevices() {
-        let session = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone, .external],
-            mediaType: .audio,
-            position: .unspecified
-        )
-        audioInputDevices = session.devices.map {
-            AudioInputDevice(id: $0.uniqueID, name: $0.localizedName)
-        }
+        audioInputDevices = AudioInputDevice.discoverAvailable()
     }
 
     func chooseOutputFolder() {
@@ -445,6 +455,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 isHDR: settings.useHDR
             )
             let outputURL = try makeOutputURL()
+            recordingLease = try RecordingSessionLease.acquire(
+                in: outputURL.deletingLastPathComponent()
+            )
             let availableBytes = try RecordingStoragePolicy.availableBytes(
                 at: outputURL.deletingLastPathComponent()
             )
@@ -648,8 +661,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         meterTask?.cancel()
         meterTask = nil
         multitrackRecorder = nil
-        systemAudioLevel = 0
-        microphoneAudioLevel = 0
         previewPipeline.clear()
 
         var indexingError: Error?
@@ -676,6 +687,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         activeOutputURL = nil
         activeRecordingManifest = nil
         clearSourceSelection()
+        resetSessionTelemetry()
         state = .idle
         library.refresh()
         if let indexingError {
@@ -694,6 +706,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             )
         }
         pendingCompletionNotice = nil
+        recordingLease = nil
         NSApp.requestUserAttention(.informationalRequest)
     }
 
@@ -701,6 +714,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     /// operation. Successful recordings never leave a stale filter, source
     /// badge, crop rectangle, or non-recorded boundary visible in the app.
     private func clearSourceSelection() {
+        deactivateSystemPicker()
         selectedFilter = nil
         selectedSourceRect = nil
         selectedSource = nil
@@ -711,24 +725,52 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         boundaryController.hide()
     }
 
+    /// Clears values whose meaning is scoped to one capture session. Durable
+    /// settings and `lastRecordingURL` intentionally survive so completion
+    /// navigation can open the saved recording without leaving live state in
+    /// Record, Monitor, or the menu-bar extra.
+    private func resetSessionTelemetry() {
+        recordedDuration = 0
+        recordedFileSize = 0
+        systemAudioLevel = 0
+        microphoneAudioLevel = 0
+        systemAudioHistory.removeAll(keepingCapacity: true)
+        microphoneAudioHistory.removeAll(keepingCapacity: true)
+    }
+
+    /// The shared picker owns macOS's screen-sharing menu-bar and switcher UI.
+    /// Reccy activates it only while choosing or recording a system-picked
+    /// source, and releases it as part of every terminal capture path.
+    private func deactivateSystemPicker() {
+        let picker = SCContentSharingPicker.shared
+        picker.isActive = false
+        if observesSystemPicker {
+            picker.remove(self)
+            observesSystemPicker = false
+        }
+    }
+
     private func handleFailure(_ error: Error) {
+        deactivateSystemPicker()
         countdownTask?.cancel()
         meterTask?.cancel()
         let shouldInspectRecovery = activeOutputURL != nil
         if let multitrackRecorder {
             Task {
                 await multitrackRecorder.cancel()
+                recordingLease = nil
                 if shouldInspectRecovery {
                     library.recoverInterruptedRecordingIfNeeded()
                 }
             }
+        } else {
+            recordingLease = nil
         }
         multitrackRecorder = nil
         activeOutputURL = nil
         activeRecordingManifest = nil
-        boundaryController.setRecording(false)
-        systemAudioLevel = 0
-        microphoneAudioLevel = 0
+        clearSourceSelection()
+        resetSessionTelemetry()
         previewPipeline.clear()
         pendingCompletionNotice = nil
         state = .failed(error.localizedDescription)
@@ -898,6 +940,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     /// Drives the exact production menu-bar view during installed-app visual QA.
     /// This state is compiled out of Release and never starts a capture stream.
     func installActiveMenuBarQAScenario() {
+        isSimulatingRecordingForQA = true
         selectedSourceKind = .application
         hasSelectedSource = true
         selectedSource = Self.qaApplicationSource
@@ -994,6 +1037,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         Task { @MainActor [weak self] in
             guard let self else { return }
             isSelectingSource = false
+            deactivateSystemPicker()
             if !hasSelectedSource {
                 state = .idle
                 sourceSelectionMessage = "Source selection was cancelled."
@@ -1009,6 +1053,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         Task { @MainActor [weak self] in
             guard let self else { return }
             isSelectingSource = false
+            deactivateSystemPicker()
             completeSourceSelection(filter: filter)
         }
     }

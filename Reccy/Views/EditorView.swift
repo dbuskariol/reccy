@@ -98,7 +98,10 @@ struct EditorView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .clipShape(Circle())
-            .reccyTooltip(editor.isPlaying ? "Pause (Space)" : "Play (Space)")
+            .reccyAccessibleControl(
+                editor.isPlaying ? "Pause" : "Play",
+                help: editor.isPlaying ? "Pause (Space)" : "Play (Space)"
+            )
             .keyboardShortcut(.space, modifiers: [])
 
             transportButton("forward.frame.fill", help: "Next frame") {
@@ -143,7 +146,7 @@ struct EditorView: View {
         }
         .buttonStyle(.borderless)
         .controlSize(.large)
-        .reccyTooltip(help)
+        .reccyAccessibleControl(help)
     }
 
     private func timelinePane(_ project: TimelineProject) -> some View {
@@ -341,6 +344,7 @@ struct EditorView: View {
             HStack(spacing: 7) {
                 Image(systemName: lane.kind.systemImage)
                     .foregroundStyle(laneColor(lane.kind))
+                    .accessibilityHidden(true)
                 Text(lane.name)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
@@ -356,7 +360,7 @@ struct EditorView: View {
                             .frame(width: 16)
                     }
                     .buttonStyle(.borderless)
-                    .reccyTooltip(lane.isMuted ? "Unmute \(lane.name)" : "Mute \(lane.name)")
+                    .reccyAccessibleControl(lane.isMuted ? "Unmute \(lane.name)" : "Mute \(lane.name)")
 
                     Slider(
                         value: Binding(
@@ -387,6 +391,7 @@ struct EditorView: View {
                     laneRow(
                         lane,
                         videoGaps: lane.kind == .video ? project.videoGaps : [],
+                        frameRate: project.frameRate,
                         trackWidth: trackWidth
                     )
                         .frame(height: laneHeight)
@@ -430,6 +435,17 @@ struct EditorView: View {
                 editor.seek(to: value.location.x / editor.pixelsPerSecond)
             }
         )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Timeline ruler")
+        .accessibilityValue(timecode(editor.playhead, includeFrames: true))
+        .accessibilityHint("Adjust to seek by one second")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: editor.seekBy(1)
+            case .decrement: editor.seekBy(-1)
+            @unknown default: break
+            }
+        }
     }
 
     private var rulerInterval: TimeInterval {
@@ -441,6 +457,7 @@ struct EditorView: View {
     private func laneRow(
         _ lane: TimelineLane,
         videoGaps: [TimelineGapSegment],
+        frameRate: Double,
         trackWidth: Double
     ) -> some View {
         ZStack(alignment: .leading) {
@@ -459,7 +476,11 @@ struct EditorView: View {
                     gap: gap,
                     pixelsPerSecond: editor.pixelsPerSecond,
                     isSelected: editor.selectedGapID == gap.id,
-                    onSelect: { time in editor.select(gap, at: time) }
+                    onSelect: { time in editor.select(gap, at: time) },
+                    onSetFillMode: { mode in
+                        editor.select(gap)
+                        editor.setSelectedGapFillMode(mode)
+                    }
                 )
                 .frame(width: max(gap.duration * editor.pixelsPerSecond, 18), height: laneHeight - 12)
                 .offset(x: gap.timelineStart * editor.pixelsPerSecond)
@@ -470,6 +491,7 @@ struct EditorView: View {
                     clip: clip,
                     lane: lane,
                     pixelsPerSecond: editor.pixelsPerSecond,
+                    frameRate: frameRate,
                     isSelected: editor.selectedClipID == clip.id,
                     color: laneColor(lane.kind),
                     onSelect: { time in editor.select(clip, at: time) },
@@ -484,7 +506,11 @@ struct EditorView: View {
                     onTrimChanged: { edge, translation in
                         editor.updateClipTrim(id: clip.id, edge: edge, by: translation)
                     },
-                    onEndTrim: { edge in editor.endClipTrim(id: clip.id, edge: edge) }
+                    onEndTrim: { edge in editor.endClipTrim(id: clip.id, edge: edge) },
+                    onNudge: { frames in editor.nudgeClip(id: clip.id, byFrames: frames) },
+                    onNudgeTrim: { edge, frames in
+                        editor.nudgeClipTrim(id: clip.id, edge: edge, byFrames: frames)
+                    }
                 )
                 .frame(width: max(clip.duration * editor.pixelsPerSecond, 18), height: laneHeight - 12)
                 .offset(x: clip.timelineStart * editor.pixelsPerSecond)
@@ -538,7 +564,8 @@ struct EditorView: View {
             base = String(format: "%02d:%02d", minutes, seconds)
         }
         guard includeFrames else { return base }
-        let frames = min(Int((safeTime - floor(safeTime)) * 30), 29)
+        let frameRate = max(editor.project?.frameRate ?? 30, 1)
+        let frames = min(Int((safeTime - floor(safeTime)) * frameRate), Int(frameRate) - 1)
         return String(format: "%@:%02d", base, frames)
     }
 }
@@ -548,6 +575,7 @@ private struct TimelineGapView: View {
     let pixelsPerSecond: Double
     let isSelected: Bool
     let onSelect: (TimeInterval) -> Void
+    let onSetFillMode: (TimelineGapFillMode) -> Void
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
@@ -582,9 +610,17 @@ private struct TimelineGapView: View {
                 .onChanged { value in select(at: value.location.x) }
         )
         .reccyTooltip("Empty video space • Click to select • Drag to scrub")
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            "\(gap.fillMode.title) video gap, \(gap.duration.formatted(.number.precision(.fractionLength(1)))) seconds"
+            "\(gap.fillMode.title) video gap, \(accessibilityDuration) seconds"
         )
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+        .accessibilityHint("Activate to select this gap, then choose its fill mode in the editor toolbar")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onSelect(gap.timelineStart) }
+        .accessibilityAction(named: "Fill with Black") { onSetFillMode(.black) }
+        .accessibilityAction(named: "Hold Previous Frame") { onSetFillMode(.holdPrevious) }
+        .accessibilityAction(named: "Hold Next Frame") { onSetFillMode(.holdNext) }
     }
 
     private var gapBackground: some ShapeStyle {
@@ -602,12 +638,19 @@ private struct TimelineGapView: View {
         let localTime = min(max(localX / pixelsPerSecond, 0), gap.duration)
         onSelect(gap.timelineStart + localTime)
     }
+
+    private var accessibilityDuration: String {
+        gap.duration.formatted(
+            .number.precision(.fractionLength(gap.duration < 1 ? 2 : 1))
+        )
+    }
 }
 
 private struct TimelineClipView: View {
     let clip: TimelineClip
     let lane: TimelineLane
     let pixelsPerSecond: Double
+    let frameRate: Double
     let isSelected: Bool
     let color: Color
     let onSelect: (TimeInterval) -> Void
@@ -617,6 +660,8 @@ private struct TimelineClipView: View {
     let onBeginTrim: (TimelineTrimEdge) -> Void
     let onTrimChanged: (TimelineTrimEdge, TimeInterval) -> Void
     let onEndTrim: (TimelineTrimEdge) -> Void
+    let onNudge: (Int) -> Void
+    let onNudgeTrim: (TimelineTrimEdge, Int) -> Void
 
     @State private var isMoving = false
     @State private var trimmingEdge: TimelineTrimEdge?
@@ -689,7 +734,43 @@ private struct TimelineClipView: View {
             }
         }
         .reccyTooltip("Click to seek • Drag the body to move • Drag either edge to trim")
-        .accessibilityLabel("\(clip.name), \(clip.duration.formatted(.number.precision(.fractionLength(1)))) seconds")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(lane.name) clip, \(clip.name)")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityHint("Activate to select. Additional actions move or trim by one frame.")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { onSelect(clip.timelineStart) }
+        .accessibilityAction(named: "Move Earlier by One Frame") { onNudge(-1) }
+        .accessibilityAction(named: "Move Later by One Frame") { onNudge(1) }
+        .accessibilityAction(named: "Trim Start Later by One Frame") {
+            onNudgeTrim(.leading, 1)
+        }
+        .accessibilityAction(named: "Trim End Earlier by One Frame") {
+            onNudgeTrim(.trailing, -1)
+        }
+    }
+
+    private var accessibilityValue: String {
+        let selection = isSelected ? "Selected" : "Not selected"
+        let duration = clip.duration.formatted(.number.precision(.fractionLength(1)))
+        return "\(selection), starts at \(accessibilityTimecode), \(duration) seconds"
+    }
+
+    private var accessibilityTimecode: String {
+        let safeTime = max(0, clip.timelineStart)
+        let seconds = Int(safeTime.rounded(.down))
+        let safeFrameRate = max(frameRate, 1)
+        let frames = min(
+            Int((safeTime - floor(safeTime)) * safeFrameRate),
+            Int(safeFrameRate) - 1
+        )
+        return String(
+            format: "%02d:%02d:%02d:%02d",
+            seconds / 3_600,
+            (seconds % 3_600) / 60,
+            seconds % 60,
+            frames
+        )
     }
 
     private func trimHandle(edge: TimelineTrimEdge) -> some View {
@@ -739,6 +820,7 @@ private struct TimelinePlayhead: View {
         }
         .foregroundStyle(.red)
         .frame(width: 11)
+        .accessibilityHidden(true)
     }
 }
 

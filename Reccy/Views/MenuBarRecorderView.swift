@@ -71,6 +71,7 @@ struct MenuBarRecorderView: View {
                     .foregroundStyle(.white)
             }
             .frame(width: 34, height: 34)
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("Reccy")
@@ -88,7 +89,7 @@ struct MenuBarRecorderView: View {
                     .fill(.red)
                     .frame(width: 9, height: 9)
                     .shadow(color: .red.opacity(0.6), radius: 4)
-                    .accessibilityLabel("Recording")
+                    .accessibilityHidden(true)
             }
 
             Button {
@@ -98,7 +99,7 @@ struct MenuBarRecorderView: View {
                     .frame(width: 18, height: 18)
             }
             .buttonStyle(.borderless)
-            .reccyTooltip("Open Reccy")
+            .reccyAccessibleControl("Open Reccy")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -140,6 +141,7 @@ struct MenuBarRecorderView: View {
         HStack(spacing: 10) {
             Image(systemName: "rectangle.inset.filled.and.person.filled")
                 .foregroundStyle(.orange)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Capture access required")
                     .font(.subheadline.weight(.semibold))
@@ -167,6 +169,7 @@ struct MenuBarRecorderView: View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: systemImage)
                 .foregroundStyle(color)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
@@ -252,7 +255,7 @@ struct MenuBarRecorderView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(coordinator.isCapturingScreenshot)
-                .reccyTooltip("Capture screenshot")
+                .reccyAccessibleControl("Capture Screenshot", help: "Capture screenshot")
             }
         }
         .padding(12)
@@ -273,7 +276,7 @@ struct MenuBarRecorderView: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 3) {
-                    Text(coordinator.formattedFileSize)
+                    Text(coordinator.liveStorageStatus)
                         .font(.subheadline.monospacedDigit().weight(.medium))
                     Text("written")
                         .font(.caption)
@@ -301,8 +304,9 @@ struct MenuBarRecorderView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(coordinator.state != .recording && coordinator.state != .paused)
-                .reccyTooltip(coordinator.state == .paused ? "Resume recording" : "Pause recording")
-                .accessibilityLabel(coordinator.state == .paused ? "Resume Recording" : "Pause Recording")
+                .reccyAccessibleControl(
+                    coordinator.state == .paused ? "Resume Recording" : "Pause Recording"
+                )
 
                 Button {
                     coordinator.stopRecording()
@@ -321,7 +325,7 @@ struct MenuBarRecorderView: View {
                         .frame(width: 18, height: 18)
                 }
                 .buttonStyle(.bordered)
-                .reccyTooltip("Open recording monitor")
+                .reccyAccessibleControl("Open Recording Monitor", help: "Open recording monitor")
             }
         }
         .padding(13)
@@ -366,10 +370,12 @@ struct MenuBarRecorderView: View {
                 .frame(width: 42, alignment: .leading)
             ReccyLiveWaveform(samples: Array(samples.suffix(120)), color: color, isEnabled: true)
                 .frame(height: 24)
+                .accessibilityHidden(true)
             Text(levelText(level))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 43, alignment: .trailing)
+                .accessibilityLabel("\(title) audio level \(levelText(level))")
         }
     }
 
@@ -474,8 +480,7 @@ struct MenuBarRecorderView: View {
                 .frame(width: 18, height: 18)
         }
         .buttonStyle(.borderless)
-        .reccyTooltip(title)
-        .accessibilityLabel(title)
+        .reccyAccessibleControl(title)
     }
 
     private var statusSubtitle: String {

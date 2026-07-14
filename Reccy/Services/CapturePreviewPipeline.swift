@@ -1,18 +1,29 @@
-@preconcurrency import CoreMedia
+import CoreMedia
 import CoreVideo
 import Foundation
+import IOSurface
+import ScreenCaptureKit
+
+/// The immutable presentation data Apple exposes for a complete
+/// ScreenCaptureKit video frame. `IOSurface` keeps the preview GPU-native and
+/// shares the exact pixels already owned by the recording stream.
+nonisolated struct CapturePreviewFrame: @unchecked Sendable {
+    let surface: IOSurface
+    let contentRect: CGRect
+    let contentScale: CGFloat
+    let scaleFactor: CGFloat
+}
 
 /// Routes the recorder's existing ScreenCaptureKit sample buffers to the live
 /// monitor without starting another stream or copying frame pixels. Delivery
-/// is coalesced to the newest buffer so UI backpressure can never create an
+/// is coalesced to the newest frame so UI backpressure can never create an
 /// unbounded queue of full-resolution frames.
 nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
-    typealias FrameHandler = @MainActor @Sendable (CMSampleBuffer?) -> Void
+    typealias FrameHandler = @MainActor @Sendable (CapturePreviewFrame?) -> Void
 
     private let lock = NSLock()
-    private var attachmentID: UUID?
-    private var frameHandler: FrameHandler?
-    private var latestSampleBuffer: CMSampleBuffer?
+    private var frameHandlers: [UUID: FrameHandler] = [:]
+    private var latestFrame: CapturePreviewFrame?
     private var generation: UInt64 = 0
     private var deliveryScheduled = false
 
@@ -20,9 +31,8 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
     func attach(_ frameHandler: @escaping FrameHandler) -> UUID {
         let id = UUID()
         let shouldSchedule = withLock {
-            attachmentID = id
-            self.frameHandler = frameHandler
-            guard latestSampleBuffer != nil, !deliveryScheduled else { return false }
+            frameHandlers[id] = frameHandler
+            guard latestFrame != nil, !deliveryScheduled else { return false }
             deliveryScheduled = true
             return true
         }
@@ -32,13 +42,11 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
 
     func detach(_ id: UUID) {
         let handler = withLock { () -> FrameHandler? in
-            guard attachmentID == id else { return nil }
-            let handler = frameHandler
-            attachmentID = nil
-            frameHandler = nil
-            latestSampleBuffer = nil
-            generation &+= 1
-            deliveryScheduled = false
+            guard let handler = frameHandlers.removeValue(forKey: id) else { return nil }
+            if frameHandlers.isEmpty {
+                latestFrame = nil
+                generation &+= 1
+            }
             return handler
         }
         if let handler {
@@ -47,11 +55,11 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
     }
 
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
-        guard let displayBuffer = Self.displayBuffer(from: sampleBuffer) else { return }
+        guard let frame = Self.frame(from: sampleBuffer) else { return }
         let shouldSchedule = withLock {
-            latestSampleBuffer = displayBuffer
+            latestFrame = frame
             generation &+= 1
-            guard frameHandler != nil, !deliveryScheduled else { return false }
+            guard !frameHandlers.isEmpty, !deliveryScheduled else { return false }
             deliveryScheduled = true
             return true
         }
@@ -59,49 +67,63 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
     }
 
     func clear() {
-        let handler = withLock { () -> FrameHandler? in
-            latestSampleBuffer = nil
+        let handlers = withLock { () -> [FrameHandler] in
+            latestFrame = nil
             generation &+= 1
-            return frameHandler
+            return Array(frameHandlers.values)
         }
-        if let handler {
-            Task { @MainActor in handler(nil) }
+        if !handlers.isEmpty {
+            Task { @MainActor in
+                for handler in handlers { handler(nil) }
+            }
         }
     }
 
-    static func pixelBuffer(from sampleBuffer: CMSampleBuffer) -> CVPixelBuffer? {
-        CMSampleBufferGetImageBuffer(sampleBuffer)
-    }
-
-    /// AVSampleBufferVideoRenderer otherwise interprets ScreenCaptureKit's
-    /// host-clock timestamp as a scheduled playback deadline. The buffer is
-    /// already a few milliseconds old when the main actor receives it, so a
-    /// live monitor must explicitly request immediate display. This copies
-    /// only the sample metadata; the IOSurface-backed frame remains shared.
-    static func displayBuffer(from sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
-        guard pixelBuffer(from: sampleBuffer) != nil else { return nil }
-        var copy: CMSampleBuffer?
-        guard CMSampleBufferCreateCopy(
-            allocator: kCFAllocatorDefault,
-            sampleBuffer: sampleBuffer,
-            sampleBufferOut: &copy
-        ) == noErr, let copy,
-              let attachments = CMSampleBufferGetSampleAttachmentsArray(
-                copy,
-                createIfNecessary: true
-              ), CFArrayGetCount(attachments) > 0
+    /// Mirrors Apple's ScreenCaptureKit sample: validate the complete frame,
+    /// retrieve its IOSurface, and retain the metadata that describes the
+    /// content within that surface.
+    static func frame(from sampleBuffer: CMSampleBuffer) -> CapturePreviewFrame? {
+        guard sampleBuffer.isValid,
+              CMSampleBufferDataIsReady(sampleBuffer),
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let surfaceReference = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue()
         else { return nil }
 
-        let dictionary = unsafeBitCast(
-            CFArrayGetValueAtIndex(attachments, 0),
-            to: CFMutableDictionary.self
+        let surface = unsafeBitCast(surfaceReference, to: IOSurface.self)
+        let pixelSize = CGRect(
+            x: 0,
+            y: 0,
+            width: CVPixelBufferGetWidth(pixelBuffer),
+            height: CVPixelBufferGetHeight(pixelBuffer)
         )
-        CFDictionarySetValue(
-            dictionary,
-            Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-            Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+        let attachments = (
+            CMSampleBufferGetSampleAttachmentsArray(
+                sampleBuffer,
+                createIfNecessary: false
+            ) as? [[SCStreamFrameInfo: Any]]
+        )?.first
+
+        if let rawStatus = attachments?[.status] as? Int,
+           SCFrameStatus(rawValue: rawStatus) != .complete
+        {
+            return nil
+        }
+
+        let contentRect: CGRect
+        if let value = attachments?[.contentRect],
+           let rect = CGRect(dictionaryRepresentation: value as! CFDictionary)
+        {
+            contentRect = rect
+        } else {
+            contentRect = pixelSize
+        }
+
+        return CapturePreviewFrame(
+            surface: surface,
+            contentRect: contentRect,
+            contentScale: attachments?[.contentScale] as? CGFloat ?? 1,
+            scaleFactor: attachments?[.scaleFactor] as? CGFloat ?? 1
         )
-        return copy
     }
 
     private func scheduleDelivery() {
@@ -112,18 +134,21 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
 
     @MainActor
     private func deliverLatestFrame() {
-        let delivery = withLock { () -> (FrameHandler, CMSampleBuffer, UInt64)? in
-            guard let frameHandler, let latestSampleBuffer else {
+        let delivery = withLock { () -> ([(UUID, FrameHandler)], CapturePreviewFrame, UInt64)? in
+            guard !frameHandlers.isEmpty, let latestFrame else {
                 deliveryScheduled = false
                 return nil
             }
-            return (frameHandler, latestSampleBuffer, generation)
+            return (Array(frameHandlers), latestFrame, generation)
         }
-        guard let (handler, sampleBuffer, deliveredGeneration) = delivery else { return }
-        handler(sampleBuffer)
+        guard let (handlers, frame, deliveredGeneration) = delivery else { return }
+        for (id, handler) in handlers {
+            let isStillAttached = withLock { frameHandlers[id] != nil }
+            if isStillAttached { handler(frame) }
+        }
 
         let needsAnotherDelivery = withLock {
-            guard generation != deliveredGeneration, latestSampleBuffer != nil, frameHandler != nil else {
+            guard generation != deliveredGeneration, latestFrame != nil, !frameHandlers.isEmpty else {
                 deliveryScheduled = false
                 return false
             }

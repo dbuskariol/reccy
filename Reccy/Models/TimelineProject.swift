@@ -116,22 +116,25 @@ struct TimelineLane: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
-    static let currentFormatVersion = 2
+    static let currentFormatVersion = 3
 
     var formatVersion = currentFormatVersion
     var id = UUID()
     var name: String
     var createdAt = Date()
     var modifiedAt = Date()
+    var frameRate: Double
     var lanes: [TimelineLane]
     var videoGaps: [TimelineGapSegment]
 
     init(
         name: String,
+        frameRate: Double = 30,
         lanes: [TimelineLane],
         videoGaps: [TimelineGapSegment] = []
     ) {
         self.name = name
+        self.frameRate = max(frameRate, 1)
         self.lanes = lanes
         self.videoGaps = videoGaps
         reconcileVideoGaps()
@@ -140,6 +143,8 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
     var duration: TimeInterval {
         lanes.flatMap(\.clips).map(\.timelineEnd).max() ?? 0
     }
+
+    var frameDuration: TimeInterval { 1 / max(frameRate, 1) }
 
     func clip(id: UUID) -> TimelineClip? {
         lanes.lazy.flatMap(\.clips).first(where: { $0.id == id })

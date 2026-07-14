@@ -9,7 +9,7 @@ Reccy is a native screen recorder and non-destructive multitrack editor for macO
 Choose an entire display, every window from one application, or one specific window through Apple's private system picker. Portion capture uses a direct QuickTime-style overlay across connected displays. Reccy keeps the approved source obvious in the workspace and draws a local capture boundary that never appears in the recorded video.
 
 - Record system audio and a chosen microphone as separate editable tracks.
-- Monitor the live picture, elapsed time, file size, and detailed audio levels from another display.
+- Monitor the live picture, elapsed time, safe-write status, and detailed audio levels from another display.
 - Show or hide the pointer, highlight clicks, exclude Reccy's audio, and pause without leaving dead time in the result.
 - Capture native resolution or cap output at 4K, 1440p, 1080p, or 720p without upscaling smaller sources.
 - Choose 24, 30, or 60 fps and efficient HEVC, compatible H.264, or editing-oriented MOV capture.
@@ -28,6 +28,7 @@ Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen 
 - Record voiceover at the playhead with an explicit input-device picker.
 - Read detailed cached waveforms for recorded audio, timeline clips, live monitoring, and library playback.
 - Select each empty video segment independently and render it as black, the previous held frame, or the next held frame.
+- Step the preview with Control–Left/Right, nudge a selected clip by one frame with Option–Left/Right, or use equivalent VoiceOver custom actions for move, trim, and gap-fill commands.
 
 ## A useful recording library
 
@@ -54,7 +55,7 @@ Reccy checks each preset against the actual recording or timeline, estimates wor
     <td width="52%"><img src="Documentation/Screenshots/settings-permissions.jpg" alt="Reccy permission settings"></td>
   </tr>
   <tr>
-    <td><strong>Menu bar</strong><br>Start a source-aware capture, monitor timer, file size, and separate audio levels, pause or stop, open Monitor, and return to recent recordings.</td>
+    <td><strong>Menu bar</strong><br>Start a source-aware capture, monitor timer, safe-write status, and separate audio levels, pause or stop, open Monitor, and return to recent recordings.</td>
     <td><strong>Settings</strong><br>Manage capture defaults, storage, permissions, global shortcuts, tooltips, launch at login, completion behavior, and signed automatic updates.</td>
   </tr>
 </table>
@@ -70,7 +71,7 @@ Reccy intentionally targets macOS 26 only. There are no availability branches or
 | Source approval | `SCContentSharingPicker`; direct multi-display portion overlay; `SCContentFilter` |
 | Capture | `SCStream` video, system-audio, and microphone sample buffers |
 | Recording | `AVAssetWriter`, AAC, HEVC/H.264, VideoToolbox color metadata |
-| Live monitor | Coalesced `AVSampleBufferVideoRenderer` preview from the existing capture buffers, with no second stream or pixel copy |
+| Live monitor | Apple’s ScreenCaptureKit IOSurface presentation path with latest-frame coalescing, no second stream, and no pixel copy |
 | Timeline | Serializable project model materialized as `AVMutableComposition` |
 | Playback and export | AVKit, `AVAudioMix`, and `AVAssetExportSession` |
 | Waveforms | Shared Reccy rendering backed by [DSWaveformImage](https://github.com/dmrschmidt/DSWaveformImage) |
@@ -92,7 +93,7 @@ Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repo
 Scripts/verify-ci.sh
 ```
 
-The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, and cancellation. Installed-app Computer Use QA covers every workspace plus the real Library transport, timeline interactions, and end-to-end export progress.
+The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, and cancellation. Installed-app Computer Use QA covers every workspace plus the real Library transport, timeline interactions, accessible editor actions, menu-bar pause/resume/stop, and end-to-end export progress.
 
 ### Permission identity matters
 
@@ -104,7 +105,7 @@ After adding an Apple Account and Apple Development certificate in Xcode, use th
 Scripts/install-development.sh
 ```
 
-It automatically selects an Apple Development or Developer ID identity, verifies the team identifier, refuses accidental ad-hoc installation, prevents replacing an install from a different team, and installs to `/Applications/Reccy.app`. Grant capture permissions once after the first stable-signed install; later local builds and signed Sparkle updates retain the same app identity. This machine currently has no valid signing identity, so end-to-end TCC persistence requires that one-time Xcode account setup.
+It automatically selects an Apple Development or Developer ID identity, verifies the team identifier, refuses accidental ad-hoc installation, prevents replacing an install from a different team, and installs to `/Applications/Reccy.app`. Grant capture permissions once after the first stable-signed install; later local builds and signed Sparkle updates retain the same app identity. Local development installs on this machine use the Developer ID identity for team `BJCVJ5G7MJ`.
 
 ## Release
 
@@ -116,4 +117,4 @@ Capture, editing, projects, thumbnails, and exports stay on the Mac. Reccy only 
 
 ## Status
 
-Reccy is in active development at version 0.1.0. The core capture, monitoring, library, editing, export, settings, menu-bar, update, storage-reserve, and interrupted-recovery architectures are implemented. External release acceptance still requires the signed hardware capture matrix, long-duration A/V drift tests, HDR validation, VoiceOver/keyboard QA, and Intel plus Apple-silicon export coverage.
+Reccy is in active development at version 0.1.0. The core capture, monitoring, library, editing, export, settings, menu-bar, update, storage-reserve, accessibility-navigation, and interrupted-recovery architectures are implemented. External release acceptance still requires the signed hardware capture matrix, long-duration A/V drift tests, HDR validation, a complete spoken VoiceOver acceptance pass, and Intel plus Apple-silicon export coverage.

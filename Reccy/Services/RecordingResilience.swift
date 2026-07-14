@@ -1,5 +1,109 @@
 import AVFoundation
+import Darwin
 import Foundation
+import os
+
+/// An advisory, cross-process lease for the recording directory.
+///
+/// Reccy may be running from Xcode while an installed copy is open. Both
+/// processes share the same library and recovery journal, so the journal alone
+/// cannot distinguish an interrupted recording from one that is still being
+/// written. Holding this file lock for the complete writer lifecycle makes
+/// capture and recovery mutually exclusive without relying on process names,
+/// bundle locations, timers, or stale PID files. The kernel releases the lease
+/// automatically if the owning process exits unexpectedly.
+nonisolated final class RecordingSessionLease: @unchecked Sendable {
+    static let fileName = ".reccy-recording.lock"
+    private static let activePaths = OSAllocatedUnfairLock(initialState: Set<String>())
+
+    private let descriptor: Int32
+    private let path: String
+    private let stateLock = NSLock()
+    private var isReleased = false
+
+    private init(descriptor: Int32, path: String) {
+        self.descriptor = descriptor
+        self.path = path
+    }
+
+    deinit {
+        release()
+    }
+
+    static func acquire(in directory: URL) throws -> RecordingSessionLease {
+        let lockURL = directory.appendingPathComponent(fileName, isDirectory: false)
+        let path = lockURL.standardizedFileURL.path
+        let reservedInProcess = activePaths.withLock { paths in
+            paths.insert(path).inserted
+        }
+        guard reservedInProcess else {
+            throw RecordingLeaseError.alreadyHeld
+        }
+
+        let descriptor = lockURL.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return Darwin.open(path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        }
+        guard descriptor >= 0 else {
+            _ = activePaths.withLock { $0.remove(path) }
+            throw RecordingLeaseError.cannotOpen(errno)
+        }
+
+        var fileLock = flock()
+        fileLock.l_start = 0
+        fileLock.l_len = 0
+        fileLock.l_pid = 0
+        fileLock.l_type = Int16(F_WRLCK)
+        fileLock.l_whence = Int16(SEEK_SET)
+        guard Darwin.fcntl(descriptor, F_SETLK, &fileLock) == 0 else {
+            let code = errno
+            Darwin.close(descriptor)
+            _ = activePaths.withLock { $0.remove(path) }
+            if code == EWOULDBLOCK || code == EAGAIN {
+                throw RecordingLeaseError.alreadyHeld
+            }
+            throw RecordingLeaseError.cannotLock(code)
+        }
+        return RecordingSessionLease(descriptor: descriptor, path: path)
+    }
+
+    func release() {
+        stateLock.lock()
+        guard !isReleased else {
+            stateLock.unlock()
+            return
+        }
+        isReleased = true
+        stateLock.unlock()
+
+        var fileLock = flock()
+        fileLock.l_start = 0
+        fileLock.l_len = 0
+        fileLock.l_pid = 0
+        fileLock.l_type = Int16(F_UNLCK)
+        fileLock.l_whence = Int16(SEEK_SET)
+        _ = Darwin.fcntl(descriptor, F_SETLK, &fileLock)
+        Darwin.close(descriptor)
+        _ = Self.activePaths.withLock { $0.remove(path) }
+    }
+}
+
+nonisolated enum RecordingLeaseError: LocalizedError, Equatable {
+    case alreadyHeld
+    case cannotOpen(Int32)
+    case cannotLock(Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .alreadyHeld:
+            "Another Reccy process is recording or recovering this library. Stop it before starting a new recording."
+        case let .cannotOpen(code):
+            "Reccy couldn’t open its recording safety lease (POSIX error \(code))."
+        case let .cannotLock(code):
+            "Reccy couldn’t secure its recording safety lease (POSIX error \(code))."
+        }
+    }
+}
 
 nonisolated struct RecordingStoragePolicy: Sendable {
     static let runtimeReserveBytes: Int64 = 512 * 1_024 * 1_024

@@ -264,4 +264,15 @@ struct CaptureSettings: Codable, Equatable, Sendable {
 struct AudioInputDevice: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
+
+    static func discoverAvailable() -> [AudioInputDevice] {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        .devices
+        .map { AudioInputDevice(id: $0.uniqueID, name: $0.localizedName) }
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
 }
