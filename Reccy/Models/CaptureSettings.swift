@@ -161,6 +161,10 @@ nonisolated enum RecordingPreset: String, CaseIterable, Identifiable, Codable, S
     }
 
     var codec: AVVideoCodecType {
+        videoCodec.avFoundationType
+    }
+
+    var videoCodec: RecordingVideoCodec {
         switch self {
         case .efficient, .hevcMaster: .hevc
         case .compatible: .h264
@@ -178,6 +182,29 @@ nonisolated enum RecordingPreset: String, CaseIterable, Identifiable, Codable, S
         switch fileType {
         case .mov: "mov"
         default: "mp4"
+        }
+    }
+
+    static func available(isHDR: Bool) -> [RecordingPreset] {
+        allCases.filter { !isHDR || $0.videoCodec == .hevc }
+    }
+}
+
+nonisolated enum RecordingVideoCodec: String, Codable, Hashable, Sendable {
+    case h264
+    case hevc
+
+    var avFoundationType: AVVideoCodecType {
+        switch self {
+        case .h264: .h264
+        case .hevc: .hevc
+        }
+    }
+
+    func displayName(isHDR: Bool) -> String {
+        switch self {
+        case .h264: "H.264"
+        case .hevc: isHDR ? "HEVC 10-bit" : "HEVC"
         }
     }
 }
@@ -257,7 +284,18 @@ struct CaptureSettings: Codable, Equatable, Sendable {
         else {
             return CaptureSettings()
         }
-        return settings
+        var normalized = settings
+        normalized.normalize()
+        return normalized
+    }
+
+    /// HDR10 requires HEVC. Keeping this invariant in the model prevents the
+    /// picker, file extension, manifest, and encoder from describing different
+    /// formats when settings are changed from any app surface.
+    mutating func normalize() {
+        if useHDR, recordingPreset == .compatible {
+            recordingPreset = .efficient
+        }
     }
 
     func save(defaults: UserDefaults = .standard) {

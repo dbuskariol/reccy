@@ -6,6 +6,7 @@ import CoreVideo
 import Foundation
 import IOSurface
 import Testing
+import VideoToolbox
 @testable import Reccy
 
 @Suite("Reccy")
@@ -498,6 +499,100 @@ struct ReccyTests {
         #expect(compatible.targetVideoBitRate > efficient.targetVideoBitRate)
     }
 
+    @Test func captureEncodingPlanKeepsCodecContainerAndHDRIntentConsistent() {
+        let efficientSDR = CaptureEncodingPlan(preset: .efficient, isHDR: false)
+        let compatibleSDR = CaptureEncodingPlan(preset: .compatible, isHDR: false)
+        let compatibleHDR = CaptureEncodingPlan(preset: .compatible, isHDR: true)
+
+        #expect(efficientSDR.codec == .hevc)
+        #expect(efficientSDR.fileType == .mp4)
+        #expect(compatibleSDR.codec == .h264)
+        #expect(compatibleSDR.fileType == .mp4)
+        #expect(compatibleHDR.codec == .hevc)
+        #expect(compatibleHDR.isHDR)
+    }
+
+    @Test func captureVideoSettingsPreferHardwareWithSoftwareFallback() throws {
+        let options = MultitrackRecordingOptions(
+            width: 1920,
+            height: 1080,
+            frameRate: 30,
+            preset: .efficient,
+            includesSystemAudio: true,
+            includesMicrophone: true,
+            isHDR: false
+        )
+        let settings = MultitrackRecorder.videoSettings(options: options)
+        let encoder = try #require(settings[AVVideoEncoderSpecificationKey] as? [String: Any])
+        let compression = try #require(
+            settings[AVVideoCompressionPropertiesKey] as? [String: Any]
+        )
+
+        #expect(settings[AVVideoCodecKey] as? AVVideoCodecType == .hevc)
+        #expect(
+            encoder[
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String
+            ] as? Bool == true
+        )
+        #expect(compression[kVTCompressionPropertyKey_RealTime as String] as? Bool == true)
+        #expect(
+            encoder[
+                kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String
+            ] == nil
+        )
+    }
+
+    @Test func assetWriterAcceptsEveryResolvedCaptureEncodingPlan() throws {
+        let combinations: [(RecordingPreset, Bool)] = [
+            (.efficient, false),
+            (.compatible, false),
+            (.hevcMaster, false),
+            (.efficient, true),
+            (.hevcMaster, true),
+        ]
+
+        for (preset, isHDR) in combinations {
+            let options = MultitrackRecordingOptions(
+                width: 1920,
+                height: 1080,
+                frameRate: 30,
+                preset: preset,
+                includesSystemAudio: true,
+                includesMicrophone: true,
+                isHDR: isHDR
+            )
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("Reccy Encoder Preflight \(UUID().uuidString)")
+                .appendingPathExtension(options.encodingPlan.fileExtension)
+            defer { try? FileManager.default.removeItem(at: url) }
+            let writer = try AVAssetWriter(
+                outputURL: url,
+                fileType: options.encodingPlan.fileType
+            )
+
+            #expect(
+                writer.canApply(
+                    outputSettings: MultitrackRecorder.videoSettings(options: options),
+                    forMediaType: .video
+                ),
+                "Rejected \(preset.rawValue), HDR=\(isHDR)"
+            )
+        }
+    }
+
+    @Test func captureSettingsNormalizeUnsupportedHDRCodecCombination() {
+        var settings = CaptureSettings()
+        settings.recordingPreset = .compatible
+        settings.useHDR = true
+
+        settings.normalize()
+
+        #expect(settings.recordingPreset == .efficient)
+        #expect(settings.useHDR)
+        #expect(RecordingPreset.available(isHDR: false) == RecordingPreset.allCases)
+        #expect(RecordingPreset.available(isHDR: true) == [.efficient, .hevcMaster])
+    }
+
     @Test func exportCompatibilityIsDeterminedFromTheActualAsset() async throws {
         let videoURL = try await makeColorTestVideo()
         defer { try? FileManager.default.removeItem(at: videoURL) }
@@ -974,6 +1069,7 @@ struct ReccyTests {
             height: 1440,
             frameRate: 60,
             recordingPreset: .efficient,
+            videoCodec: .hevc,
             isHDR: true,
             includesSystemAudio: true,
             includesMicrophone: true,
@@ -988,6 +1084,72 @@ struct ReccyTests {
         #expect(decoded == manifest)
         #expect(decoded.source.region?.cgRect == CGRect(x: 100, y: 80, width: 1280, height: 720))
         #expect(decoded.source.detail.contains("1280 × 720"))
+    }
+
+    @Test func releaseCaptureValidatorInspectsRealMediaAgainstItsManifest() async throws {
+        let mediaURL = try await makeColorTestVideo()
+        let sidecarURL = RecordingManifest.sidecarURL(for: mediaURL)
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: sidecarURL)
+        }
+        let manifest = RecordingManifest(
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000),
+            source: CaptureSourceDescriptor(
+                kind: .window,
+                name: "Validator Fixture",
+                applicationName: "Reccy Tests",
+                applicationBundleIdentifier: "com.reccy.mac.tests",
+                windowName: "Fixture",
+                windowIDs: [1],
+                displayID: nil,
+                displayName: nil,
+                region: nil
+            ),
+            width: 64,
+            height: 64,
+            frameRate: 30,
+            recordingPreset: .compatible,
+            videoCodec: .h264,
+            isHDR: false,
+            includesSystemAudio: false,
+            includesMicrophone: false,
+            microphoneName: nil,
+            showsCursor: false,
+            highlightsClicks: false
+        )
+        let manifestEncoder = JSONEncoder()
+        manifestEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try manifestEncoder.encode(manifest).write(to: sidecarURL, options: .atomic)
+
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let process = Process()
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.executableURL = repositoryRoot
+            .appendingPathComponent("scripts/validate-capture.sh")
+        process.arguments = [mediaURL.path]
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+        try process.run()
+        process.waitUntilExit()
+
+        let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
+        let error = standardError.fileHandleForReading.readDataToEndOfFile()
+        #expect(
+            process.terminationStatus == 0,
+            Comment(rawValue: String(decoding: error, as: UTF8.self))
+        )
+        let report = try #require(
+            try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        )
+        #expect(report["codec"] as? String == "h264")
+        #expect(report["videoTrackCount"] as? Int == 1)
+        #expect(report["audioTrackCount"] as? Int == 0)
+        #expect(report["width"] as? Int == 64)
+        #expect(report["height"] as? Int == 64)
     }
 
     @Test func recordingPauseTimelineRemovesPausedWallClockTimeAcrossEveryTrack() throws {
@@ -1306,6 +1468,7 @@ struct ReccyTests {
             height: 1440,
             frameRate: 30,
             recordingPreset: .efficient,
+            videoCodec: .hevc,
             isHDR: false,
             includesSystemAudio: true,
             includesMicrophone: false,

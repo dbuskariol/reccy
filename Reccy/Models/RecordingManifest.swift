@@ -49,7 +49,7 @@ nonisolated struct CaptureSourceDescriptor: Codable, Hashable, Sendable {
 }
 
 nonisolated struct RecordingManifest: Codable, Hashable, Sendable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     var version = currentVersion
     var createdAt: Date
@@ -58,6 +58,7 @@ nonisolated struct RecordingManifest: Codable, Hashable, Sendable {
     var height: Int
     var frameRate: Int
     var recordingPreset: RecordingPreset
+    var videoCodec: RecordingVideoCodec
     var isHDR: Bool
     var includesSystemAudio: Bool
     var includesMicrophone: Bool

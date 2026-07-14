@@ -74,7 +74,7 @@ final class RecordingLibrary: ObservableObject {
                 pixelWidth: manifest.width,
                 pixelHeight: manifest.height,
                 frameRate: Double(manifest.frameRate),
-                videoCodec: manifest.isHDR ? "HEVC 10-bit" : nil
+                videoCodec: manifest.videoCodec.displayName(isHDR: manifest.isHDR)
             )
         }
         .sorted { $0.createdAt > $1.createdAt }

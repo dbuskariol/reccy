@@ -312,7 +312,7 @@ struct RecordView: View {
                         }
                     }
                     settingPicker("Format", selection: $coordinator.settings.recordingPreset) {
-                        ForEach(RecordingPreset.allCases) { preset in
+                        ForEach(RecordingPreset.available(isHDR: coordinator.settings.useHDR)) { preset in
                             Text("\(preset.title) — \(preset.detail)").tag(preset)
                         }
                     }
@@ -355,7 +355,13 @@ struct RecordView: View {
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Toggle("HDR10", isOn: $coordinator.settings.useHDR)
+                    Toggle(
+                        "HDR10",
+                        isOn: Binding(
+                            get: { coordinator.settings.useHDR },
+                            set: { coordinator.setHDREnabled($0) }
+                        )
+                    )
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .frame(width: 310, alignment: .trailing)

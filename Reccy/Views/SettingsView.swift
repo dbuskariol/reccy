@@ -205,7 +205,7 @@ struct SettingsView: View {
                     detail: "Efficient HEVC keeps text sharp at smaller file sizes.",
                     systemImage: "film.stack",
                     selection: $coordinator.settings.recordingPreset,
-                    values: RecordingPreset.allCases
+                    values: RecordingPreset.available(isHDR: coordinator.settings.useHDR)
                 ) { "\($0.title) — \($0.detail)" }
                 SettingsDivider()
                 recordingPickerRow(
@@ -220,7 +220,10 @@ struct SettingsView: View {
                     title: "HDR10 recording",
                     detail: "Use ScreenCaptureKit’s HDR preset with SDR-compatible playback.",
                     systemImage: "sun.max.trianglebadge.exclamationmark",
-                    isOn: $coordinator.settings.useHDR
+                    isOn: Binding(
+                        get: { coordinator.settings.useHDR },
+                        set: { coordinator.setHDREnabled($0) }
+                    )
                 )
             }
 

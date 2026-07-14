@@ -170,6 +170,17 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         return audioInputDevices.first(where: { $0.id == id })?.name ?? "System Default"
     }
 
+    /// Applies the HDR/codec invariant as one user action. Views never mutate
+    /// `settings` from its own observer, avoiding re-entrant publication and
+    /// preserving scroll, focus, and control state across every settings surface.
+    func setHDREnabled(_ isEnabled: Bool) {
+        var updated = settings
+        updated.useHDR = isEnabled
+        updated.normalize()
+        guard updated != settings else { return }
+        settings = updated
+    }
+
     private func registerGlobalShortcuts() {
         KeyboardShortcuts.onKeyUp(for: .toggleRecording) { [weak self] in
             Task { @MainActor in
@@ -563,7 +574,8 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 includesMicrophone: settings.includeMicrophone,
                 isHDR: settings.useHDR
             )
-            let outputURL = try makeOutputURL()
+            let encodingPlan = options.encodingPlan
+            let outputURL = try makeOutputURL(fileExtension: encodingPlan.fileExtension)
             recordingLease = try RecordingSessionLease.acquire(
                 in: outputURL.deletingLastPathComponent()
             )
@@ -582,6 +594,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 height: streamConfiguration.height,
                 frameRate: settings.frameRate.rawValue,
                 recordingPreset: settings.recordingPreset,
+                videoCodec: encodingPlan.codec,
                 isHDR: settings.useHDR,
                 includesSystemAudio: settings.includeSystemAudio,
                 includesMicrophone: settings.includeMicrophone,
@@ -689,7 +702,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
-    private func makeOutputURL() throws -> URL {
+    private func makeOutputURL(fileExtension: String) throws -> URL {
         let directory = library.directoryURL
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
@@ -697,7 +710,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         let baseName = "Reccy \(formatter.string(from: Date()))"
-        let fileExtension = settings.recordingPreset.fileExtension
         var candidate = directory.appendingPathComponent(baseName).appendingPathExtension(fileExtension)
         var suffix = 2
         while FileManager.default.fileExists(atPath: candidate.path) {

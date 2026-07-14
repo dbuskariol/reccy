@@ -14,6 +14,10 @@ nonisolated struct MultitrackRecordingOptions: Sendable {
     let includesMicrophone: Bool
     let isHDR: Bool
 
+    var encodingPlan: CaptureEncodingPlan {
+        CaptureEncodingPlan(preset: preset, isHDR: isHDR)
+    }
+
     var targetVideoBitRate: Int {
         let pixelsPerSecond = Double(width * height * frameRate)
         let bitsPerPixel: Double
@@ -26,7 +30,29 @@ nonisolated struct MultitrackRecordingOptions: Sendable {
     }
 }
 
+/// Resolves user intent into one internally consistent writer configuration.
+/// HDR always uses HEVC; SDR follows the selected preset. The preset continues
+/// to control the container and quality target while the resolved codec is
+/// persisted separately in the recording manifest.
+nonisolated struct CaptureEncodingPlan: Equatable, Sendable {
+    let preset: RecordingPreset
+    let codec: RecordingVideoCodec
+    let isHDR: Bool
+
+    init(preset: RecordingPreset, isHDR: Bool) {
+        self.preset = preset
+        self.codec = isHDR ? .hevc : preset.videoCodec
+        self.isHDR = isHDR
+    }
+
+    var fileType: AVFileType { preset.fileType }
+    var fileExtension: String { preset.fileExtension }
+}
+
 enum MultitrackRecorderError: LocalizedError {
+    case unsupportedVideoSettings(RecordingVideoCodec)
+    case unsupportedSystemAudioSettings
+    case unsupportedMicrophoneSettings
     case cannotAddVideoInput
     case cannotAddSystemAudioInput
     case cannotAddMicrophoneInput
@@ -37,6 +63,12 @@ enum MultitrackRecorderError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case let .unsupportedVideoSettings(codec):
+            "This Mac can’t create a real-time \(codec.displayName(isHDR: false)) recording with the selected dimensions and container."
+        case .unsupportedSystemAudioSettings:
+            "This Mac can’t create the selected system-audio track in this recording container."
+        case .unsupportedMicrophoneSettings:
+            "This Mac can’t create the selected microphone track in this recording container."
         case .cannotAddVideoInput: "The video encoder couldn’t be configured for this recording."
         case .cannotAddSystemAudioInput: "The system-audio encoder couldn’t be configured."
         case .cannotAddMicrophoneInput: "The microphone encoder couldn’t be configured."
@@ -360,9 +392,13 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         writer.shouldOptimizeForNetworkUse = options.preset.fileType == .mp4
         writer.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
 
+        let videoSettings = Self.videoSettings(options: options)
+        guard writer.canApply(outputSettings: videoSettings, forMediaType: .video) else {
+            throw MultitrackRecorderError.unsupportedVideoSettings(options.encodingPlan.codec)
+        }
         let videoInput = AVAssetWriterInput(
             mediaType: .video,
-            outputSettings: Self.videoSettings(options: options)
+            outputSettings: videoSettings
         )
         videoInput.expectsMediaDataInRealTime = true
         videoInput.mediaTimeScale = CMTimeScale(max(600, options.frameRate * 100))
@@ -374,9 +410,13 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
         var systemAudioInput: AVAssetWriterInput?
         if options.includesSystemAudio {
+            let settings = Self.audioSettings(channels: 2, bitRate: 192_000)
+            guard writer.canApply(outputSettings: settings, forMediaType: .audio) else {
+                throw MultitrackRecorderError.unsupportedSystemAudioSettings
+            }
             let input = AVAssetWriterInput(
                 mediaType: .audio,
-                outputSettings: Self.audioSettings(channels: 2, bitRate: 192_000)
+                outputSettings: settings
             )
             input.expectsMediaDataInRealTime = true
             input.metadata = [Self.trackTitle("System Audio")]
@@ -389,9 +429,13 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
         var microphoneInput: AVAssetWriterInput?
         if options.includesMicrophone {
+            let settings = Self.audioSettings(channels: 1, bitRate: 128_000)
+            guard writer.canApply(outputSettings: settings, forMediaType: .audio) else {
+                throw MultitrackRecorderError.unsupportedMicrophoneSettings
+            }
             let input = AVAssetWriterInput(
                 mediaType: .audio,
-                outputSettings: Self.audioSettings(channels: 1, bitRate: 128_000)
+                outputSettings: settings
             )
             input.expectsMediaDataInRealTime = true
             input.metadata = [Self.trackTitle("Microphone")]
@@ -422,17 +466,22 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         microphoneAudioLevel = 0
     }
 
-    private static func videoSettings(options: MultitrackRecordingOptions) -> [String: Any] {
+    static func videoSettings(options: MultitrackRecordingOptions) -> [String: Any] {
         var compression: [String: Any] = [
             AVVideoAverageBitRateKey: options.targetVideoBitRate,
             AVVideoExpectedSourceFrameRateKey: options.frameRate,
             AVVideoMaxKeyFrameIntervalKey: options.frameRate * 2,
             AVVideoAllowFrameReorderingKey: true,
+            kVTCompressionPropertyKey_RealTime as String: true,
         ]
+        let plan = options.encodingPlan
         var settings: [String: Any] = [
-            AVVideoCodecKey: options.isHDR ? AVVideoCodecType.hevc : options.preset.codec,
+            AVVideoCodecKey: plan.codec.avFoundationType,
             AVVideoWidthKey: options.width,
             AVVideoHeightKey: options.height,
+            AVVideoEncoderSpecificationKey: [
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true,
+            ],
         ]
 
         if options.isHDR {

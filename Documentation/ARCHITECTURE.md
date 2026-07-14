@@ -44,6 +44,8 @@ The live monitor does not start a second stream. Complete ScreenCaptureKit frame
 
 HDR recording begins with ScreenCaptureKit's `.captureHDRRecordingPreservedSDRHDR10` configuration. Reccy then writes HEVC Main 10 with PQ transfer, Rec. 2020 primaries/matrix, and VideoToolbox's SDR-range-preservation metadata request. Mouse-click highlighting is disabled in HDR because ScreenCaptureKit currently supports that overlay for BGRA SDR capture.
 
+Every capture resolves through one encoding plan before a file or recovery journal is created. AVAssetWriter preflights the exact video and audio settings against the chosen container. Video settings mark the encoder as real-time and use `AVVideoEncoderSpecificationKey` to prefer hardware acceleration while allowing VideoToolbox's software implementation when hardware is absent, incompatible, or busy. Reccy never switches codecs mid-file: HDR resolves to HEVC, SDR follows the selected preset, and the resolved codec is persisted independently in the manifest so Library metadata always describes the media requested from the writer.
+
 ## Screenshots
 
 On macOS 26, `SCScreenshotConfiguration` captures the already-approved content filter. The UI exposes HEIC, JPEG, PNG, SDR, HDR, and cursor inclusion. Files are written under the selected Reccy output directory in `Screenshots`.
@@ -89,10 +91,12 @@ Local capture builds use the same identity principle. `scripts/install-developme
 
 The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, codec bitrate policy, storage preflight, cross-process recording/recovery exclusion, atomic recovery journals, playable interruption recovery, invalid-file preservation, the complete export preset matrix, safe destination replacement, cancellation, and rendered audio mixes. GitHub runs that gate natively on both its macOS 26 Apple-silicon and Intel runners. Installed-app Computer Use QA exercises the main navigation, recovery banner, library transport, timeline seeking, movement, reorder, trimming, gap fills, VoiceOver custom actions, keyboard nudging, voiceover sources, zoom, menu-bar pause/resume/stop, and real export progress/completion. Remaining release acceptance includes:
 
+Signed hardware captures are checked with `scripts/validate-capture.sh`. The validator reads the current sidecar as the capture contract and independently inspects the media through AVFoundation: playability, nonzero duration and size, exact video/audio track counts, displayed dimensions, configured frame-rate ceiling, resolved codec, required HDR color metadata, and bounded end-time drift across independent tracks. It emits a machine-readable JSON report for the release evidence bundle.
+
 - signed capture runs for every source and audio combination;
 - long-duration A/V drift measurements;
 - HDR metadata and playback validation on SDR and HDR displays;
-- encoder fallback under sustained capture load;
+- sustained-load capture acceptance that verifies VideoToolbox's hardware-preferred/software-allowed encoder policy on release hardware;
 - multichannel and external microphone fixtures;
 - signed export acceptance across Intel and Apple-silicon hardware;
 - signed picker automation and a complete spoken VoiceOver acceptance pass.
