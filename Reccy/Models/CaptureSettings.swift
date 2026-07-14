@@ -39,6 +39,11 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
+    /// Portion uses Reccy's resizable overlay and therefore needs macOS's
+    /// direct-capture approval. Every other source stays inside Apple's
+    /// privacy-preserving content picker and is approved per selection.
+    var requiresDirectCapturePermission: Bool { self == .region }
+
     /// Portion capture uses Reccy's direct, display-spanning selection overlay.
     /// The remaining source kinds are delegated to macOS's privacy-preserving picker.
     var pickerMode: SCContentSharingPickerMode? {

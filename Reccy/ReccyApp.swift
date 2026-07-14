@@ -222,6 +222,7 @@ struct ReccyApp: App {
             await editor.open(recording)
             navigation.section = .editor
         } else if CommandLine.arguments.contains("-ReccyPermissionsQA") {
+            coordinator.installPermissionsQAScenario()
             navigation.openSettings(.permissions)
         }
     }

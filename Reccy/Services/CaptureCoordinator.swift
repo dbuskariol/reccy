@@ -89,7 +89,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var lastRecordingURL: URL?
     @Published private(set) var lastScreenshotURL: URL?
     @Published private(set) var isCapturingScreenshot = false
-    @Published private(set) var screenCapturePermission: CapturePermissionStatus = .notGranted
+    @Published private(set) var directCapturePermission: CapturePermissionStatus = .notGranted
     @Published private(set) var microphonePermission: AVAuthorizationStatus = .notDetermined
     @Published private(set) var isSelectingSource = false
     @Published private(set) var sourceSelectionMessage: String?
@@ -201,10 +201,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     func chooseSource(_ kind: CaptureSourceKind) {
         guard state.canChangeSettings, !isSelectingSource else { return }
-        guard screenCapturePermission.isGranted else {
-            sourceSelectionMessage = "Allow Screen & System Audio Recording before choosing a source."
-            return
-        }
         selectedSourceKind = kind
         selectedFilter = nil
         selectedSourceRect = nil
@@ -212,6 +208,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         hasSelectedSource = false
         boundaryController.hide()
         state = .idle
+
+        guard !kind.requiresDirectCapturePermission || directCapturePermission.isGranted else {
+            sourceSelectionMessage = "Portion capture needs Direct Screen & System Audio Access. Allow Reccy once in Permissions."
+            return
+        }
+
         isSelectingSource = true
 
         if kind == .region {
@@ -270,17 +272,17 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
-    func requestScreenCapturePermission() {
-        guard !screenCapturePermission.isGranted else { return }
+    func requestDirectCapturePermission() {
+        guard !directCapturePermission.isGranted else { return }
         let wasGranted = CGPreflightScreenCaptureAccess()
         let granted = CGRequestScreenCaptureAccess()
         if granted && !wasGranted {
-            screenCapturePermission = .restartRequired
-            sourceSelectionMessage = "Permission granted. Quit and reopen Reccy once to enable capture."
+            directCapturePermission = .restartRequired
+            sourceSelectionMessage = "Direct capture access granted. Quit and reopen Reccy once to enable Portion capture."
         } else {
             refreshPermissionStatus()
             if !granted {
-                sourceSelectionMessage = "Enable Reccy in System Settings → Privacy & Security → Screen & System Audio Recording."
+                sourceSelectionMessage = "Enable Reccy in System Settings → Privacy & Security → Screen & System Audio Recording to use Portion capture."
             }
         }
     }
@@ -320,12 +322,11 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     func refreshPermissionStatus() {
 #if DEBUG
         if suppressesPermissionRefreshForQA {
-            screenCapturePermission = .granted
             return
         }
 #endif
-        if screenCapturePermission != .restartRequired {
-            screenCapturePermission = CGPreflightScreenCaptureAccess() ? .granted : .notGranted
+        if directCapturePermission != .restartRequired {
+            directCapturePermission = CGPreflightScreenCaptureAccess() ? .granted : .notGranted
         }
         microphonePermission = AVCaptureDevice.authorizationStatus(for: .audio)
     }
@@ -1046,9 +1047,15 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
 #if DEBUG
+    func installPermissionsQAScenario() {
+        suppressesPermissionRefreshForQA = true
+        directCapturePermission = .notGranted
+        microphonePermission = .denied
+    }
+
     func installPortionSelectionQAScenario() {
         suppressesPermissionRefreshForQA = true
-        screenCapturePermission = .granted
+        directCapturePermission = .granted
         selectedSourceKind = .region
         isSelectingSource = true
         sourceSelectionMessage = "Drag anywhere on a display to select the recording area. Press Escape to cancel."
@@ -1062,7 +1069,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     func installActiveMonitorQAScenario() {
         suppressesPermissionRefreshForQA = true
-        screenCapturePermission = .granted
+        directCapturePermission = .granted
         installActiveMenuBarQAScenario()
         recordedDuration = 9
         recordedFileSize = 8_400_000
@@ -1091,7 +1098,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     func installRecordReadyQAScenario() {
         suppressesPermissionRefreshForQA = true
-        screenCapturePermission = .granted
+        directCapturePermission = .granted
         microphonePermission = .authorized
         selectedSourceKind = .application
         hasSelectedSource = true

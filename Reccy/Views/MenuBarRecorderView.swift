@@ -114,7 +114,7 @@ struct MenuBarRecorderView: View {
                     systemImage: "exclamationmark.triangle.fill",
                     color: .orange
                 )
-            } else if !coordinator.screenCapturePermission.isGranted {
+            } else if !coordinator.directCapturePermission.isGranted {
                 permissionNotice
             }
 
@@ -143,9 +143,9 @@ struct MenuBarRecorderView: View {
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Capture access required")
+                Text("Portion access not yet allowed")
                     .font(.subheadline.weight(.semibold))
-                Text("Review permissions before choosing a source.")
+                Text("Display, Application, and Window still use Apple’s private picker.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -213,7 +213,6 @@ struct MenuBarRecorderView: View {
             }
         }
         .buttonStyle(.plain)
-        .disabled(!coordinator.screenCapturePermission.isGranted)
         .accessibilityLabel("Choose \(kind.title)")
     }
 
@@ -497,7 +496,7 @@ struct MenuBarRecorderView: View {
     }
 
     private func chooseSource(_ kind: CaptureSourceKind) {
-        guard coordinator.screenCapturePermission.isGranted else {
+        guard !kind.requiresDirectCapturePermission || coordinator.directCapturePermission.isGranted else {
             navigation.openSettings(.permissions)
             showMain(.settings)
             return

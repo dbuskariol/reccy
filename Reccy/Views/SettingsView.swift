@@ -313,12 +313,12 @@ struct SettingsView: View {
         VStack(spacing: 16) {
             SettingsCard(title: "Capture Access") {
                 SettingsPermissionRow(
-                    title: "Screen & System Audio Recording",
-                    detail: "Required for every capture source. Portion uses this permission too; it has no separate grant.",
+                    title: "Direct Screen & System Audio Access",
+                    detail: "Required for Portion because Reccy draws the resizable selection overlay. macOS describes this as bypassing the private window picker. Display, Application, and Window use Apple’s picker instead.",
                     systemImage: "rectangle.inset.filled.and.person.filled",
-                    status: screenPermissionPresentation
+                    status: directCapturePermissionPresentation
                 ) {
-                    screenPermissionActions
+                    directCapturePermissionActions
                 }
                 SettingsDivider()
                 SettingsPermissionRow(
@@ -331,17 +331,17 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsCard(title: "Storage Access") {
-                SettingsPermissionRow(
-                    title: "Files & Folders",
-                    detail: recordingFolderPermissionDetail,
-                    systemImage: "folder.badge.gearshape",
-                    status: coordinator.settings.outputFolderPath == nil
-                        ? .notRequired
-                        : .managedByMacOS
-                ) {
-                    Button("System Settings") {
-                        coordinator.openFilesAndFoldersPrivacySettings()
+            if let outputFolderPath = coordinator.settings.outputFolderPath {
+                SettingsCard(title: "Storage Access") {
+                    SettingsPermissionRow(
+                        title: "Custom recording folder",
+                        detail: recordingFolderPermissionDetail(for: outputFolderPath),
+                        systemImage: "folder.badge.gearshape",
+                        status: .managedByMacOS
+                    ) {
+                        Button("System Settings") {
+                            coordinator.openFilesAndFoldersPrivacySettings()
+                        }
                     }
                 }
             }
@@ -354,9 +354,9 @@ struct SettingsView: View {
                         .frame(width: 28)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("System audio uses the selected screen source")
+                        Text("System audio follows capture access")
                             .font(.headline)
-                        Text("Reccy captures system audio through ScreenCaptureKit, covered by Screen & System Audio Recording above. macOS’s separate “System Audio Recording Only” list is for Core Audio process taps and is not required for Reccy’s synchronized video captures.")
+                        Text("Reccy records system audio with the selected source. Picker captures are approved in Apple’s picker; Portion uses the access above. The separate “System Audio Recording Only” list does not apply.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -506,8 +506,8 @@ struct SettingsView: View {
         }
     }
 
-    private var screenPermissionPresentation: PermissionPresentation {
-        switch coordinator.screenCapturePermission {
+    private var directCapturePermissionPresentation: PermissionPresentation {
+        switch coordinator.directCapturePermission {
         case .granted: .ready
         case .restartRequired: .restartRequired
         case .notGranted: .notAllowed
@@ -523,24 +523,21 @@ struct SettingsView: View {
         }
     }
 
-    private var recordingFolderPermissionDetail: String {
-        if let path = coordinator.settings.outputFolderPath {
-            let name = URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
-            return "macOS manages access to your chosen “\(name)” folder and may ask once if it’s protected."
-        }
-        return "Default Movies/Reccy needs no extra access. macOS asks only if you choose a protected folder."
+    private func recordingFolderPermissionDetail(for path: String) -> String {
+        let name = URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
+        return "macOS manages access to your chosen “\(name)” folder and may ask once if it’s protected."
     }
 
     @ViewBuilder
-    private var screenPermissionActions: some View {
-        switch coordinator.screenCapturePermission {
+    private var directCapturePermissionActions: some View {
+        switch coordinator.directCapturePermission {
         case .granted:
             EmptyView()
         case .restartRequired:
             Button("Quit Reccy") { coordinator.quitForPermissionRestart() }
         case .notGranted:
             Button("System Settings") { coordinator.openScreenCapturePrivacySettings() }
-            Button("Allow…") { coordinator.requestScreenCapturePermission() }
+            Button("Allow…") { coordinator.requestDirectCapturePermission() }
                 .buttonStyle(.borderedProminent)
         }
     }
@@ -661,9 +658,9 @@ private struct SettingsValueRow<Control: View>: View {
                 Text(detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .layoutPriority(1)
             .frame(maxWidth: .infinity, alignment: .leading)
             control
                 .fixedSize(horizontal: true, vertical: false)
@@ -717,7 +714,6 @@ private enum PermissionPresentation {
     case notRequested
     case notAllowed
     case restartRequired
-    case notRequired
     case managedByMacOS
 
     var title: String {
@@ -726,7 +722,6 @@ private enum PermissionPresentation {
         case .notRequested: "Not requested"
         case .notAllowed: "Not allowed"
         case .restartRequired: "Restart required"
-        case .notRequired: "Not required"
         case .managedByMacOS: "Managed by macOS"
         }
     }
@@ -737,7 +732,6 @@ private enum PermissionPresentation {
         case .notRequested: "circle.dashed"
         case .notAllowed: "exclamationmark.circle.fill"
         case .restartRequired: "arrow.clockwise.circle.fill"
-        case .notRequired: "checkmark.circle"
         case .managedByMacOS: "gearshape.circle"
         }
     }
@@ -745,7 +739,7 @@ private enum PermissionPresentation {
     var color: Color {
         switch self {
         case .ready: .green
-        case .notRequested, .notRequired, .managedByMacOS: .secondary
+        case .notRequested, .managedByMacOS: .secondary
         case .notAllowed, .restartRequired: .orange
         }
     }

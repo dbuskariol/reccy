@@ -317,6 +317,13 @@ struct ReccyTests {
         #expect(size.height == 2560)
     }
 
+    @Test func onlyPortionCaptureNeedsDirectPickerBypassPermission() {
+        #expect(CaptureSourceKind.region.requiresDirectCapturePermission)
+        #expect(!CaptureSourceKind.display.requiresDirectCapturePermission)
+        #expect(!CaptureSourceKind.application.requiresDirectCapturePermission)
+        #expect(!CaptureSourceKind.window.requiresDirectCapturePermission)
+    }
+
     @Test func timelineSplitKeepsEveryLaneAligned() {
         var project = makeProject()
         project.splitAll(at: 4)

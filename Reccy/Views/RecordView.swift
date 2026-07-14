@@ -89,8 +89,7 @@ struct RecordView: View {
                     }
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                } else if coordinator.screenCapturePermission.isGranted,
-                          let message = coordinator.sourceSelectionMessage {
+                } else if let message = coordinator.sourceSelectionMessage {
                     Label(
                         message,
                         systemImage: coordinator.hasSelectedSource
@@ -143,12 +142,17 @@ struct RecordView: View {
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         }
         .buttonStyle(.plain)
-        .disabled(!coordinator.screenCapturePermission.isGranted || coordinator.isSelectingSource)
+        .disabled(coordinator.isSelectingSource)
     }
 
     private var needsPermissionAttention: Bool {
-        !coordinator.screenCapturePermission.isGranted
+        needsDirectCaptureAccess
             || (coordinator.settings.includeMicrophone && coordinator.microphonePermission != .authorized)
+    }
+
+    private var needsDirectCaptureAccess: Bool {
+        coordinator.selectedSourceKind.requiresDirectCapturePermission
+            && !coordinator.directCapturePermission.isGranted
     }
 
     private var permissionWarning: some View {
@@ -178,10 +182,10 @@ struct RecordView: View {
     }
 
     private var permissionAttentionDetail: String {
-        if !coordinator.screenCapturePermission.isGranted {
-            return coordinator.screenCapturePermission == .restartRequired
-                ? "Quit and reopen Reccy once to finish enabling Screen & System Audio Recording."
-                : "Allow Screen & System Audio Recording before choosing a capture source."
+        if needsDirectCaptureAccess {
+            return coordinator.directCapturePermission == .restartRequired
+                ? "Quit and reopen Reccy once to finish enabling direct Portion capture."
+                : "Portion uses Reccy’s resizable overlay and needs the one-time Direct Screen & System Audio Access approval."
         }
         return "Microphone access is required because microphone recording is enabled."
     }
@@ -453,8 +457,8 @@ struct RecordView: View {
     }
 
     private var recordControlStatus: String {
-        if !coordinator.screenCapturePermission.isGranted {
-            return "Capture permission required"
+        if needsDirectCaptureAccess {
+            return "Direct Portion access required"
         }
         if coordinator.hasSelectedSource {
             return "\(coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title) selected"
@@ -463,27 +467,27 @@ struct RecordView: View {
     }
 
     private var recordControlStatusImage: String {
-        if !coordinator.screenCapturePermission.isGranted { return "exclamationmark.circle.fill" }
+        if needsDirectCaptureAccess { return "exclamationmark.circle.fill" }
         return coordinator.hasSelectedSource ? "checkmark.circle.fill" : "1.circle"
     }
 
     private var recordControlStatusStyle: AnyShapeStyle {
-        if !coordinator.screenCapturePermission.isGranted { return AnyShapeStyle(.orange) }
+        if needsDirectCaptureAccess { return AnyShapeStyle(.orange) }
         return coordinator.hasSelectedSource ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary)
     }
 
     private var primaryRecordActionTitle: String {
-        if !coordinator.screenCapturePermission.isGranted { return "Review Permissions" }
+        if needsDirectCaptureAccess { return "Review Permissions" }
         return coordinator.hasSelectedSource ? "2. Start Recording" : "Choose Source"
     }
 
     private var primaryRecordActionImage: String {
-        if !coordinator.screenCapturePermission.isGranted { return "hand.raised.fill" }
+        if needsDirectCaptureAccess { return "hand.raised.fill" }
         return coordinator.hasSelectedSource ? "record.circle.fill" : "rectangle.dashed.badge.record"
     }
 
     private func performPrimaryRecordAction() {
-        if !coordinator.screenCapturePermission.isGranted {
+        if needsDirectCaptureAccess {
             navigation.openSettings(.permissions)
         } else if coordinator.hasSelectedSource {
             coordinator.startRecording()
