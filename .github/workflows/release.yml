@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags: ['v*']
 
@@ -13,6 +14,7 @@ concurrency:
 
 jobs:
   release:
+    if: vars.RECCY_RELEASE_AUTOMATION_ENABLED == 'true'
     name: Sign, notarize, and publish
     runs-on: macos-26
     environment: release
@@ -83,6 +85,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             dist/updates/appcast.xml \
+            dist/updates/Reccy-*.dmg \
             dist/updates/Reccy-*.zip \
             dist/updates/Reccy-*.md \
             dist/updates/release.json \

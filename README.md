@@ -117,7 +117,7 @@ All repository build scripts place executable DerivedData under `~/Library/Devel
 
 ## Release
 
-Release automation builds an `.xcarchive`, validates a timestamped universal Developer ID app and production entitlements, notarizes and staples the bundle, proves that the Sparkle key matches the app, cryptographically verifies the archive and appcast, re-validates the expanded update, and emits checksums plus a machine-readable release manifest. The tag workflow preserves dSYMs and Apple evidence privately before publishing only verified assets. See [Documentation/RELEASING.md](Documentation/RELEASING.md) for the rehearsal, finalization, trust gates, and required secrets.
+Release automation builds an `.xcarchive`, validates a timestamped universal Developer ID app and production entitlements, separately notarizes and staples the app and signed DMG, proves that the Sparkle key matches the app, cryptographically verifies the update ZIP, external release notes, and appcast, re-validates both distribution containers, and emits checksums plus a machine-readable release manifest. The tag workflow preserves dSYMs and Apple evidence privately before publishing only verified assets. See [Documentation/RELEASING.md](Documentation/RELEASING.md) for the rehearsal, finalization, trust gates, and required secrets.
 
 ## Privacy
 

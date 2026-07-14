@@ -193,6 +193,109 @@ reccy_assert_notarized_app() {
     || reccy_fail 'Gatekeeper rejected the app'
 }
 
+reccy_assert_signed_disk_image() {
+  local disk_image="$1"
+  local expected_team="${2:-}"
+  local signing_details team
+
+  [[ -f "$disk_image" ]] || reccy_fail "disk image not found: $disk_image"
+  /usr/bin/hdiutil verify "$disk_image" >/dev/null \
+    || reccy_fail 'the disk image failed its integrity check'
+  /usr/bin/codesign --verify --strict --verbose=2 "$disk_image" \
+    || reccy_fail 'the disk image signature is invalid'
+  signing_details="$(reccy_codesign_details "$disk_image")"
+  /usr/bin/grep -q '^Authority=Developer ID Application:' <<<"$signing_details" \
+    || reccy_fail 'the disk image is not signed with Developer ID Application'
+  /usr/bin/grep -Eq '^Timestamp=.+$' <<<"$signing_details" \
+    || reccy_fail 'the disk image signature is missing a trusted timestamp'
+  team="$(/usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$signing_details")"
+  [[ -n "$team" && "$team" != "not set" ]] \
+    || reccy_fail 'the disk image signature is missing its team identifier'
+  if [[ -n "$expected_team" && "$team" != "$expected_team" ]]; then
+    reccy_fail "disk image signature team $team does not match expected team $expected_team"
+  fi
+}
+
+reccy_assert_notarized_disk_image() {
+  local disk_image="$1"
+  local expected_team="${2:-}"
+
+  reccy_assert_signed_disk_image "$disk_image" "$expected_team"
+  /usr/bin/xcrun stapler validate "$disk_image" >/dev/null \
+    || reccy_fail 'the disk image does not contain a valid stapled notarization ticket'
+  /usr/sbin/spctl \
+    --assess \
+    --type open \
+    --context context:primary-signature \
+    --verbose=4 \
+    "$disk_image" \
+    || reccy_fail 'Gatekeeper rejected the disk image'
+}
+
+RECCY_NOTARY_ARGS=()
+
+reccy_configure_notary_credentials() {
+  RECCY_NOTARY_ARGS=()
+  if [[ -n "${RECCY_NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
+    RECCY_NOTARY_ARGS=(--keychain-profile "$RECCY_NOTARY_KEYCHAIN_PROFILE")
+  elif [[ -n "${RECCY_NOTARY_KEY_PATH:-}" \
+    && -n "${RECCY_NOTARY_KEY_ID:-}" \
+    && -n "${RECCY_NOTARY_ISSUER_ID:-}" ]]; then
+    [[ -f "$RECCY_NOTARY_KEY_PATH" ]] \
+      || reccy_fail "App Store Connect API key is missing: $RECCY_NOTARY_KEY_PATH"
+    RECCY_NOTARY_ARGS=(
+      --key "$RECCY_NOTARY_KEY_PATH"
+      --key-id "$RECCY_NOTARY_KEY_ID"
+      --issuer "$RECCY_NOTARY_ISSUER_ID"
+    )
+  else
+    /bin/cat >&2 <<'EOF'
+Notarization credentials are not configured. Use a stored Keychain profile:
+
+  RECCY_NOTARY_KEYCHAIN_PROFILE="Reccy Notary" scripts/release.sh finalize
+
+CI may instead provide RECCY_NOTARY_KEY_PATH, RECCY_NOTARY_KEY_ID, and
+RECCY_NOTARY_ISSUER_ID. Passwords and Apple IDs are never accepted inline.
+EOF
+    exit 1
+  fi
+}
+
+reccy_submit_notarization() {
+  local artifact="$1"
+  local submission_json="$2"
+  local log_json="$3"
+  local submission_id status log_status issue_count issue_type
+
+  reccy_configure_notary_credentials
+  /bin/rm -f "$submission_json" "$log_json"
+  /usr/bin/xcrun notarytool submit \
+    "$artifact" \
+    "${RECCY_NOTARY_ARGS[@]}" \
+    --wait \
+    --output-format json >"$submission_json"
+
+  submission_id="$(reccy_plist_value id "$submission_json")"
+  status="$(reccy_plist_value status "$submission_json")"
+  [[ -n "$submission_id" ]] || reccy_fail 'Apple notarization returned no submission identifier'
+  /usr/bin/xcrun notarytool log \
+    "$submission_id" \
+    "${RECCY_NOTARY_ARGS[@]}" \
+    --output-format json >"$log_json"
+
+  log_status="$(reccy_plist_value status "$log_json")"
+  if ! issue_count="$(/usr/bin/plutil -extract issues raw -o - "$log_json" 2>/dev/null)"; then
+    issue_type="$(/usr/bin/plutil -type issues "$log_json" 2>/dev/null || true)"
+    [[ "$issue_type" == "(any)" ]] \
+      || reccy_fail "Apple's notarization log has an unreadable issues field; inspect $log_json"
+    issue_count=0
+  fi
+  [[ "$status" == "Accepted" && "$log_status" == "Accepted" ]] \
+    || reccy_fail "notarization failed with status ${status:-unknown}; inspect $log_json"
+  [[ "$issue_count" == "0" ]] \
+    || reccy_fail "notarization reported ${issue_count:-unknown} issues; inspect $log_json"
+}
+
 reccy_resolve_sparkle_tool() {
   local root="$1"
   local derived_data="$2"

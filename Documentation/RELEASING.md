@@ -12,7 +12,7 @@ Before an artifact can be packaged, the tooling proves all of the following:
 - The bundle identifier is `com.reccy.mac`, the minimum system is macOS 26.0, and the executable contains both `arm64` and `x86_64` slices.
 - The app has a timestamped Developer ID Application signature, Hardened Runtime, the expected team identifier, and no debug or disabled-library-validation entitlements.
 - Sparkle is embedded, signed feeds and pre-extraction verification are required, and the private signing key matches `SUPublicEDKey` in the app.
-- Apple accepted the notarization, the ticket is stapled, Gatekeeper accepts the app, the ZIP expands to the same verified executable, and Sparkle cryptographically accepts both archive and appcast signatures.
+- Apple accepted separate notarizations for the app payload and signed DMG, both tickets are stapled, Gatekeeper accepts both layers, the ZIP and mounted DMG contain the same verified executable, and Sparkle cryptographically accepts the archive, external release notes, and appcast signatures.
 - `SHA256SUMS` and `release.json` describe the exact published artifacts and commit. The `.xcarchive`, dSYM archive, and Apple notarization evidence remain available to the release workflow for diagnostics and symbolication.
 
 ## Local rehearsal
@@ -22,10 +22,15 @@ Update `MARKETING_VERSION`, `CURRENT_PROJECT_VERSION`, and `Documentation/RELEAS
 ```sh
 RECCY_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 RECCY_DEVELOPMENT_TEAM="TEAMID" \
+RECCY_SPARKLE_KEY_ACCOUNT="ed25519" \
 scripts/release.sh prepare
 ```
 
-This creates and validates the universal `.xcarchive`, signed app, dSYM archive, and notarization ZIP. It does not contact Apple, create a GitHub release, or mutate any publishing state.
+This creates and validates the universal `.xcarchive`, signed app, dSYM archive,
+notarization ZIP, signed DMG, Sparkle ZIP and feed, checksums, and manifest. It
+exercises the complete local artifact graph but explicitly allows the unstapled
+rehearsal app and DMG at the two notarization gates. It does not contact Apple,
+create a GitHub release, or mutate any publishing state.
 
 ## Local final release
 
@@ -54,17 +59,27 @@ The final command submits to Apple, staples the accepted ticket, creates and sig
 
 - `dist/updates/appcast.xml`
 - `dist/updates/Reccy-<version>-<build>.zip`
+- `dist/updates/Reccy-<version>-<build>.dmg`
 - `dist/updates/Reccy-<version>-<build>.md`
 - `dist/updates/SHA256SUMS`
 - `dist/updates/release.json`
 - `dist/symbols/Reccy-<version>-<build>.dSYM.zip`
-- `dist/notarization/notary-submit-*.json` and `notary-log-*.json`
+- `dist/notarization/notary-submit-*.json` and `notary-log-*.json` for both app and DMG submissions
 
 Never upload a Sparkle private key, Developer ID certificate, notarization credential, or unnotarized archive.
 
+## GitHub release automation
+
+The tag workflow is intentionally fail-closed behind the repository variable
+`RECCY_RELEASE_AUTOMATION_ENABLED=true`. Enable it only after the `release`
+environment contains every signing and notarization secret referenced by
+`.github/workflows/release.yml`. Until then, tags produce a skipped release job
+instead of a misleading failed or partially published release. The same workflow
+can be started manually after provisioning to validate the release environment.
+
 ## GitHub Actions
 
-Pushing a `v*` tag starts `.github/workflows/release.yml` on GitHub’s macOS 26 runner. It imports the certificate into an ephemeral keychain, runs the same `scripts/release.sh finalize` gate, preserves notarization evidence and dSYMs as a private workflow artifact, publishes only verified update assets, and removes every materialized credential even after failure.
+With release automation enabled, pushing a `v*` tag starts `.github/workflows/release.yml` on GitHub’s macOS 26 runner. It imports the certificate into an ephemeral keychain, runs the same `scripts/release.sh finalize` gate, preserves notarization evidence and dSYMs as a private workflow artifact, publishes only verified update assets, and removes every materialized credential even after failure.
 
 The repository requires these Actions secrets:
 

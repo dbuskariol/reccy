@@ -68,6 +68,9 @@ APPCAST_MINIMUM_SYSTEM="$(xml_value '/*[local-name()="rss"]/*[local-name()="chan
 APPCAST_URL="$(xml_value '/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="enclosure"][1]/@url')"
 APPCAST_LENGTH="$(xml_value '/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="enclosure"][1]/@length')"
 APPCAST_SIGNATURE="$(xml_value '/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="enclosure"][1]/@*[local-name()="edSignature"]')"
+RELEASE_NOTES_URL="$(xml_value '/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="releaseNotesLink"]')"
+RELEASE_NOTES_LENGTH="$(xml_value '/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="releaseNotesLink"]/@*[local-name()="length"]')"
+RELEASE_NOTES_SIGNATURE="$(xml_value '/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="releaseNotesLink"]/@*[local-name()="edSignature"]')"
 
 [[ "$APPCAST_SHORT_VERSION" == "$SHORT_VERSION" ]] || fail 'appcast short version mismatch'
 [[ "$APPCAST_BUILD_VERSION" == "$BUILD_VERSION" ]] || fail 'appcast build version mismatch'
@@ -75,6 +78,9 @@ APPCAST_SIGNATURE="$(xml_value '/*[local-name()="rss"]/*[local-name()="channel"]
 [[ "$APPCAST_URL" == "$DOWNLOAD_PREFIX$BASE_NAME.zip" ]] || fail 'appcast archive URL mismatch'
 [[ "$APPCAST_LENGTH" == "$(/usr/bin/stat -f%z "$ARCHIVE")" ]] || fail 'appcast archive length mismatch'
 [[ "$APPCAST_SIGNATURE" =~ ^[A-Za-z0-9+/=]{40,}$ ]] || fail 'appcast is missing an EdDSA signature'
+[[ "$RELEASE_NOTES_URL" == "$DOWNLOAD_PREFIX$BASE_NAME.md" ]] || fail 'appcast release notes URL mismatch'
+[[ "$RELEASE_NOTES_LENGTH" == "$(/usr/bin/stat -f%z "$NOTES")" ]] || fail 'appcast release notes length mismatch'
+[[ "$RELEASE_NOTES_SIGNATURE" =~ ^[A-Za-z0-9+/=]{40,}$ ]] || fail 'release notes are missing an EdDSA signature'
 
 SIGN_UPDATE="$(reccy_resolve_sparkle_tool "$ROOT_DIR" "$DERIVED_DATA" sign_update)"
 VERIFY_KEY_ARGS=(--account "${RECCY_SPARKLE_KEY_ACCOUNT:-ed25519}")
@@ -83,6 +89,8 @@ if [[ -n "${RECCY_SPARKLE_PRIVATE_KEY_FILE:-}" ]]; then
 fi
 "$SIGN_UPDATE" --verify "${VERIFY_KEY_ARGS[@]}" "$ARCHIVE" "$APPCAST_SIGNATURE" >/dev/null \
   || fail 'Sparkle rejected the update archive signature'
+"$SIGN_UPDATE" --verify "${VERIFY_KEY_ARGS[@]}" "$NOTES" "$RELEASE_NOTES_SIGNATURE" >/dev/null \
+  || fail 'Sparkle rejected the release notes signature'
 "$SIGN_UPDATE" --verify "${VERIFY_KEY_ARGS[@]}" "$APPCAST" >/dev/null \
   || fail 'Sparkle rejected the signed appcast'
 

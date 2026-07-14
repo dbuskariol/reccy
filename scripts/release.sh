@@ -27,6 +27,13 @@ reccy_note "Preparing Reccy $VERSION ($BUILD) in $MODE mode"
 
 if [[ "$MODE" == "prepare" ]]; then
   RECCY_NOTARY_PREPARE_ONLY=1 "$ROOT_DIR/scripts/notarize-release.sh"
+  RECCY_SKIP_BUILD=1 \
+    RECCY_ALLOW_UNNOTARIZED_PACKAGE=1 \
+    "$ROOT_DIR/scripts/package-update.sh"
+  RECCY_ALLOW_UNNOTARIZED_PACKAGE=1 \
+    "$ROOT_DIR/scripts/generate-appcast.sh"
+  RECCY_ALLOW_UNNOTARIZED_PACKAGE=1 \
+    "$ROOT_DIR/scripts/create-release-manifest.sh"
   reccy_note 'Release rehearsal passed; no Apple service or publishing state was changed'
   exit 0
 fi
