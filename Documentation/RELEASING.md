@@ -10,7 +10,7 @@ Before an artifact can be packaged, the tooling proves all of the following:
 
 - The worktree is clean, release notes match `MARKETING_VERSION`, the build is a positive integer, and a final release is running from the exact `v<MARKETING_VERSION>` tag.
 - The bundle identifier is `com.reccy.mac`, the minimum system is macOS 26.0, and the executable contains both `arm64` and `x86_64` slices.
-- The app has a timestamped Developer ID Application signature, Hardened Runtime, the expected team identifier, and no debug or disabled-library-validation entitlements.
+- The archive is exported with Xcode's `developer-id` distribution method; the app and every nested Sparkle helper then have timestamped Developer ID Application signatures, Hardened Runtime, the expected team identifier, and no debug or disabled-library-validation entitlements.
 - Sparkle is embedded, signed feeds and pre-extraction verification are required, and the private signing key matches `SUPublicEDKey` in the app.
 - Apple accepted separate notarizations for the app payload and signed DMG, both tickets are stapled, Gatekeeper accepts both layers, the ZIP and mounted DMG contain the same verified executable, and Sparkle cryptographically accepts the archive, external release notes, and appcast signatures.
 - `SHA256SUMS` and `release.json` describe the exact published artifacts and commit. The `.xcarchive`, dSYM archive, and Apple notarization evidence remain available to the release workflow for diagnostics and symbolication.

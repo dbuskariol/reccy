@@ -41,12 +41,41 @@ reccy_plist_value() {
   /usr/libexec/PlistBuddy -c "Print :$1" "$2" 2>/dev/null || true
 }
 
+reccy_json_value() {
+  /usr/bin/plutil -extract "$1" raw -o - "$2" 2>/dev/null || true
+}
+
 reccy_codesign_details() {
   /usr/bin/codesign -dvvv --verbose=4 "$1" 2>&1
 }
 
 reccy_signature_team() {
   /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$(reccy_codesign_details "$1")"
+}
+
+reccy_assert_developer_id_signature() {
+  local signed_path="$1"
+  local expected_team="${2:-}"
+  local require_hardened_runtime="${3:-0}"
+  local signing_details team
+
+  /usr/bin/codesign --verify --strict --verbose=2 "$signed_path" \
+    || reccy_fail "the code signature is invalid: $signed_path"
+  signing_details="$(reccy_codesign_details "$signed_path")"
+  /usr/bin/grep -q '^Authority=Developer ID Application:' <<<"$signing_details" \
+    || reccy_fail "Developer ID Application did not sign: $signed_path"
+  /usr/bin/grep -Eq '^Timestamp=.+$' <<<"$signing_details" \
+    || reccy_fail "the signature is missing a trusted timestamp: $signed_path"
+  if [[ "$require_hardened_runtime" == "1" ]]; then
+    /usr/bin/grep -Eq '^CodeDirectory .*flags=.*\(runtime\)' <<<"$signing_details" \
+      || reccy_fail "the hardened runtime is not enabled: $signed_path"
+  fi
+  team="$(/usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$signing_details")"
+  [[ -n "$team" && "$team" != "not set" ]] \
+    || reccy_fail "the signature is missing its team identifier: $signed_path"
+  if [[ -n "$expected_team" && "$team" != "$expected_team" ]]; then
+    reccy_fail "signature team $team does not match expected team $expected_team: $signed_path"
+  fi
 }
 
 reccy_find_developer_id_identity() {
@@ -103,7 +132,7 @@ reccy_assert_release_metadata() {
 reccy_assert_release_app() {
   local app="$1"
   local expected_team="${2:-}"
-  local info executable bundle_id minimum_system version build architectures signing_details team entitlements
+  local info executable bundle_id minimum_system version build architectures team entitlements
 
   [[ -d "$app" ]] || reccy_fail "app bundle not found: $app"
   info="$app/Contents/Info.plist"
@@ -128,19 +157,8 @@ reccy_assert_release_app() {
 
   /usr/bin/codesign --verify --strict --deep --verbose=2 "$app" \
     || reccy_fail 'the app signature is invalid'
-  signing_details="$(reccy_codesign_details "$app")"
-  /usr/bin/grep -q '^Authority=Developer ID Application:' <<<"$signing_details" \
-    || reccy_fail 'a Developer ID Application signature is required'
-  /usr/bin/grep -Eq '^CodeDirectory .*flags=.*\(runtime\)' <<<"$signing_details" \
-    || reccy_fail 'the hardened runtime is not enabled'
-  /usr/bin/grep -Eq '^Timestamp=.+$' <<<"$signing_details" \
-    || reccy_fail 'the Developer ID signature is missing a trusted timestamp'
-  team="$(/usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$signing_details")"
-  [[ -n "$team" && "$team" != "not set" ]] \
-    || reccy_fail 'the signature is missing its team identifier'
-  if [[ -n "$expected_team" && "$team" != "$expected_team" ]]; then
-    reccy_fail "signature team $team does not match expected team $expected_team"
-  fi
+  reccy_assert_developer_id_signature "$app" "$expected_team" 1
+  team="$(reccy_signature_team "$app")"
 
   architectures="$(/usr/bin/lipo -archs "$executable")"
   local architecture
@@ -162,6 +180,17 @@ reccy_assert_release_app() {
 
   [[ -f "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ]] \
     || reccy_fail 'the embedded Sparkle framework is missing'
+  local sparkle_code
+  for sparkle_code in \
+    "$app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" \
+    "$app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
+    "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" \
+    "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
+    "$app/Contents/Frameworks/Sparkle.framework"
+  do
+    [[ -e "$sparkle_code" ]] || reccy_fail "embedded Sparkle code is missing: $sparkle_code"
+    reccy_assert_developer_id_signature "$sparkle_code" "$team" 1
+  done
   local privacy_manifest="$app/Contents/Resources/PrivacyInfo.xcprivacy"
   [[ -f "$privacy_manifest" ]] || reccy_fail 'the app privacy manifest is missing'
   /usr/bin/plutil -lint "$privacy_manifest" >/dev/null \
@@ -196,24 +225,11 @@ reccy_assert_notarized_app() {
 reccy_assert_signed_disk_image() {
   local disk_image="$1"
   local expected_team="${2:-}"
-  local signing_details team
 
   [[ -f "$disk_image" ]] || reccy_fail "disk image not found: $disk_image"
   /usr/bin/hdiutil verify "$disk_image" >/dev/null \
     || reccy_fail 'the disk image failed its integrity check'
-  /usr/bin/codesign --verify --strict --verbose=2 "$disk_image" \
-    || reccy_fail 'the disk image signature is invalid'
-  signing_details="$(reccy_codesign_details "$disk_image")"
-  /usr/bin/grep -q '^Authority=Developer ID Application:' <<<"$signing_details" \
-    || reccy_fail 'the disk image is not signed with Developer ID Application'
-  /usr/bin/grep -Eq '^Timestamp=.+$' <<<"$signing_details" \
-    || reccy_fail 'the disk image signature is missing a trusted timestamp'
-  team="$(/usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$signing_details")"
-  [[ -n "$team" && "$team" != "not set" ]] \
-    || reccy_fail 'the disk image signature is missing its team identifier'
-  if [[ -n "$expected_team" && "$team" != "$expected_team" ]]; then
-    reccy_fail "disk image signature team $team does not match expected team $expected_team"
-  fi
+  reccy_assert_developer_id_signature "$disk_image" "$expected_team"
 }
 
 reccy_assert_notarized_disk_image() {
@@ -275,15 +291,16 @@ reccy_submit_notarization() {
     --wait \
     --output-format json >"$submission_json"
 
-  submission_id="$(reccy_plist_value id "$submission_json")"
-  status="$(reccy_plist_value status "$submission_json")"
+  submission_id="$(reccy_json_value id "$submission_json")"
+  status="$(reccy_json_value status "$submission_json")"
   [[ -n "$submission_id" ]] || reccy_fail 'Apple notarization returned no submission identifier'
   /usr/bin/xcrun notarytool log \
     "$submission_id" \
+    "$log_json" \
     "${RECCY_NOTARY_ARGS[@]}" \
-    --output-format json >"$log_json"
+    >/dev/null
 
-  log_status="$(reccy_plist_value status "$log_json")"
+  log_status="$(reccy_json_value status "$log_json")"
   if ! issue_count="$(/usr/bin/plutil -extract issues raw -o - "$log_json" 2>/dev/null)"; then
     issue_type="$(/usr/bin/plutil -type issues "$log_json" 2>/dev/null || true)"
     [[ "$issue_type" == "(any)" ]] \

@@ -8,6 +8,9 @@ DERIVED_DATA="${RECCY_DERIVED_DATA:-$(reccy_default_derived_data Release)}"
 OUTPUT_DIR="${RECCY_OUTPUT_DIR:-$ROOT_DIR/dist}"
 ARCHIVE_PATH="${RECCY_ARCHIVE_PATH:-$OUTPUT_DIR/Reccy.xcarchive}"
 BUILT_APP="$ARCHIVE_PATH/Products/Applications/Reccy.app"
+EXPORT_PATH="${RECCY_EXPORT_PATH:-$OUTPUT_DIR/export}"
+EXPORTED_APP="$EXPORT_PATH/Reccy.app"
+EXPORT_OPTIONS_PLIST="$OUTPUT_DIR/DeveloperIDExportOptions.plist"
 OUTPUT_APP="$OUTPUT_DIR/Reccy.app"
 SIGNING_IDENTITY="${RECCY_CODESIGN_IDENTITY:-}"
 
@@ -45,8 +48,38 @@ fi
 
 [[ -d "$BUILT_APP" ]] || reccy_fail "release app was not archived at $BUILT_APP"
 
+ARCHIVED_TEAM="$(reccy_signature_team "$BUILT_APP")"
+[[ -n "$ARCHIVED_TEAM" && "$ARCHIVED_TEAM" != "not set" ]] \
+  || reccy_fail 'the archived app signature is missing its team identifier'
+if [[ -n "${RECCY_DEVELOPMENT_TEAM:-}" && "$ARCHIVED_TEAM" != "$RECCY_DEVELOPMENT_TEAM" ]]; then
+  reccy_fail "archive team $ARCHIVED_TEAM does not match expected team $RECCY_DEVELOPMENT_TEAM"
+fi
+
+# Exporting is a required distribution step, not a redundant copy. Xcode
+# re-signs every nested Sparkle helper in the correct inside-out order with the
+# selected Developer ID identity and secure timestamp.
+/bin/rm -rf "$EXPORT_PATH"
+/bin/rm -f "$EXPORT_OPTIONS_PLIST"
+/usr/bin/plutil -create xml1 "$EXPORT_OPTIONS_PLIST"
+/usr/bin/plutil -insert method -string developer-id "$EXPORT_OPTIONS_PLIST"
+/usr/bin/plutil -insert signingStyle -string manual "$EXPORT_OPTIONS_PLIST"
+/usr/bin/plutil -insert teamID -string "$ARCHIVED_TEAM" "$EXPORT_OPTIONS_PLIST"
+/usr/bin/plutil -insert signingCertificate -string "$SIGNING_IDENTITY" "$EXPORT_OPTIONS_PLIST"
+
+EXPORT_ARGS=(
+  -exportArchive
+  -archivePath "$ARCHIVE_PATH"
+  -exportPath "$EXPORT_PATH"
+  -exportOptionsPlist "$EXPORT_OPTIONS_PLIST"
+)
+if [[ "${RECCY_VERBOSE_BUILD:-0}" != "1" ]]; then
+  EXPORT_ARGS=(-quiet "${EXPORT_ARGS[@]}")
+fi
+/usr/bin/xcodebuild "${EXPORT_ARGS[@]}"
+
+[[ -d "$EXPORTED_APP" ]] || reccy_fail "Developer ID export did not produce $EXPORTED_APP"
 /bin/rm -rf "$OUTPUT_APP"
-/usr/bin/ditto "$BUILT_APP" "$OUTPUT_APP"
+/usr/bin/ditto "$EXPORTED_APP" "$OUTPUT_APP"
 reccy_assert_release_app "$OUTPUT_APP" "${RECCY_DEVELOPMENT_TEAM:-}"
 
 DSYM="$ARCHIVE_PATH/dSYMs/Reccy.app.dSYM"
