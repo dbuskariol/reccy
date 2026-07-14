@@ -93,7 +93,7 @@ struct LibraryView: View {
                 }
             }
         } message: { item in
-            Text("\(item.name) and its Reccy metadata will be moved to the Trash.")
+            Text("This moves \(item.name), its metadata, and its non-destructive editing project to the Trash.")
         }
         .onAppear { selectFirstRecording() }
         .onChange(of: selectedID) { _, _ in loadSelectedRecording() }

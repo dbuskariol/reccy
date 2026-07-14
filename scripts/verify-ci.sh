@@ -4,13 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/reccy-release.sh"
 
-DERIVED_DATA="${RECCY_CI_DERIVED_DATA:-$ROOT_DIR/.build/CIDerivedData}"
+DERIVED_DATA="${RECCY_CI_DERIVED_DATA:-$(reccy_default_derived_data CI)}"
 
 while IFS= read -r -d '' script; do
   /bin/bash -n "$script"
 done < <(/usr/bin/find "$ROOT_DIR/scripts" -type f -name '*.sh' -print0)
 /usr/bin/xcrun swiftc -typecheck "$ROOT_DIR/scripts/sparkle-public-key.swift"
 /usr/bin/xcrun swiftc -typecheck "$ROOT_DIR/scripts/validate-capture.swift"
+"$ROOT_DIR/scripts/validate-capture.sh" --self-test >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Configuration/Reccy-Info.plist" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Reccy/Reccy.entitlements" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Reccy/ReccyDebug.entitlements" >/dev/null

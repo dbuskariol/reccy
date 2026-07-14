@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreMedia
+import CoreVideo
 import Darwin
 import Foundation
 
@@ -21,6 +22,12 @@ private struct CaptureValidationReport: Encodable {
 private struct ValidationFailure: LocalizedError {
     let message: String
     var errorDescription: String? { message }
+}
+
+private enum SelfTestFailure: Error {
+    case cannotAddVideoInput
+    case cannotCreatePixelBuffer
+    case writerFailed
 }
 
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
@@ -204,6 +211,95 @@ private func validateCapture(at mediaURL: URL) async throws -> CaptureValidation
     )
 }
 
+private func makeSelfTestPixelBuffer() throws -> CVPixelBuffer {
+    var pixelBuffer: CVPixelBuffer?
+    let status = CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        64,
+        64,
+        kCVPixelFormatType_32BGRA,
+        [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+        ] as CFDictionary,
+        &pixelBuffer
+    )
+    guard status == kCVReturnSuccess, let pixelBuffer else {
+        throw SelfTestFailure.cannotCreatePixelBuffer
+    }
+
+    CVPixelBufferLockBaseAddress(pixelBuffer, [])
+    defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+    guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+        throw SelfTestFailure.cannotCreatePixelBuffer
+    }
+    memset(baseAddress, 0x44, CVPixelBufferGetDataSize(pixelBuffer))
+    return pixelBuffer
+}
+
+private func makeSelfTestCapture() async throws -> (media: URL, manifest: URL) {
+    let mediaURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Reccy Capture Validator \(UUID().uuidString)")
+        .appendingPathExtension("mp4")
+    let manifestURL = mediaURL
+        .deletingPathExtension()
+        .appendingPathExtension("reccy.json")
+    let writer = try AVAssetWriter(outputURL: mediaURL, fileType: .mp4)
+    let input = AVAssetWriterInput(
+        mediaType: .video,
+        outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 64,
+            AVVideoHeightKey: 64,
+        ]
+    )
+    let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+        assetWriterInput: input,
+        sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: 64,
+            kCVPixelBufferHeightKey as String: 64,
+        ]
+    )
+    guard writer.canAdd(input) else { throw SelfTestFailure.cannotAddVideoInput }
+    writer.add(input)
+    guard writer.startWriting() else { throw writer.error ?? SelfTestFailure.writerFailed }
+    writer.startSession(atSourceTime: .zero)
+
+    for frame in 0..<15 {
+        while !input.isReadyForMoreMediaData {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard adaptor.append(
+            try makeSelfTestPixelBuffer(),
+            withPresentationTime: CMTime(value: Int64(frame), timescale: 30)
+        ) else {
+            throw writer.error ?? SelfTestFailure.writerFailed
+        }
+    }
+    input.markAsFinished()
+    await withCheckedContinuation { continuation in
+        writer.finishWriting { continuation.resume() }
+    }
+    guard writer.status == .completed else {
+        throw writer.error ?? SelfTestFailure.writerFailed
+    }
+
+    let manifest: [String: Any] = [
+        "version": 2,
+        "width": 64,
+        "height": 64,
+        "frameRate": 30,
+        "videoCodec": "h264",
+        "isHDR": false,
+        "includesSystemAudio": false,
+        "includesMicrophone": false,
+    ]
+    try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        .write(to: manifestURL, options: .atomic)
+    return (mediaURL, manifestURL)
+}
+
 private extension Optional {
     func unwrap(or error: @autoclosure () -> Error) throws -> Wrapped {
         guard let self else { throw error() }
@@ -213,14 +309,28 @@ private extension Optional {
 
 guard CommandLine.arguments.count == 2 else {
     FileHandle.standardError.write(
-        Data("Usage: validate-capture.swift /path/to/recording.mp4\n".utf8)
+        Data("Usage: validate-capture.swift /path/to/recording.mp4 | --self-test\n".utf8)
     )
     exit(64)
 }
 
-let mediaURL = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
 Task {
     do {
+        let mediaURL: URL
+        var selfTestManifestURL: URL?
+        if CommandLine.arguments[1] == "--self-test" {
+            let fixture = try await makeSelfTestCapture()
+            mediaURL = fixture.media
+            selfTestManifestURL = fixture.manifest
+        } else {
+            mediaURL = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
+        }
+        defer {
+            if let selfTestManifestURL {
+                try? FileManager.default.removeItem(at: mediaURL)
+                try? FileManager.default.removeItem(at: selfTestManifestURL)
+            }
+        }
         let report = try await validateCapture(at: mediaURL)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

@@ -106,7 +106,7 @@ final class TimelineEditorController: ObservableObject {
         dismissError()
         defer { isLoading = false }
 
-        let packageURL = Self.projectPackageURL(for: item)
+        let packageURL = item.artifacts.projectPackageURL
         do {
             let loaded = try await loadProject(for: item, packageURL: packageURL)
             try await installLoadedProject(loaded, packageURL: packageURL)
@@ -140,13 +140,6 @@ final class TimelineEditorController: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-
-    private static func projectPackageURL(for item: RecordingItem) -> URL {
-        item.url
-            .deletingLastPathComponent()
-            .appendingPathComponent("Projects", isDirectory: true)
-            .appendingPathComponent("\(item.name).reccyproject", isDirectory: true)
     }
 
     private func loadProject(

@@ -113,6 +113,8 @@ scripts/install-development.sh
 
 It automatically selects an Apple Development or Developer ID identity, verifies the team identifier, refuses accidental ad-hoc installation, prevents replacing an install from a different team, and installs to `/Applications/Reccy.app`. Grant capture permissions once after the first stable-signed install; later local builds and signed Sparkle updates retain the same app identity. Local development installs on this machine use the Developer ID identity for team `BJCVJ5G7MJ`.
 
+All repository build scripts place executable DerivedData under `~/Library/Developer/Xcode/DerivedData/Reccy`, never inside the checkout. This follows Xcode's standard storage model and prevents test or development hosts from triggering protected-folder prompts merely because the repository is in Documents. `RECCY_DERIVED_DATA_ROOT`, `RECCY_DERIVED_DATA`, and `RECCY_CI_DERIVED_DATA` remain available for controlled CI overrides.
+
 ## Release
 
 Release automation builds an `.xcarchive`, validates a timestamped universal Developer ID app and production entitlements, notarizes and staples the bundle, proves that the Sparkle key matches the app, cryptographically verifies the archive and appcast, re-validates the expanded update, and emits checksums plus a machine-readable release manifest. The tag workflow preserves dSYMs and Apple evidence privately before publishing only verified assets. See [Documentation/RELEASING.md](Documentation/RELEASING.md) for the rehearsal, finalization, trust gates, and required secrets.

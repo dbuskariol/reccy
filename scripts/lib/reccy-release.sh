@@ -24,6 +24,15 @@ reccy_note() {
   printf '==> %s\n' "$1"
 }
 
+reccy_default_derived_data() {
+  local purpose="$1"
+  local base="${RECCY_DERIVED_DATA_ROOT:-${HOME:?}/Library/Developer/Xcode/DerivedData/Reccy}"
+
+  # Build and test hosts are executable code. Keep them out of protected user
+  # folders so macOS never mistakes routine verification for Documents access.
+  printf '%s/%s\n' "$base" "$purpose"
+}
+
 reccy_require_tool() {
   /usr/bin/command -v "$1" >/dev/null 2>&1 || reccy_fail "required tool is unavailable: $1"
 }

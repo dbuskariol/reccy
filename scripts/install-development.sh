@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/reccy-release.sh"
 
-DERIVED_DATA="${RECCY_DERIVED_DATA:-$ROOT_DIR/.build/DevelopmentDerivedData}"
+DERIVED_DATA="${RECCY_DERIVED_DATA:-$(reccy_default_derived_data Development)}"
 INSTALL_PATH="${RECCY_INSTALL_PATH:-/Applications/Reccy.app}"
 BUILT_APP="$DERIVED_DATA/Build/Products/Debug/Reccy.app"
 SIGNING_IDENTITY="${RECCY_CODESIGN_IDENTITY:-}"

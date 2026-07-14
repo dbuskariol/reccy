@@ -15,6 +15,7 @@ struct RecordingItem: Identifiable, Hashable, Sendable {
     var id: URL { url }
     var name: String { url.deletingPathExtension().lastPathComponent }
     var fileExtension: String { url.pathExtension.uppercased() }
+    var artifacts: RecordingArtifacts { RecordingArtifacts(mediaURL: url) }
 
     var formattedDuration: String {
         Duration.seconds(duration).formatted(.time(pattern: .minuteSecond(padMinuteToLength: 2)))
@@ -56,5 +57,32 @@ struct RecordingItem: Identifiable, Hashable, Sendable {
         guard !audioTrackIDs.isEmpty else { return audioSummary }
         let trackLabel = audioTrackIDs.count == 1 ? "1 editable track" : "\(audioTrackIDs.count) editable tracks"
         return "\(audioSummary) · \(trackLabel)"
+    }
+}
+
+/// Every file Reccy owns for one recording. Keeping these paths beside the
+/// recording identity prevents Library cleanup and Editor storage from
+/// disagreeing about which project belongs to which source file.
+struct RecordingArtifacts: Equatable, Sendable {
+    let mediaURL: URL
+
+    var manifestURL: URL {
+        RecordingManifest.sidecarURL(for: mediaURL)
+    }
+
+    var projectPackageURL: URL {
+        mediaURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("Projects", isDirectory: true)
+            .appendingPathComponent(
+                "\(mediaURL.deletingPathExtension().lastPathComponent).reccyproject",
+                isDirectory: true
+            )
+    }
+
+    /// Metadata is moved first and the media last. A failed media operation can
+    /// therefore restore the smaller owned artifacts before surfacing the error.
+    var trashOrder: [URL] {
+        [projectPackageURL, manifestURL, mediaURL]
     }
 }

@@ -261,15 +261,56 @@ struct ReccyTests {
         #expect(playerView.player === player)
     }
 
+    @Test func recordingArtifactsCentralizeMediaMetadataAndEditorOwnership() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Ownership Test.mp4")
+        let artifacts = RecordingArtifacts(mediaURL: mediaURL)
+
+        #expect(artifacts.manifestURL.path == "/tmp/Reccy Ownership Test.reccy.json")
+        #expect(
+            artifacts.projectPackageURL.path
+                == "/tmp/Projects/Reccy Ownership Test.reccyproject"
+        )
+        #expect(
+            artifacts.trashOrder
+                == [artifacts.projectPackageURL, artifacts.manifestURL, mediaURL]
+        )
+    }
+
+    @Test func recordingTrashTransactionRestoresEarlierArtifactsAfterFailure() {
+        struct SimulatedTrashFailure: Error {}
+
+        let project = URL(fileURLWithPath: "/recording/Projects/Test.reccyproject")
+        let manifest = URL(fileURLWithPath: "/recording/Test.reccy.json")
+        let media = URL(fileURLWithPath: "/recording/Test.mp4")
+        var trashed: [URL] = []
+        var restored: [(trashed: URL, original: URL)] = []
+
+        #expect(throws: SimulatedTrashFailure.self) {
+            try RecordingArtifactTrashTransaction.perform(
+                [project, manifest, media],
+                fileExists: { _ in true },
+                trash: { url in
+                    guard url != media else { throw SimulatedTrashFailure() }
+                    trashed.append(url)
+                    return URL(fileURLWithPath: "/trash/\(url.lastPathComponent)")
+                },
+                restore: { trashedURL, originalURL in
+                    restored.append((trashedURL, originalURL))
+                }
+            )
+        }
+
+        #expect(trashed == [project, manifest])
+        #expect(restored.map(\.original) == [manifest, project])
+        #expect(restored.map(\.trashed) == [
+            URL(fileURLWithPath: "/trash/Test.reccy.json"),
+            URL(fileURLWithPath: "/trash/Test.reccyproject"),
+        ])
+    }
+
     @Test @MainActor func unsupportedEditorProjectCanResetWithoutTouchingSourceMedia() async throws {
         let mediaURL = try await makeColorTestVideo()
-        let packageURL = mediaURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("Projects", isDirectory: true)
-            .appendingPathComponent(
-                "\(mediaURL.deletingPathExtension().lastPathComponent).reccyproject",
-                isDirectory: true
-            )
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
         defer {
             try? FileManager.default.removeItem(at: mediaURL)
             try? FileManager.default.removeItem(at: packageURL)
@@ -1084,72 +1125,6 @@ struct ReccyTests {
         #expect(decoded == manifest)
         #expect(decoded.source.region?.cgRect == CGRect(x: 100, y: 80, width: 1280, height: 720))
         #expect(decoded.source.detail.contains("1280 × 720"))
-    }
-
-    @Test func releaseCaptureValidatorInspectsRealMediaAgainstItsManifest() async throws {
-        let mediaURL = try await makeColorTestVideo()
-        let sidecarURL = RecordingManifest.sidecarURL(for: mediaURL)
-        defer {
-            try? FileManager.default.removeItem(at: mediaURL)
-            try? FileManager.default.removeItem(at: sidecarURL)
-        }
-        let manifest = RecordingManifest(
-            createdAt: Date(timeIntervalSince1970: 1_750_000_000),
-            source: CaptureSourceDescriptor(
-                kind: .window,
-                name: "Validator Fixture",
-                applicationName: "Reccy Tests",
-                applicationBundleIdentifier: "com.reccy.mac.tests",
-                windowName: "Fixture",
-                windowIDs: [1],
-                displayID: nil,
-                displayName: nil,
-                region: nil
-            ),
-            width: 64,
-            height: 64,
-            frameRate: 30,
-            recordingPreset: .compatible,
-            videoCodec: .h264,
-            isHDR: false,
-            includesSystemAudio: false,
-            includesMicrophone: false,
-            microphoneName: nil,
-            showsCursor: false,
-            highlightsClicks: false
-        )
-        let manifestEncoder = JSONEncoder()
-        manifestEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try manifestEncoder.encode(manifest).write(to: sidecarURL, options: .atomic)
-
-        let repositoryRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let process = Process()
-        let standardOutput = Pipe()
-        let standardError = Pipe()
-        process.executableURL = repositoryRoot
-            .appendingPathComponent("scripts/validate-capture.sh")
-        process.arguments = [mediaURL.path]
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-        try process.run()
-        process.waitUntilExit()
-
-        let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let error = standardError.fileHandleForReading.readDataToEndOfFile()
-        #expect(
-            process.terminationStatus == 0,
-            Comment(rawValue: String(decoding: error, as: UTF8.self))
-        )
-        let report = try #require(
-            try JSONSerialization.jsonObject(with: output) as? [String: Any]
-        )
-        #expect(report["codec"] as? String == "h264")
-        #expect(report["videoTrackCount"] as? Int == 1)
-        #expect(report["audioTrackCount"] as? Int == 0)
-        #expect(report["width"] as? Int == 64)
-        #expect(report["height"] as? Int == 64)
     }
 
     @Test func recordingPauseTimelineRemovesPausedWallClockTimeAcrossEveryTrack() throws {

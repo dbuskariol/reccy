@@ -78,3 +78,5 @@ Protect the release environment with required reviewers, restrict tag creation, 
 ## Stable development installs
 
 Use `scripts/install-development.sh` for `/Applications/Reccy.app`. It refuses ad-hoc signing, verifies the bundle identity and team, compares the designated code requirement with the installed app, stages the replacement on the same volume, and restores the prior app if the swap fails. This stable identity is what lets macOS retain Direct Screen & System Audio Access and Microphone grants across rebuilds.
+
+Build, test, and release hosts are produced in `~/Library/Developer/Xcode/DerivedData/Reccy` by default. Keeping runnable bundles out of the repository is important when the checkout lives in Documents: otherwise macOS correctly treats launching those changing bundles as protected-folder access. Set `RECCY_DERIVED_DATA_ROOT` only when a build environment needs a different external root.

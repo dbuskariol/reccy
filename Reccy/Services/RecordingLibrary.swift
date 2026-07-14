@@ -84,11 +84,7 @@ final class RecordingLibrary: ObservableObject {
     }
 
     func delete(_ item: RecordingItem) throws {
-        try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
-        let sidecar = RecordingManifest.sidecarURL(for: item.url)
-        if FileManager.default.fileExists(atPath: sidecar.path) {
-            try? FileManager.default.trashItem(at: sidecar, resultingItemURL: nil)
-        }
+        try RecordingArtifactTrashTransaction.perform(item.artifacts.trashOrder)
         recordings.removeAll { $0.id == item.id }
         thumbnails[item.url] = nil
     }
@@ -320,5 +316,69 @@ final class RecordingLibrary: ObservableObject {
             }
             return String(String.UnicodeScalarView(scalars))
         }
+    }
+}
+
+/// Moves a recording's complete owned bundle to Trash with rollback. Finder's
+/// Trash API operates on one URL at a time, so a failure restores every item
+/// already moved instead of leaving media, metadata, and editor state split.
+nonisolated enum RecordingArtifactTrashTransaction {
+    struct IncompleteRollbackError: LocalizedError {
+        let originalError: Error
+        let rollbackErrors: [Error]
+
+        var errorDescription: String? {
+            let rollbackSummary = rollbackErrors
+                .map(\.localizedDescription)
+                .joined(separator: " ")
+            return """
+            Reccy couldn’t move the complete recording to Trash and couldn’t fully restore it. \
+            \(originalError.localizedDescription) \(rollbackSummary)
+            """
+        }
+    }
+
+    static func perform(
+        _ urls: [URL],
+        fileExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) },
+        trash: (URL) throws -> URL = trashWithFileManager,
+        restore: (URL, URL) throws -> Void = restoreWithFileManager
+    ) throws {
+        var moved: [(original: URL, trashed: URL)] = []
+
+        do {
+            for url in urls where fileExists(url) {
+                moved.append((original: url, trashed: try trash(url)))
+            }
+        } catch {
+            var rollbackErrors: [Error] = []
+            for item in moved.reversed() {
+                do {
+                    try restore(item.trashed, item.original)
+                } catch {
+                    rollbackErrors.append(error)
+                }
+            }
+            guard rollbackErrors.isEmpty else {
+                throw IncompleteRollbackError(
+                    originalError: error,
+                    rollbackErrors: rollbackErrors
+                )
+            }
+            throw error
+        }
+    }
+
+    private static func trashWithFileManager(_ url: URL) throws -> URL {
+        var resultingURL: NSURL?
+        try FileManager.default.trashItem(at: url, resultingItemURL: &resultingURL)
+        guard let resultingURL = resultingURL as URL? else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return resultingURL
+    }
+
+    private static func restoreWithFileManager(_ trashedURL: URL, _ originalURL: URL) throws {
+        try FileManager.default.moveItem(at: trashedURL, to: originalURL)
     }
 }
