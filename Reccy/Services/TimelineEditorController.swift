@@ -55,6 +55,7 @@ final class TimelineEditorController: ObservableObject {
 
     private var composition: AVMutableComposition?
     private var compositionVideoComposition: AVVideoComposition?
+    private var compositionAudioMix: AVAudioMix?
     private var voiceoverRecorder: VoiceoverRecorder?
     private var voiceoverStartTime: TimeInterval = 0
     private var projectPackageURL: URL?
@@ -404,16 +405,16 @@ final class TimelineEditorController: ObservableObject {
         try data.write(to: packageURL.appendingPathComponent("project.json"), options: .atomic)
     }
 
-    func export(to destinationURL: URL, preset: ExportPreset) async throws {
-        guard let composition else { throw TimelineEditorError.noProject }
+    func makeExportSource() throws -> ExportSource {
+        guard let project, let composition else { throw TimelineEditorError.noProject }
         guard let snapshot = composition.copy() as? AVComposition else {
             throw TimelineEditorError.noProject
         }
-        try await ExportService().export(
+        return ExportSource(
+            name: project.name,
             asset: snapshot,
-            destinationURL: destinationURL,
-            preset: preset,
-            videoComposition: compositionVideoComposition
+            videoComposition: compositionVideoComposition,
+            audioMix: compositionAudioMix
         )
     }
 
@@ -452,6 +453,7 @@ final class TimelineEditorController: ObservableObject {
 
         composition = build.composition
         compositionVideoComposition = build.videoComposition
+        compositionAudioMix = build.audioMix
         item.seekingWaitsForVideoCompositionRendering = true
         player.replaceCurrentItem(with: item)
         let target = min(playhead, project.duration)

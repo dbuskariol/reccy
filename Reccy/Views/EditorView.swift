@@ -1,11 +1,10 @@
 import AVKit
 import Combine
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct EditorView: View {
     @EnvironmentObject private var editor: TimelineEditorController
-    @State private var isExporting = false
+    @State private var exportSource: ExportSource?
     @State private var exportError: String?
 
     private let playbackTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
@@ -31,6 +30,9 @@ struct EditorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Editor")
         .toolbar { editorToolbar }
+        .sheet(item: $exportSource) { source in
+            ExportSheet(source: source)
+        }
         .onAppear { editor.refreshVoiceoverInputDevices() }
         .onReceive(playbackTimer) { _ in editor.syncPlayheadFromPlayer() }
         .alert("Export Failed", isPresented: Binding(
@@ -499,34 +501,14 @@ struct EditorView: View {
             }
             .disabled(!editor.hasProject)
 
-            Menu {
-                ForEach(ExportPreset.allCases) { preset in
-                    Button(preset.title) { exportProject(preset) }
+            Button("Export", systemImage: "square.and.arrow.up") {
+                do {
+                    exportSource = try editor.makeExportSource()
+                } catch {
+                    exportError = error.localizedDescription
                 }
-            } label: {
-                Label(isExporting ? "Exporting…" : "Export", systemImage: "square.and.arrow.up")
             }
-            .disabled(!editor.hasProject || isExporting)
-        }
-    }
-
-    private func exportProject(_ preset: ExportPreset) {
-        let panel = NSSavePanel()
-        panel.title = "Export Project"
-        panel.nameFieldStringValue = "\(editor.project?.name ?? "Reccy Project") Export.\(preset.fileExtension)"
-        if let type = UTType(filenameExtension: preset.fileExtension) {
-            panel.allowedContentTypes = [type]
-        }
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        isExporting = true
-        Task {
-            do {
-                try await editor.export(to: url, preset: preset)
-            } catch {
-                exportError = error.localizedDescription
-            }
-            isExporting = false
+            .disabled(!editor.hasProject || editor.isRebuilding)
         }
     }
 

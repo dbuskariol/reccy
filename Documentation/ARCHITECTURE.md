@@ -67,7 +67,9 @@ Example.reccyproject/
 
 ## Export
 
-`ExportService` centralizes delivery presets and delegates transcoding to `AVAssetExportSession`. Current outputs include source-resolution and scaled HEVC/H.264 MP4, ProRes 422/4444 MOV, and audio-only M4A. The capture presets and export presets are intentionally distinct: capture prioritizes a reliable real-time encode, while export can prioritize delivery size, compatibility, or finishing quality.
+`ExportService` centralizes delivery presets and delegates transcoding to macOS 26's async `AVAssetExportSession` APIs. Current outputs include source-resolution and scaled HEVC/H.264 MP4, ProRes 422/4444 MOV, and audio-only M4A. Compatibility is determined against the immutable asset snapshot before a preset is enabled. Export progress comes from `states(updateInterval:)`, and cancellation is structured task cancellation.
+
+The service writes into a private, same-volume staging directory and reserves capacity from the framework estimate plus a conservative codec fallback. It validates playability, duration, file size, and required video or audio tracks before atomically replacing the destination, so a failed or canceled export never destroys an existing file. Library and Editor share one `ExportWorkflow` and one native sheet. Timeline exports pass both the video composition and `AVAudioMix`, ensuring gap fills and lane mute/volume decisions match preview. The capture presets and export presets are intentionally distinct: capture prioritizes a reliable real-time encode, while export can prioritize delivery size, compatibility, or finishing quality.
 
 ## UI
 
@@ -83,7 +85,7 @@ Local capture builds use the same identity principle. `Scripts/install-developme
 
 ## Testing strategy
 
-The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, codec bitrate policy, storage preflight, atomic recovery journals, playable interruption recovery, and invalid-file preservation. Installed-app Computer Use QA exercises the main navigation, recovery banner, library transport, timeline seeking, movement, reorder, trimming, gap fills, voiceover sources, and zoom. Remaining release acceptance includes:
+The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, codec bitrate policy, storage preflight, atomic recovery journals, playable interruption recovery, invalid-file preservation, the complete export preset matrix, safe destination replacement, cancellation, and rendered audio mixes. Installed-app Computer Use QA exercises the main navigation, recovery banner, library transport, timeline seeking, movement, reorder, trimming, gap fills, voiceover sources, zoom, and real export progress/completion. Remaining release acceptance includes:
 
 - signed capture runs for every source and audio combination;
 - long-duration A/V drift measurements;

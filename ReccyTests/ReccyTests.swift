@@ -252,6 +252,218 @@ struct ReccyTests {
         #expect(compatible.targetVideoBitRate > efficient.targetVideoBitRate)
     }
 
+    @Test func exportCompatibilityIsDeterminedFromTheActualAsset() async throws {
+        let videoURL = try await makeColorTestVideo()
+        defer { try? FileManager.default.removeItem(at: videoURL) }
+        let source = ExportSource(
+            name: "Video Only",
+            asset: AVURLAsset(url: videoURL),
+            sourceURL: videoURL
+        )
+
+        let presets = await ExportService().compatiblePresets(for: source)
+
+        #expect(presets.contains(.hevc1080))
+        #expect(presets.contains(.h264720))
+        #expect(!presets.contains(.audioM4A))
+    }
+
+    @Test func everyDeliveryPresetExportsAndValidatesRealMedia() async throws {
+        let fixtureURL = try await makeExportFixture()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Export Matrix \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: fixtureURL)
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let source = ExportSource(
+            name: "Export Matrix",
+            asset: AVURLAsset(url: fixtureURL),
+            sourceURL: fixtureURL
+        )
+        let service = ExportService()
+        let compatible = await service.compatiblePresets(for: source)
+        #expect(compatible == Set(ExportPreset.allCases))
+
+        for preset in ExportPreset.allCases {
+            let destination = directory
+                .appendingPathComponent(preset.rawValue)
+                .appendingPathExtension(preset.fileExtension)
+            var phases: [ExportProgressPhase] = []
+            let result = try await service.export(
+                source: source,
+                destinationURL: destination,
+                preset: preset
+            ) { update in
+                phases.append(update.phase)
+            }
+
+            #expect(result.url == destination)
+            #expect(result.fileSize > 0)
+            #expect(result.duration > 2.8)
+            #expect(preset.includesVideo ? result.videoTrackCount > 0 : result.videoTrackCount == 0)
+            #expect(preset.requiresAudio ? result.audioTrackCount > 0 : true)
+            #expect(phases.contains(.preparing))
+            #expect(phases.contains(.validating))
+            #expect(phases.contains(.finishing))
+        }
+
+        let leftovers = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(".reccy-export-") }
+        #expect(leftovers.isEmpty)
+    }
+
+    @Test func exportAtomicallyReplacesAnExistingDestination() async throws {
+        let sourceURL = try await makeColorTestVideo()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Export Replace \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let destination = directory.appendingPathComponent("Existing.mp4")
+        try Data("keep this until success".utf8).write(to: destination)
+        let source = ExportSource(
+            name: "Replace Test",
+            asset: AVURLAsset(url: sourceURL),
+            sourceURL: sourceURL
+        )
+
+        let result = try await ExportService().export(
+            source: source,
+            destinationURL: destination,
+            preset: .h264720
+        )
+
+        #expect(result.url == destination)
+        #expect(result.videoTrackCount == 1)
+        #expect(try Data(contentsOf: destination) != Data("keep this until success".utf8))
+    }
+
+    @Test func timelineAudioMixIsAppliedToTheExport() async throws {
+        let fixtureURL = try await makeExportFixture()
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Muted Export \(UUID().uuidString)")
+            .appendingPathExtension("m4a")
+        defer {
+            try? FileManager.default.removeItem(at: fixtureURL)
+            try? FileManager.default.removeItem(at: destination)
+        }
+
+        let asset = AVURLAsset(url: fixtureURL)
+        let sourceAudioTrack = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let parameters = AVMutableAudioMixInputParameters(track: sourceAudioTrack)
+        parameters.setVolume(0, at: .zero)
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = [parameters]
+        let source = ExportSource(
+            name: "Muted Timeline",
+            asset: asset,
+            sourceURL: fixtureURL,
+            audioMix: mix
+        )
+
+        _ = try await ExportService().export(
+            source: source,
+            destinationURL: destination,
+            preset: .audioM4A
+        )
+
+        let outputAsset = AVURLAsset(url: destination)
+        let outputTrack = try #require(try await outputAsset.loadTracks(withMediaType: .audio).first)
+        let samples = try await WaveformRepository.shared.samples(for: WaveformSliceRequest(
+            sourceURL: destination,
+            sourceTrackID: outputTrack.trackID,
+            sourceStart: 0,
+            duration: 2.5,
+            sampleCount: 180
+        ))
+        #expect(mean(samples) > 0.98)
+    }
+
+    @Test func exportNeverOverwritesItsSourceRecording() async throws {
+        let sourceURL = try await makeColorTestVideo()
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let source = ExportSource(
+            name: "Protected Source",
+            asset: AVURLAsset(url: sourceURL),
+            sourceURL: sourceURL
+        )
+
+        await #expect(throws: ExportServiceError.sourceWouldBeOverwritten) {
+            _ = try await ExportService().export(
+                source: source,
+                destinationURL: sourceURL,
+                preset: .h264720
+            )
+        }
+    }
+
+    @Test func cancelledExportLeavesAnExistingDestinationUntouched() async throws {
+        let sourceURL = try await makeColorTestVideo(frameCount: 1_800)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Export Cancel \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let destination = directory.appendingPathComponent("Existing.mp4")
+        let sentinel = Data("original destination".utf8)
+        try sentinel.write(to: destination)
+        let source = ExportSource(
+            name: "Cancel Test",
+            asset: AVURLAsset(url: sourceURL),
+            sourceURL: sourceURL
+        )
+
+        let (startedStream, startedContinuation) = AsyncStream.makeStream(of: Void.self)
+        var signaledStart = false
+        let task = Task {
+            defer { startedContinuation.finish() }
+            return try await ExportService().export(
+                source: source,
+                destinationURL: destination,
+                preset: .proRes4444
+            ) { update in
+                if update.phase == .exporting, !signaledStart {
+                    signaledStart = true
+                    startedContinuation.yield()
+                }
+            }
+        }
+        let enteredExport = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in startedStream { return true }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(3))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        #expect(enteredExport)
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("A canceled export unexpectedly completed")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            Issue.record("A canceled export returned \(error)")
+        }
+
+        #expect(try Data(contentsOf: destination) == sentinel)
+    }
+
     @Test func storagePreflightScalesWithTheActualCaptureBitrate() {
         let efficient = MultitrackRecordingOptions(
             width: 1920,
@@ -721,7 +933,7 @@ struct ReccyTests {
         )
     }
 
-    private func makeColorTestVideo() async throws -> URL {
+    private func makeColorTestVideo(frameCount: Int = 90) async throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Gap Test \(UUID().uuidString)")
             .appendingPathExtension("mov")
@@ -748,7 +960,7 @@ struct ReccyTests {
         guard writer.startWriting() else { throw writer.error ?? TestMediaError.writerFailed }
         writer.startSession(atSourceTime: .zero)
 
-        for frame in 0..<90 {
+        for frame in 0..<frameCount {
             while !input.isReadyForMoreMediaData {
                 try await Task.sleep(for: .milliseconds(1))
             }
@@ -775,11 +987,56 @@ struct ReccyTests {
         return url
     }
 
+    private func makeExportFixture() async throws -> URL {
+        let videoURL = try await makeColorTestVideo()
+        let audioURL = try makeWaveformTestAudio(duration: 3) { frame, sampleRate in
+            Float(sin(2 * Double.pi * 440 * Double(frame) / sampleRate) * 0.35)
+        }
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Export Fixture \(UUID().uuidString)")
+            .appendingPathExtension("mov")
+        do {
+            let composition = AVMutableComposition()
+            let videoAsset = AVURLAsset(url: videoURL)
+            let videoTrack = try #require(try await videoAsset.loadTracks(withMediaType: .video).first)
+            let videoRange = try await videoTrack.load(.timeRange)
+            let targetVideo = try #require(composition.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ))
+            try targetVideo.insertTimeRange(videoRange, of: videoTrack, at: .zero)
+
+            let audioAsset = AVURLAsset(url: audioURL)
+            let audioTrack = try #require(try await audioAsset.loadTracks(withMediaType: .audio).first)
+            let audioRange = try await audioTrack.load(.timeRange)
+            let targetAudio = try #require(composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ))
+            try targetAudio.insertTimeRange(audioRange, of: audioTrack, at: .zero)
+
+            let exporter = try #require(AVAssetExportSession(
+                asset: composition,
+                presetName: AVAssetExportPresetPassthrough
+            ))
+            try await exporter.export(to: destination, as: .mov)
+            try? FileManager.default.removeItem(at: videoURL)
+            try? FileManager.default.removeItem(at: audioURL)
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: videoURL)
+            try? FileManager.default.removeItem(at: audioURL)
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
     private func makeWaveformTestAudio(
+        duration: TimeInterval = 2,
         sample: (_ frame: Int, _ sampleRate: Double) -> Float
     ) throws -> URL {
         let sampleRate = 48_000.0
-        let frameCount = Int(sampleRate * 2)
+        let frameCount = Int(sampleRate * duration)
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Waveform Test \(UUID().uuidString)")
             .appendingPathExtension("caf")

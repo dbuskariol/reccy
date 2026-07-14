@@ -44,6 +44,8 @@ Delivery presets cover the common cases without turning export into a codec cont
 | Professional finishing | Apple ProRes 422 or ProRes 4444 |
 | Audio handoff | AAC audio-only M4A |
 
+Reccy checks each preset against the actual recording or timeline, estimates working space, shows native live progress, and supports cancellation without touching an existing destination. Every export is rendered into a private staging directory, checked for playable media, expected tracks, duration, and nonzero size, then atomically moved into place. Editor exports use the same workflow and bake the timeline’s mute and volume mix into the result.
+
 ## Native controls everywhere
 
 <table>
@@ -90,7 +92,7 @@ Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repo
 Scripts/verify-ci.sh
 ```
 
-The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, and interrupted-file recovery. Installed-app Computer Use QA covers every workspace plus the real Library transport and timeline interactions.
+The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, and cancellation. Installed-app Computer Use QA covers every workspace plus the real Library transport, timeline interactions, and end-to-end export progress.
 
 ### Permission identity matters
 

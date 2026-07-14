@@ -2,7 +2,6 @@ import AppKit
 import AVKit
 import Combine
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct LibraryView: View {
     @ObservedObject var library: RecordingLibrary
@@ -64,7 +63,11 @@ struct LibraryView: View {
             }
         }
         .sheet(item: $exportItem) { item in
-            ExportSheet(item: item)
+            ExportSheet(source: ExportSource(
+                name: item.name,
+                asset: AVURLAsset(url: item.url),
+                sourceURL: item.url
+            ))
         }
         .alert(
             "Move Recording to Trash?",
@@ -613,100 +616,5 @@ private struct NativeLibraryVideoPlayer: NSViewRepresentable {
 
     static func dismantleNSView(_ view: AVPlayerView, coordinator: Void) {
         view.player = nil
-    }
-}
-
-private struct ExportSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let item: RecordingItem
-
-    @State private var selectedPreset: ExportPreset = .hevc1080
-    @State private var isExporting = false
-    @State private var errorMessage: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Export Recording")
-                    .font(.title2.weight(.bold))
-                Text(item.name)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            List(ExportPreset.allCases, selection: $selectedPreset) { preset in
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(preset.title)
-                            .font(.headline)
-                        Text(preset.detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if selectedPreset == preset {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.tint)
-                    }
-                }
-                .contentShape(Rectangle())
-                .tag(preset)
-            }
-            .frame(height: 330)
-
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-            }
-
-            HStack {
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Export…") { chooseDestinationAndExport() }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(isExporting)
-            }
-        }
-        .padding(24)
-        .frame(width: 560)
-        .overlay {
-            if isExporting {
-                ZStack {
-                    Color.black.opacity(0.08)
-                    ProgressView("Exporting…")
-                        .padding(20)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                }
-            }
-        }
-    }
-
-    private func chooseDestinationAndExport() {
-        let panel = NSSavePanel()
-        panel.title = "Export Recording"
-        panel.nameFieldStringValue = "\(item.name) Export.\(selectedPreset.fileExtension)"
-        if let type = UTType(filenameExtension: selectedPreset.fileExtension) {
-            panel.allowedContentTypes = [type]
-        }
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-
-        isExporting = true
-        errorMessage = nil
-        Task {
-            do {
-                try await ExportService().export(
-                    sourceURL: item.url,
-                    destinationURL: destination,
-                    preset: selectedPreset
-                )
-                dismiss()
-            } catch {
-                errorMessage = error.localizedDescription
-                isExporting = false
-            }
-        }
     }
 }
