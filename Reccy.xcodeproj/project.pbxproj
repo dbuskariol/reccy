@@ -245,7 +245,7 @@
 			repositoryURL = "https://github.com/sindresorhus/KeyboardShortcuts";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 2.4.0;
+				minimumVersion = 3.0.1;
 			};
 		};
 		0A1000000000000000000066 /* XCRemoteSwiftPackageReference "DSWaveformImage" */ = {

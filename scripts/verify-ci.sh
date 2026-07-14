@@ -13,6 +13,7 @@ done < <(/usr/bin/find "$ROOT_DIR/scripts" -type f -name '*.sh' -print0)
 /usr/bin/plutil -lint "$ROOT_DIR/Configuration/Reccy-Info.plist" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Reccy/Reccy.entitlements" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Reccy/ReccyDebug.entitlements" >/dev/null
+/usr/bin/plutil -lint "$ROOT_DIR/Reccy/PrivacyInfo.xcprivacy" >/dev/null
 /usr/bin/git -C "$ROOT_DIR" diff --check
 reccy_assert_release_metadata "$ROOT_DIR" >/dev/null
 
@@ -43,8 +44,18 @@ INFO="$UNSIGNED_APP/Contents/Info.plist"
   || reccy_fail 'CI release has an unexpected bundle identifier'
 [[ "$(reccy_plist_value LSMinimumSystemVersion "$INFO")" == "$RECCY_EXPECTED_MINIMUM_SYSTEM" ]] \
   || reccy_fail 'CI release has an unexpected deployment target'
+[[ "$(reccy_plist_value SUFeedURL "$INFO")" == "$RECCY_EXPECTED_FEED_URL" ]] \
+  || reccy_fail 'CI release has an unexpected Sparkle feed URL'
 [[ -f "$UNSIGNED_APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ]] \
   || reccy_fail 'CI release is missing Sparkle'
+PRIVACY_MANIFEST="$UNSIGNED_APP/Contents/Resources/PrivacyInfo.xcprivacy"
+[[ -f "$PRIVACY_MANIFEST" ]] || reccy_fail 'CI release is missing its privacy manifest'
+/usr/bin/plutil -lint "$PRIVACY_MANIFEST" >/dev/null \
+  || reccy_fail 'CI release contains an invalid privacy manifest'
+[[ "$(reccy_plist_value NSPrivacyTracking "$PRIVACY_MANIFEST")" == "false" ]] \
+  || reccy_fail 'CI release unexpectedly declares tracking'
+[[ "$(/usr/bin/plutil -extract NSPrivacyCollectedDataTypes raw -o - "$PRIVACY_MANIFEST")" == "0" ]] \
+  || reccy_fail 'CI release unexpectedly declares collected data'
 
 ARCHITECTURES="$(/usr/bin/lipo -archs "$UNSIGNED_APP/Contents/MacOS/Reccy")"
 for architecture in "${RECCY_EXPECTED_ARCHITECTURES[@]}"; do

@@ -14,7 +14,6 @@ final class RecordingLibrary: ObservableObject {
 
     init(directoryURL: URL) {
         self.directoryURL = directoryURL
-        ensureDirectoryExists()
         refresh()
         recoverInterruptedRecordingIfNeeded()
     }
@@ -25,14 +24,11 @@ final class RecordingLibrary: ObservableObject {
         recoveryTask = nil
         isRecoveringInterruptedRecording = false
         directoryURL = url
-        ensureDirectoryExists()
         refresh()
         recoverInterruptedRecordingIfNeeded()
     }
 
     func refresh() {
-        ensureDirectoryExists()
-
         let keys: Set<URLResourceKey> = [
             .creationDateKey,
             .contentModificationDateKey,
@@ -40,11 +36,25 @@ final class RecordingLibrary: ObservableObject {
             .isRegularFileKey,
         ]
 
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: directoryURL,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        )) ?? []
+        let urls: [URL]
+        do {
+            try ensureDirectoryExists()
+            urls = try FileManager.default.contentsOfDirectory(
+                at: directoryURL,
+                includingPropertiesForKeys: Array(keys),
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            recordings = []
+            thumbnails = [:]
+            presentNotice(
+                kind: .warning,
+                title: "Recording Folder Is Unavailable",
+                message: error.localizedDescription,
+                fileURL: directoryURL
+            )
+            return
+        }
 
         recordings = urls.compactMap { url in
             guard ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased()) else {
@@ -201,8 +211,8 @@ final class RecordingLibrary: ObservableObject {
         thumbnails[item.url]
     }
 
-    private func ensureDirectoryExists() {
-        try? FileManager.default.createDirectory(
+    private func ensureDirectoryExists() throws {
+        try FileManager.default.createDirectory(
             at: directoryURL,
             withIntermediateDirectories: true
         )

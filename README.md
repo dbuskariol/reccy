@@ -93,7 +93,7 @@ Requirements:
 - Xcode 26.5 or later
 - Swift 6 with complete strict-concurrency checking
 
-Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repository's CI-equivalent verification builds Debug, runs the automated suite, validates configuration and scripts, and builds Release:
+Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repository's CI-equivalent verification builds Debug, runs the automated suite, validates configuration and scripts, and builds Release. GitHub executes the same gate natively on both the `macos-26` Apple-silicon runner and the `macos-26-intel` Intel runner:
 
 ```sh
 scripts/verify-ci.sh
@@ -119,7 +119,7 @@ Release automation builds an `.xcarchive`, validates a timestamped universal Dev
 
 ## Privacy
 
-Capture, editing, projects, thumbnails, and exports stay on the Mac. Reccy only receives the display, application, window, or region approved through macOS. Its only network surface is the signed Sparkle update feed.
+Capture, editing, projects, thumbnails, and exports stay on the Mac. Reccy only receives the display, application, window, or region approved through macOS. Its bundled privacy manifest declares no tracking or collected data; its only network surface is the signed Sparkle update feed.
 
 ## Status
 

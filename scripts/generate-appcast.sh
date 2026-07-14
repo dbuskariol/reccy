@@ -7,7 +7,7 @@ source "$ROOT_DIR/scripts/lib/reccy-release.sh"
 DERIVED_DATA="${RECCY_DERIVED_DATA:-$ROOT_DIR/.build/ReleaseDerivedData}"
 UPDATES_DIR="$ROOT_DIR/dist/updates"
 APP="$ROOT_DIR/dist/Reccy.app"
-REPOSITORY="${RECCY_GITHUB_REPOSITORY:-dbuskariol/reccy}"
+REPOSITORY="$RECCY_EXPECTED_GITHUB_REPOSITORY"
 DOWNLOAD_PREFIX="https://github.com/$REPOSITORY/releases/latest/download/"
 
 [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \

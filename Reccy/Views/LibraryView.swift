@@ -79,9 +79,18 @@ struct LibraryView: View {
         ) { item in
             Button("Cancel", role: .cancel) { pendingDelete = nil }
             Button("Move to Trash", role: .destructive) {
-                try? library.delete(item)
                 pendingDelete = nil
-                selectFirstRecording()
+                do {
+                    try library.delete(item)
+                    selectFirstRecording()
+                } catch {
+                    library.presentNotice(
+                        kind: .warning,
+                        title: "Recording Couldn’t Be Moved to Trash",
+                        message: error.localizedDescription,
+                        fileURL: item.url
+                    )
+                }
             }
         } message: { item in
             Text("\(item.name) and its Reccy metadata will be moved to the Trash.")

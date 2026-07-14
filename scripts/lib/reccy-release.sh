@@ -12,6 +12,8 @@ readonly RECCY_RELEASE_LIB_LOADED=1
 readonly RECCY_EXPECTED_BUNDLE_ID="com.reccy.mac"
 readonly RECCY_EXPECTED_MINIMUM_SYSTEM="26.0"
 readonly RECCY_EXPECTED_ARCHITECTURES=(arm64 x86_64)
+readonly RECCY_EXPECTED_GITHUB_REPOSITORY="${RECCY_GITHUB_REPOSITORY:-dbuskariol/reccy}"
+readonly RECCY_EXPECTED_FEED_URL="https://github.com/$RECCY_EXPECTED_GITHUB_REPOSITORY/releases/latest/download/appcast.xml"
 
 reccy_fail() {
   printf 'Reccy release error: %s\n' "$1" >&2
@@ -151,10 +153,20 @@ reccy_assert_release_app() {
 
   [[ -f "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ]] \
     || reccy_fail 'the embedded Sparkle framework is missing'
+  local privacy_manifest="$app/Contents/Resources/PrivacyInfo.xcprivacy"
+  [[ -f "$privacy_manifest" ]] || reccy_fail 'the app privacy manifest is missing'
+  /usr/bin/plutil -lint "$privacy_manifest" >/dev/null \
+    || reccy_fail 'the app privacy manifest is invalid'
+  [[ "$(reccy_plist_value NSPrivacyTracking "$privacy_manifest")" == "false" ]] \
+    || reccy_fail 'the app privacy manifest unexpectedly declares tracking'
+  [[ "$(/usr/bin/plutil -extract NSPrivacyCollectedDataTypes raw -o - "$privacy_manifest")" == "0" ]] \
+    || reccy_fail 'the app privacy manifest unexpectedly declares collected data'
+  [[ "$(/usr/bin/plutil -extract NSPrivacyTrackingDomains raw -o - "$privacy_manifest")" == "0" ]] \
+    || reccy_fail 'the app privacy manifest unexpectedly declares tracking domains'
   local feed_url public_key
   feed_url="$(reccy_plist_value SUFeedURL "$info")"
   public_key="$(reccy_plist_value SUPublicEDKey "$info")"
-  [[ "$feed_url" =~ ^https://github\.com/[^/]+/[^/]+/releases/latest/download/appcast\.xml$ ]] \
+  [[ "$feed_url" == "$RECCY_EXPECTED_FEED_URL" ]] \
     || reccy_fail "unexpected Sparkle feed URL: ${feed_url:-missing}"
   [[ "$public_key" =~ ^[A-Za-z0-9+/=]{40,}$ ]] \
     || reccy_fail 'the Sparkle EdDSA public key is invalid'

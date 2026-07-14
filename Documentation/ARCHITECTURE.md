@@ -87,14 +87,14 @@ Local capture builds use the same identity principle. `scripts/install-developme
 
 ## Testing strategy
 
-The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, codec bitrate policy, storage preflight, cross-process recording/recovery exclusion, atomic recovery journals, playable interruption recovery, invalid-file preservation, the complete export preset matrix, safe destination replacement, cancellation, and rendered audio mixes. Installed-app Computer Use QA exercises the main navigation, recovery banner, library transport, timeline seeking, movement, reorder, trimming, gap fills, VoiceOver custom actions, keyboard nudging, voiceover sources, zoom, menu-bar pause/resume/stop, and real export progress/completion. Remaining release acceptance includes:
+The automated suite covers Retina-aware resolution capping, no-upscale behavior, portrait output bounds, synchronized and independent splitting, ripple deletion, independent and linked movement, magnetic reorder, snapping, trimming, pause-timeline removal, waveform source ranges, per-gap fill identity, held-frame composition, codec bitrate policy, storage preflight, cross-process recording/recovery exclusion, atomic recovery journals, playable interruption recovery, invalid-file preservation, the complete export preset matrix, safe destination replacement, cancellation, and rendered audio mixes. GitHub runs that gate natively on both its macOS 26 Apple-silicon and Intel runners. Installed-app Computer Use QA exercises the main navigation, recovery banner, library transport, timeline seeking, movement, reorder, trimming, gap fills, VoiceOver custom actions, keyboard nudging, voiceover sources, zoom, menu-bar pause/resume/stop, and real export progress/completion. Remaining release acceptance includes:
 
 - signed capture runs for every source and audio combination;
 - long-duration A/V drift measurements;
 - HDR metadata and playback validation on SDR and HDR displays;
 - encoder fallback under sustained capture load;
 - multichannel and external microphone fixtures;
-- export matrix tests across Intel and Apple silicon;
+- signed export acceptance across Intel and Apple-silicon hardware;
 - signed picker automation and a complete spoken VoiceOver acceptance pass.
 
 ## Primary Apple technologies

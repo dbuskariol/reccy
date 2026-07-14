@@ -8,7 +8,7 @@ APP="${1:-$ROOT_DIR/dist/Reccy.app}"
 UPDATES_DIR="${2:-$ROOT_DIR/dist/updates}"
 APPCAST="$UPDATES_DIR/appcast.xml"
 DERIVED_DATA="${RECCY_DERIVED_DATA:-$ROOT_DIR/.build/ReleaseDerivedData}"
-REPOSITORY="${RECCY_GITHUB_REPOSITORY:-dbuskariol/reccy}"
+REPOSITORY="$RECCY_EXPECTED_GITHUB_REPOSITORY"
 DOWNLOAD_PREFIX="https://github.com/$REPOSITORY/releases/latest/download/"
 
 fail() {

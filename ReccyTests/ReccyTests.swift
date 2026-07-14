@@ -912,6 +912,22 @@ struct ReccyTests {
         #expect(remainingJournal == nil)
     }
 
+    @Test @MainActor func librarySurfacesAnUnavailableRecordingDirectory() throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Invalid Library \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: container) }
+
+        let fileURL = container.appendingPathComponent("Not a Folder")
+        try Data("ordinary file".utf8).write(to: fileURL)
+        let library = RecordingLibrary(directoryURL: fileURL)
+
+        #expect(library.recordings.isEmpty)
+        #expect(library.recoveryNotice?.kind == .warning)
+        #expect(library.recoveryNotice?.title == "Recording Folder Is Unavailable")
+        #expect(library.recoveryNotice?.fileURL == fileURL)
+    }
+
     @Test func interruptedInvalidMediaIsPreservedForInspection() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Invalid Recovery \(UUID().uuidString)", isDirectory: true)
