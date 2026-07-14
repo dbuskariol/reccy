@@ -199,8 +199,11 @@ struct LibraryView: View {
 
     private func recordingRow(_ item: RecordingItem) -> some View {
         HStack(spacing: 11) {
-            recordingThumbnail(item)
-                .frame(width: 96, height: 54)
+            RecordingThumbnail(
+                image: library.thumbnail(for: item),
+                size: CGSize(width: 96, height: 54),
+                showsPlayIndicator: true
+            )
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(item.name)
@@ -223,37 +226,6 @@ struct LibraryView: View {
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
-    }
-
-    private func recordingThumbnail(_ item: RecordingItem) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(.quaternary)
-            if let image = library.thumbnail(for: item) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Image(systemName: "play.rectangle.fill")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-            }
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.28)],
-                startPoint: .center,
-                endPoint: .bottom
-            )
-            Image(systemName: "play.fill")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.white)
-                .padding(6)
-                .background(.black.opacity(0.58), in: Circle())
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(.separator.opacity(0.45), lineWidth: 0.5)
-        }
     }
 
     private func compactBadge(_ text: String, systemImage: String) -> some View {

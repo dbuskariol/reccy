@@ -278,9 +278,6 @@ struct MenuBarRecorderView: View {
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(coordinator.liveStorageStatus)
                         .font(.subheadline.monospacedDigit().weight(.medium))
-                    Text("written")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -399,8 +396,11 @@ struct MenuBarRecorderView: View {
                         openEditor(item)
                     } label: {
                         HStack(spacing: 9) {
-                            menuThumbnail(item)
-                                .frame(width: 54, height: 32)
+                            RecordingThumbnail(
+                                image: coordinator.library.thumbnail(for: item),
+                                size: CGSize(width: 54, height: 32),
+                                cornerRadius: 5
+                            )
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.name)
                                     .font(.subheadline.weight(.medium))
@@ -423,23 +423,6 @@ struct MenuBarRecorderView: View {
             }
             .background(.quaternary.opacity(0.38), in: RoundedRectangle(cornerRadius: 10))
         }
-    }
-
-    private func menuThumbnail(_ item: RecordingItem) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(.quaternary)
-            if let image = coordinator.library.thumbnail(for: item) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Image(systemName: "play.rectangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 
     private var footer: some View {
