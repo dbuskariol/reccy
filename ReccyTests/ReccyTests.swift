@@ -2218,15 +2218,33 @@ struct ReccyTests {
             videoComposition: nil,
             normalizedPoint: CGPoint(x: 0.5, y: 0.14)
         )
+        let duringBackground = try await renderedColor(
+            at: 0.75,
+            composition: exportedAsset,
+            videoComposition: nil,
+            normalizedPoint: CGPoint(x: 0.5, y: 0.5)
+        )
         let afterCaption = try await renderedColor(
             at: 1.75,
             composition: exportedAsset,
             videoComposition: nil,
             normalizedPoint: CGPoint(x: 0.5, y: 0.14)
         )
+        let afterBackground = try await renderedColor(
+            at: 1.75,
+            composition: exportedAsset,
+            videoComposition: nil,
+            normalizedPoint: CGPoint(x: 0.5, y: 0.5)
+        )
 
-        #expect(!duringCaption.isClose(to: background, tolerance: 18))
-        #expect(afterCaption.isClose(to: background, tolerance: 18))
+        #expect(
+            !duringCaption.isClose(to: duringBackground, tolerance: 18),
+            "Caption region \(duringCaption) should differ from its encoded frame background \(duringBackground)"
+        )
+        #expect(
+            afterCaption.isClose(to: afterBackground, tolerance: 18),
+            "Expired caption region \(afterCaption) should match its encoded frame background \(afterBackground)"
+        )
     }
 
     @Test @MainActor func composedPreviewKeepsVideoInstructionsBoundToTheCanonicalAsset() async throws {
