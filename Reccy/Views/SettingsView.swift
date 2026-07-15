@@ -519,9 +519,13 @@ struct SettingsView: View {
         guard let record = transcription.installedWhisperModels.first(where: {
             $0.id == transcription.whisperModelIdentifier
         }) else {
-            return transcription.whisperModelIdentifier == WhisperModelManager.recommendedModel
-                ? "Recommended for maximum accuracy. Downloaded only when requested."
-                : "Downloaded only when requested."
+            if transcription.whisperModelIdentifier == WhisperModelManager.defaultModel {
+                return "Fastest model and the default for new recordings. Downloaded only when requested."
+            }
+            if transcription.whisperModelIdentifier == WhisperModelManager.recommendedModel {
+                return "Recommended for maximum multilingual accuracy. Downloaded only when requested."
+            }
+            return "Downloaded only when requested."
         }
         return "Installed · \(ByteCountFormatter.string(fromByteCount: record.byteCount, countStyle: .file))"
     }

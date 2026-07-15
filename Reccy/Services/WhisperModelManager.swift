@@ -9,6 +9,10 @@ nonisolated struct WhisperModelRecord: Codable, Equatable, Identifiable, Sendabl
 }
 
 actor WhisperModelManager {
+    /// Product default: Argmax documents `tiny` as WhisperKit's fastest model.
+    /// Keep the accuracy recommendation separate so UI and migrations do not
+    /// conflate first-result latency with maximum multilingual accuracy.
+    static let defaultModel = "openai_whisper-tiny"
     static let recommendedModel = "openai_whisper-large-v3-v20240930_626MB"
     static let compactModel = "openai_whisper-small"
 
@@ -116,12 +120,13 @@ actor WhisperModelManager {
     }
 
     private nonisolated static func modelRank(_ identifier: String) -> Int {
-        if identifier == recommendedModel { return 0 }
-        if identifier.contains("large-v3-v20240930") { return 1 }
-        if identifier.contains("large-v3") { return 2 }
+        if identifier == defaultModel { return 0 }
+        if identifier.contains("tiny") { return 1 }
+        if identifier.contains("base") { return 2 }
         if identifier.contains("small") { return 3 }
-        if identifier.contains("base") { return 4 }
-        if identifier.contains("tiny") { return 5 }
-        return 6
+        if identifier == recommendedModel { return 4 }
+        if identifier.contains("large-v3-v20240930") { return 5 }
+        if identifier.contains("large-v3") { return 6 }
+        return 7
     }
 }
