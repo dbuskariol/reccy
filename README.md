@@ -1,6 +1,6 @@
 # Reccy
 
-Reccy is a native screen recorder and non-destructive multitrack editor for macOS 26. It combines ScreenCaptureKit capture, separate system and microphone audio, live monitoring, a first-class timeline, compact exports, and fast menu-bar controls in one focused Mac app.
+Reccy is a native screen recorder and non-destructive multitrack editor for macOS 26. It combines ScreenCaptureKit capture, an optional native camera track, separate system and microphone audio, live monitoring, a first-class timeline, compact exports, and fast menu-bar controls in one focused Mac app.
 
 ![Reccy capture workspace](Documentation/Screenshots/capture-workspace.jpg)
 
@@ -8,6 +8,7 @@ Reccy is a native screen recorder and non-destructive multitrack editor for macO
 
 Choose an entire display, every window from one application, or one specific window through Apple's private system picker. Portion capture uses a direct QuickTime-style overlay across connected displays and a one-time approval that macOS describes as bypassing the private window picker. Reccy keeps the approved source obvious in the workspace and draws a local capture boundary that never appears in the recorded video.
 
+- Record a chosen built-in, external, Continuity, or Desk View camera as a separate editable video track.
 - Record system audio and a chosen microphone as separate editable tracks.
 - Monitor the live picture, elapsed time, safe-write status, and detailed audio levels from another display.
 - Show or hide the pointer, highlight clicks, exclude Reccy's audio, and pause without leaving dead time in the result.
@@ -20,7 +21,7 @@ Choose an entire display, every window from one application, or one specific win
 
 ![Reccy live recording monitor](Documentation/Screenshots/live-monitor.jpg)
 
-Monitor shows the exact incoming picture from the writer's shared ScreenCaptureKit surface, elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Pause, resume, or stop from this window while it remains open on another display.
+Monitor shows the exact incoming screen and camera pictures feeding the writer, elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Pause, resume, or stop from this window while it remains open on another display.
 
 ## Transcribe privately on device
 
@@ -37,11 +38,12 @@ Transcript sidecars are written atomically beside their recordings as `.reccytra
 
 ![Reccy multitrack timeline](Documentation/Screenshots/editor-timeline.jpg)
 
-Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen video, system audio, microphone audio, and voiceover takes stay independently movable, trimmable, splittable, mutable, and removable.
+Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen video, camera video, system audio, microphone audio, and voiceover takes stay independent, editable, and removable.
 
 - Click or drag the ruler to seek; drag clips to move them with live preview updates.
 - Reorder clips magnetically, snap to useful boundaries, or link matching audio and video when desired.
 - Trim either edge, split one clip, split every lane, delete independently, or close time across the project.
+- Move and resize the camera directly over the player; its normalized layout is reused by preview and export.
 - Record voiceover at the playhead with an explicit input-device picker.
 - Read detailed cached waveforms for recorded audio, timeline clips, live monitoring, and library playback.
 - Select each empty video segment independently and render it as black, the previous held frame, or the next held frame.
@@ -51,7 +53,7 @@ Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen 
 
 ![Reccy recording library](Documentation/Screenshots/library.jpg)
 
-The Library combines a compact recording browser with a native preview, waveform scrubber, source and application metadata, audio-track details, resolution, frame rate, codec, dynamic range, pointer settings, and direct Edit, Export, Share, Reveal, and Trash actions.
+The Library combines a compact recording browser with a native preview, waveform scrubber, source and application metadata, camera and audio-track details, resolution, frame rate, codec, dynamic range, pointer settings, and direct Edit, Export, Share, Reveal, and Trash actions.
 
 Delivery presets cover the common cases without turning export into a codec control panel:
 
@@ -86,16 +88,16 @@ Reccy intentionally targets macOS 26 only. There are no availability branches or
 | Layer | Technology |
 | --- | --- |
 | Source approval | `SCContentSharingPicker`; direct multi-display portion overlay; `SCContentFilter` |
-| Capture | `SCStream` video, system-audio, and microphone sample buffers |
+| Capture | `SCStream` screen/system-audio/microphone plus native `AVCaptureSession` camera frames |
 | Recording | `AVAssetWriter`, AAC, HEVC/H.264, VideoToolbox color metadata |
-| Live monitor | Apple’s ScreenCaptureKit IOSurface presentation path with latest-frame coalescing, no second stream, and no pixel copy |
-| Timeline | Serializable project model materialized as `AVMutableComposition` |
-| Playback and export | AVKit, `AVAudioMix`, and `AVAssetExportSession` |
+| Live monitor | IOSurface-backed screen and camera presentation with latest-frame coalescing and no extra capture sessions |
+| Timeline | Serializable project model materialized as `AVMutableComposition` and `AVVideoComposition` |
+| Playback and export | AVKit, `AVVideoComposition`, `AVAudioMix`, and `AVAssetExportSession` |
 | Transcription | SpeechAnalyzer; WhisperKit 1.0; source-track `.reccytranscript` sidecars |
 | Waveforms | Shared Reccy rendering backed by [DSWaveformImage](https://github.com/dmrschmidt/DSWaveformImage) |
 | Distribution | Universal hardened runtime, Developer ID, notarization, Sparkle 2 |
 
-The custom writer is deliberate: ScreenCaptureKit's convenient single-file recording path does not provide the track-level control Reccy needs to keep system audio and microphone audio independently editable. Read [Documentation/ARCHITECTURE.md](Documentation/ARCHITECTURE.md) for the media pipeline, project format, privacy boundary, and engineering decisions.
+The custom writer is deliberate: ScreenCaptureKit's convenient single-file recording path does not provide the track-level control Reccy needs to keep screen, camera, system audio, and microphone independently editable. Read [Documentation/ARCHITECTURE.md](Documentation/ARCHITECTURE.md) for the media pipeline, project format, privacy boundary, and engineering decisions.
 
 ## Build and verify
 
@@ -111,11 +113,11 @@ Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repo
 scripts/verify-ci.sh
 ```
 
-The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, cancellation, transcript persistence/projection/export, exact-track PCM extraction, and real post-recording plus live inference with every installed transcription engine. Model-backed tests skip cleanly on machines where the corresponding optional language asset or Whisper model is not installed. Installed-app Computer Use QA covers every workspace plus the real Library transport, timeline interactions, transcript search and seeking, accessible editor actions, menu-bar pause/resume/stop, and end-to-end export progress.
+The current suite exercises resolution policy, portrait and Retina sources, camera settings compatibility, independent video-track composition, camera layout rendering, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, cancellation, transcript persistence/projection/export, exact-track PCM extraction, and real post-recording plus live inference with every installed transcription engine. Model-backed tests skip cleanly on machines where the corresponding optional language asset or Whisper model is not installed. Installed-app Computer Use QA covers every workspace plus the real Library transport, timeline interactions, transcript search and seeking, accessible editor actions, menu-bar pause/resume/stop, and end-to-end export progress.
 
 ### Permission identity matters
 
-macOS privacy grants are tied to the installed app's signing identity. Ad-hoc development builds are suitable for compilation, unit tests, and interface QA, but rebuilding them can invalidate Direct Screen & System Audio Access or Microphone grants. Reliable end-to-end capture testing requires a stable Apple Development or Developer ID signature.
+macOS privacy grants are tied to the installed app's signing identity. Ad-hoc development builds are suitable for compilation, unit tests, and interface QA, but rebuilding them can invalidate Direct Screen & System Audio Access, Camera, or Microphone grants. Reliable end-to-end capture testing requires a stable Apple Development or Developer ID signature.
 
 After adding an Apple Account and Apple Development certificate in Xcode, use the guarded development installer:
 

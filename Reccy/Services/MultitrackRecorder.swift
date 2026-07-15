@@ -13,6 +13,8 @@ nonisolated struct MultitrackRecordingOptions: Sendable {
     let includesSystemAudio: Bool
     let includesMicrophone: Bool
     let isHDR: Bool
+    var includesCamera = false
+    var cameraDeviceID: String? = nil
 
     var encodingPlan: CaptureEncodingPlan {
         CaptureEncodingPlan(preset: preset, isHDR: isHDR)
@@ -28,6 +30,8 @@ nonisolated struct MultitrackRecordingOptions: Sendable {
         }
         return min(max(Int(pixelsPerSecond * bitsPerPixel), 2_000_000), 60_000_000)
     }
+
+    var targetCameraBitRate: Int { 5_000_000 }
 }
 
 /// Resolves user intent into one internally consistent writer configuration.
@@ -53,9 +57,11 @@ enum MultitrackRecorderError: LocalizedError {
     case unsupportedVideoSettings(RecordingVideoCodec)
     case unsupportedSystemAudioSettings
     case unsupportedMicrophoneSettings
+    case unsupportedCameraSettings
     case cannotAddVideoInput
     case cannotAddSystemAudioInput
     case cannotAddMicrophoneInput
+    case cannotAddCameraInput
     case writerCouldNotStart(Error?)
     case writerFailed(Error?)
     case noVideoFrames
@@ -69,9 +75,12 @@ enum MultitrackRecorderError: LocalizedError {
             "This Mac can’t create the selected system-audio track in this recording container."
         case .unsupportedMicrophoneSettings:
             "This Mac can’t create the selected microphone track in this recording container."
+        case .unsupportedCameraSettings:
+            "This Mac can’t create a camera track in the selected recording container."
         case .cannotAddVideoInput: "The video encoder couldn’t be configured for this recording."
         case .cannotAddSystemAudioInput: "The system-audio encoder couldn’t be configured."
         case .cannotAddMicrophoneInput: "The microphone encoder couldn’t be configured."
+        case .cannotAddCameraInput: "The camera video encoder couldn’t be configured."
         case .writerCouldNotStart: "The recording encoder couldn’t start."
         case .writerFailed: "The recording encoder stopped unexpectedly. Reccy preserved any recoverable media."
         case .noVideoFrames: "No complete video frames were received from the selected source."
@@ -143,6 +152,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     var onStarted: (@Sendable () -> Void)?
     var onFailure: (@Sendable (Error) -> Void)?
     var onVideoFrame: (@Sendable (CMSampleBuffer) -> Void)?
+    var onCameraFrame: (@Sendable (CMSampleBuffer) -> Void)?
+    var onCameraPrepared: (@Sendable (WebcamCaptureFormat) -> Void)?
     var onAudioPacket: (@Sendable (TranscriptTrackRole, TimedAudioBuffer) -> Void)?
 
     private let sampleQueue = DispatchQueue(
@@ -156,15 +167,18 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     private let streamLifecycleLock = NSLock()
 
     private var stream: SCStream?
+    private var webcamSession: WebcamCaptureSession?
     private var isStreamStartInFlight = false
     private var isStreamCancellationRequested = false
     private var streamStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
+    private var cameraInput: AVAssetWriterInput?
     private var systemAudioInput: AVAssetWriterInput?
     private var microphoneInput: AVAssetWriterInput?
     private var pendingSystemAudio: [CMSampleBuffer] = []
     private var pendingMicrophone: [CMSampleBuffer] = []
+    private var pendingCamera: [CMSampleBuffer] = []
     private var sessionStartTime: CMTime?
     private var latestPresentationTime: CMTime = .invalid
     private var latestPresentationEndTime: CMTime = .invalid
@@ -208,9 +222,30 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         options: MultitrackRecordingOptions
     ) async throws {
         try Task.checkCancellation()
-        try configureWriter(outputURL: outputURL, options: options)
+        var startingWebcam: WebcamCaptureSession?
+        var cameraFormat: WebcamCaptureFormat?
+        if options.includesCamera {
+            let webcam = WebcamCaptureSession(
+                sampleQueue: sampleQueue,
+                sampleHandler: { [weak self] sampleBuffer in
+                    self?.handleCamera(sampleBuffer)
+                }
+            )
+            cameraFormat = try await webcam.prepare(
+                deviceID: options.cameraDeviceID,
+                fileType: options.encodingPlan.fileType
+            )
+            startingWebcam = webcam
+        }
+        try configureWriter(outputURL: outputURL, options: options, cameraFormat: cameraFormat)
         var startingStream: SCStream?
         do {
+            try Task.checkCancellation()
+            if let startingWebcam, let cameraFormat {
+                webcamSession = startingWebcam
+                onCameraPrepared?(cameraFormat)
+                try await startingWebcam.start()
+            }
             try Task.checkCancellation()
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             startingStream = stream
@@ -235,6 +270,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             if let startingStream {
                 completeFailedStreamStart(startingStream)
             }
+            await startingWebcam?.stop()
+            webcamSession = nil
             cancelWriter()
             throw error
         }
@@ -246,12 +283,16 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             throw MultitrackRecorderError.noVideoFrames
         }
         if request.startWasInFlight {
+            await webcamSession?.stop()
+            webcamSession = nil
             try? await stream.stopCapture()
             await waitForStreamStartToSettle()
             try await finishWriting()
             return
         }
         do {
+            await webcamSession?.stop()
+            webcamSession = nil
             try await stream.stopCapture()
             clearStreamIfOwned(stream)
             try await finishWriting()
@@ -277,6 +318,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
     func cancel() async {
         let cancellation = requestStreamCancellation()
+        await webcamSession?.stop()
+        webcamSession = nil
         try? await cancellation.stream?.stopCapture()
         if !cancellation.startWasInFlight, let stream = cancellation.stream {
             clearStreamIfOwned(stream)
@@ -390,7 +433,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
     private func configureWriter(
         outputURL: URL,
-        options: MultitrackRecordingOptions
+        options: MultitrackRecordingOptions,
+        cameraFormat: WebcamCaptureFormat?
     ) throws {
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: options.preset.fileType)
@@ -412,6 +456,23 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             throw MultitrackRecorderError.cannotAddVideoInput
         }
         writer.add(videoInput)
+
+        var cameraInput: AVAssetWriterInput?
+        if let cameraFormat {
+            let settings = Self.cameraVideoSettings(format: cameraFormat, options: options)
+            guard writer.canApply(outputSettings: settings, forMediaType: .video) else {
+                throw MultitrackRecorderError.unsupportedCameraSettings
+            }
+            let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+            input.expectsMediaDataInRealTime = true
+            input.mediaTimeScale = CMTimeScale(max(600, min(options.frameRate, 30) * 100))
+            input.metadata = [Self.trackTitle("Camera")]
+            guard writer.canAdd(input) else {
+                throw MultitrackRecorderError.cannotAddCameraInput
+            }
+            writer.add(input)
+            cameraInput = input
+        }
 
         var systemAudioInput: AVAssetWriterInput?
         if options.includesSystemAudio {
@@ -453,11 +514,13 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
         self.writer = writer
         self.videoInput = videoInput
+        self.cameraInput = cameraInput
         self.systemAudioInput = systemAudioInput
         self.microphoneInput = microphoneInput
         self.outputURL = outputURL
         pendingSystemAudio.removeAll(keepingCapacity: true)
         pendingMicrophone.removeAll(keepingCapacity: true)
+        pendingCamera.removeAll(keepingCapacity: true)
         sessionStartTime = nil
         latestPresentationTime = .invalid
         latestPresentationEndTime = .invalid
@@ -501,6 +564,27 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         }
         settings[AVVideoCompressionPropertiesKey] = compression
         return settings
+    }
+
+    static func cameraVideoSettings(
+        format: WebcamCaptureFormat,
+        options: MultitrackRecordingOptions
+    ) -> [String: Any] {
+        [
+            AVVideoCodecKey: options.encodingPlan.codec.avFoundationType,
+            AVVideoWidthKey: format.width,
+            AVVideoHeightKey: format.height,
+            AVVideoEncoderSpecificationKey: [
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true,
+            ],
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: options.targetCameraBitRate,
+                AVVideoExpectedSourceFrameRateKey: min(options.frameRate, 30),
+                AVVideoMaxKeyFrameIntervalKey: min(options.frameRate, 30) * 2,
+                AVVideoAllowFrameReorderingKey: true,
+                kVTCompressionPropertyKey_RealTime as String: true,
+            ],
+        ]
     }
 
     private static func audioSettings(channels: Int, bitRate: Int) -> [String: Any] {
@@ -584,6 +668,35 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         }
     }
 
+    private func handleCamera(_ sampleBuffer: CMSampleBuffer) {
+        guard sampleBuffer.isValid,
+              CMSampleBufferDataIsReady(sampleBuffer),
+              CMSampleBufferGetImageBuffer(sampleBuffer) != nil,
+              sampleBuffer.presentationTimeStamp.isValid
+        else { return }
+
+        onCameraFrame?(sampleBuffer)
+        // Only a complete screen frame may reopen the shared media timeline
+        // after pause. Camera frames remain preview-only until that anchor lands.
+        guard let offset = pauseTimeline.offset(
+            for: sampleBuffer.presentationTimeStamp,
+            isVideo: false
+        ), let writerBuffer = Self.retimed(sampleBuffer, subtracting: offset) else { return }
+
+        guard let sessionStartTime else {
+            pendingCamera.append(writerBuffer)
+            if pendingCamera.count > 120 {
+                pendingCamera.removeFirst(pendingCamera.count - 120)
+            }
+            return
+        }
+        guard CMTimeCompare(writerBuffer.presentationTimeStamp, sessionStartTime) >= 0 else { return }
+        _ = append(writerBuffer, to: cameraInput, fallbackDuration: nominalVideoFrameDuration)
+        if writer?.status == .failed {
+            notifyFailure(MultitrackRecorderError.writerFailed(writer?.error))
+        }
+    }
+
     /// ScreenCaptureKit also emits idle, blank, suspended, and stopped status
     /// buffers. They are stream state, not recordable video frames.
     static func isCompleteVideoFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
@@ -609,7 +722,17 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
         flush(&pendingSystemAudio, to: systemAudioInput, startingAt: time, role: .systemAudio)
         flush(&pendingMicrophone, to: microphoneInput, startingAt: time, role: .microphone)
+        flushCamera(startingAt: time)
         onStarted?()
+    }
+
+    private func flushCamera(startingAt startTime: CMTime) {
+        for sample in pendingCamera
+            where CMTimeCompare(sample.presentationTimeStamp, startTime) >= 0
+        {
+            _ = append(sample, to: cameraInput, fallbackDuration: nominalVideoFrameDuration)
+        }
+        pendingCamera.removeAll(keepingCapacity: true)
     }
 
     private func handleAudio(
@@ -826,6 +949,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                 }
 
                 videoInput?.markAsFinished()
+                cameraInput?.markAsFinished()
                 systemAudioInput?.markAsFinished()
                 microphoneInput?.markAsFinished()
                 writer.finishWriting { [self] in
@@ -854,10 +978,12 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     private func resetWriterState(keepOutputURL: Bool = false) {
         writer = nil
         videoInput = nil
+        cameraInput = nil
         systemAudioInput = nil
         microphoneInput = nil
         pendingSystemAudio.removeAll()
         pendingMicrophone.removeAll()
+        pendingCamera.removeAll()
         sessionStartTime = nil
         latestPresentationTime = .invalid
         latestPresentationEndTime = .invalid

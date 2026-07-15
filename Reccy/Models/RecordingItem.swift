@@ -58,6 +58,15 @@ struct RecordingItem: Identifiable, Hashable, Sendable {
         let trackLabel = audioTrackIDs.count == 1 ? "1 editable track" : "\(audioTrackIDs.count) editable tracks"
         return "\(audioSummary) · \(trackLabel)"
     }
+
+    var cameraSummary: String? {
+        manifest.camera?.name
+    }
+
+    var cameraDetail: String? {
+        guard let camera = manifest.camera else { return nil }
+        return "\(camera.name) · \(camera.width) × \(camera.height) · Separate editable track"
+    }
 }
 
 /// Every file Reccy owns for one recording. Keeping these paths beside the

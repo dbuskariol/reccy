@@ -48,6 +48,13 @@ nonisolated struct CaptureSourceDescriptor: Codable, Hashable, Sendable {
     }
 }
 
+nonisolated struct RecordingCameraDescriptor: Codable, Hashable, Sendable {
+    var uniqueID: String
+    var name: String
+    var width: Int
+    var height: Int
+}
+
 nonisolated struct RecordingManifest: Codable, Hashable, Sendable {
     static let currentVersion = 2
 
@@ -63,6 +70,7 @@ nonisolated struct RecordingManifest: Codable, Hashable, Sendable {
     var includesSystemAudio: Bool
     var includesMicrophone: Bool
     var microphoneName: String?
+    var camera: RecordingCameraDescriptor? = nil
     var showsCursor: Bool
     var highlightsClicks: Bool
 

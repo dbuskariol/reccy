@@ -274,6 +274,8 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     var includeSystemAudio = true
     var includeMicrophone = false
     var selectedMicrophoneID: String?
+    var includeCamera = false
+    var selectedCameraID: String?
     var showCursor = true
     var showMouseClicks = true
     var excludeOwnAudio = true
@@ -283,6 +285,47 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     var outputFolderPath: String?
 
     static let storageKey = "capture-settings-v2"
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case resolution
+        case frameRate
+        case recordingPreset
+        case countdown
+        case includeSystemAudio
+        case includeMicrophone
+        case selectedMicrophoneID
+        case includeCamera
+        case selectedCameraID
+        case showCursor
+        case showMouseClicks
+        case excludeOwnAudio
+        case useHDR
+        case screenshotFormat
+        case screenshotRange
+        case outputFolderPath
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        resolution = try container.decodeIfPresent(CaptureResolution.self, forKey: .resolution) ?? .quadHD
+        frameRate = try container.decodeIfPresent(CaptureFrameRate.self, forKey: .frameRate) ?? .fps30
+        recordingPreset = try container.decodeIfPresent(RecordingPreset.self, forKey: .recordingPreset) ?? .efficient
+        countdown = try container.decodeIfPresent(CountdownDelay.self, forKey: .countdown) ?? .three
+        includeSystemAudio = try container.decodeIfPresent(Bool.self, forKey: .includeSystemAudio) ?? true
+        includeMicrophone = try container.decodeIfPresent(Bool.self, forKey: .includeMicrophone) ?? false
+        selectedMicrophoneID = try container.decodeIfPresent(String.self, forKey: .selectedMicrophoneID)
+        includeCamera = try container.decodeIfPresent(Bool.self, forKey: .includeCamera) ?? false
+        selectedCameraID = try container.decodeIfPresent(String.self, forKey: .selectedCameraID)
+        showCursor = try container.decodeIfPresent(Bool.self, forKey: .showCursor) ?? true
+        showMouseClicks = try container.decodeIfPresent(Bool.self, forKey: .showMouseClicks) ?? true
+        excludeOwnAudio = try container.decodeIfPresent(Bool.self, forKey: .excludeOwnAudio) ?? true
+        useHDR = try container.decodeIfPresent(Bool.self, forKey: .useHDR) ?? false
+        screenshotFormat = try container.decodeIfPresent(ScreenshotFormat.self, forKey: .screenshotFormat) ?? .heic
+        screenshotRange = try container.decodeIfPresent(ScreenshotRange.self, forKey: .screenshotRange) ?? .sdr
+        outputFolderPath = try container.decodeIfPresent(String.self, forKey: .outputFolderPath)
+    }
 
     static func load(defaults: UserDefaults = .standard) -> CaptureSettings {
         guard
@@ -323,6 +366,22 @@ struct AudioInputDevice: Identifiable, Hashable, Sendable {
         )
         .devices
         .map { AudioInputDevice(id: $0.uniqueID, name: $0.localizedName) }
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+}
+
+struct VideoInputDevice: Identifiable, Hashable, Sendable {
+    let id: String
+    let name: String
+
+    static func discoverAvailable() -> [VideoInputDevice] {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .continuityCamera, .deskViewCamera, .external],
+            mediaType: .video,
+            position: .unspecified
+        )
+        .devices
+        .map { VideoInputDevice(id: $0.uniqueID, name: $0.localizedName) }
         .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 }

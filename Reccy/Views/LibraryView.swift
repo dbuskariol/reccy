@@ -261,6 +261,9 @@ struct LibraryView: View {
 
                 HStack(spacing: 5) {
                     compactBadge(item.sourceKindTitle, systemImage: item.manifest.source.kind.systemImage)
+                    if let camera = item.cameraSummary {
+                        compactBadge(camera, systemImage: "video.fill")
+                    }
                     compactBadge(item.audioSummary, systemImage: "waveform")
                     transcriptStatusBadge(item)
                 }
@@ -642,6 +645,9 @@ struct LibraryView: View {
                         )
                     }
                     detailRow("Audio", value: item.audioDetail)
+                    if let camera = item.cameraDetail {
+                        detailRow("Camera", value: camera)
+                    }
                     detailRow("Dynamic Range", value: item.manifest.isHDR ? "HDR10" : "SDR")
                     detailRow(
                         "Pointer",

@@ -31,6 +31,7 @@ final class TimelineEditorController: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var isRebuilding = false
     @Published private(set) var isVoiceoverRecording = false
+    @Published private(set) var previewRenderSize: CGSize = .zero
     @Published var selectedClipID: UUID?
     @Published var selectedGapID: UUID?
     @Published var playhead: TimeInterval = 0
@@ -91,6 +92,21 @@ final class TimelineEditorController: ObservableObject {
         project?.lanes.flatMap(\.clips).contains(where: { $0.contains(playhead) }) == true
     }
     var selectedGapFillMode: TimelineGapFillMode { selectedGap?.fillMode ?? .black }
+    var selectedClipIsCamera: Bool {
+        guard let selectedClipID else { return false }
+        return project?.lanes.contains(where: {
+            $0.kind == .camera && $0.clips.contains(where: { $0.id == selectedClipID })
+        }) == true
+    }
+    var activeCameraClip: TimelineClip? {
+        project?.lanes
+            .first(where: { $0.kind == .camera })?
+            .clips
+            .first(where: {
+                $0.timelineStart <= playhead + 0.000_1
+                    && playhead < $0.timelineEnd - 0.000_1
+            })
+    }
     var selectedVoiceoverInputName: String {
         guard let selectedVoiceoverInputID else { return "System Default" }
         return voiceoverInputDevices.first(where: { $0.id == selectedVoiceoverInputID })?.name
@@ -196,6 +212,45 @@ final class TimelineEditorController: ObservableObject {
                     ]
                 )
             )
+        }
+
+        if let camera = item.manifest.camera,
+           videoTracks.indices.contains(1)
+        {
+            let cameraTrack = videoTracks[1]
+            let cameraTimeRange = try await cameraTrack.load(.timeRange)
+            let sourceStart = max(0, cameraTimeRange.start.seconds)
+            let cameraDuration = min(duration, max(0, cameraTimeRange.duration.seconds))
+            if cameraDuration > 0 {
+                let layout = TimelineVideoLayout.defaultCamera(
+                    canvasSize: CGSize(
+                        width: CGFloat(item.manifest.width),
+                        height: CGFloat(item.manifest.height)
+                    ),
+                    sourceSize: CGSize(
+                        width: CGFloat(camera.width),
+                        height: CGFloat(camera.height)
+                    )
+                )
+                lanes.append(
+                    TimelineLane(
+                        kind: .camera,
+                        name: camera.name,
+                        clips: [
+                            TimelineClip(
+                                sourceURL: item.url,
+                                sourceTrackID: cameraTrack.trackID,
+                                sourceStart: sourceStart,
+                                timelineStart: sourceStart,
+                                duration: cameraDuration,
+                                name: camera.name,
+                                linkedGroupID: linkedGroupID,
+                                videoLayout: layout
+                            ),
+                        ]
+                    )
+                )
+            }
         }
 
         var audioLaneDescriptions: [(kind: TimelineLaneKind, name: String)] = []
@@ -460,6 +515,38 @@ final class TimelineEditorController: ObservableObject {
         rebuildAndSave()
     }
 
+    func setVideoLayout(_ layout: TimelineVideoLayout, clipID: UUID) {
+        guard var project,
+              let laneIndex = project.lanes.firstIndex(where: {
+                  $0.kind == .camera && $0.clips.contains(where: { $0.id == clipID })
+              }),
+              let clipIndex = project.lanes[laneIndex].clips.firstIndex(where: { $0.id == clipID })
+        else { return }
+        project.lanes[laneIndex].clips[clipIndex].videoLayout = layout.clamped()
+        project.modifiedAt = Date()
+        self.project = project
+        selectedClipID = clipID
+        selectedGapID = nil
+        rebuildAndSave()
+    }
+
+    func resetVideoLayout(clipID: UUID) {
+        guard let clip = project?.clip(id: clipID) else { return }
+        let current = (clip.videoLayout ?? .defaultCamera).clamped()
+        let width = 0.28
+        let height = min(0.5, width * current.height / max(current.width, 0.001))
+        let margin = 0.03
+        setVideoLayout(
+            TimelineVideoLayout(
+                x: 1 - width - margin,
+                y: 1 - height - margin,
+                width: width,
+                height: height
+            ),
+            clipID: clipID
+        )
+    }
+
     func playPause() {
         if player.timeControlStatus == .playing {
             player.pause()
@@ -563,6 +650,7 @@ final class TimelineEditorController: ObservableObject {
         composition = build.composition
         compositionVideoComposition = build.videoComposition
         compositionAudioMix = build.audioMix
+        previewRenderSize = build.renderSize ?? .zero
         item.seekingWaitsForVideoCompositionRendering = true
         player.replaceCurrentItem(with: item)
         let target = min(playhead, project.duration)

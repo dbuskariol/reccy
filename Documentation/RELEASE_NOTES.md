@@ -3,6 +3,7 @@
 The first public release establishes Reccy as a macOS-native capture and editing workspace:
 
 - Display, portion, application, and window recording with clear source boundaries.
+- Optional built-in, external, Continuity, or Desk View camera recording as a separate video track with live preview and direct editor positioning and resizing.
 - Separate system-audio and microphone tracks, native sample-buffer live monitoring, pause/resume, and source-aware menu-bar controls.
 - A non-destructive multitrack timeline with splitting, trimming, magnetic reorder, independent audio movement, voiceover, and per-gap frame fills.
 - HEVC and H.264 recording presets, HDR capture, native screenshots, and professional export presets.

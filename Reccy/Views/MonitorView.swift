@@ -95,37 +95,59 @@ struct MonitorView: View {
     }
 
     private var livePreview: some View {
-        ZStack(alignment: .topLeading) {
-            CapturePreviewView(pipeline: coordinator.previewPipeline)
-                .background(.black)
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                CapturePreviewView(pipeline: coordinator.previewPipeline)
+                    .background(.black)
 
-            LinearGradient(
-                colors: [.black.opacity(0.62), .clear],
-                startPoint: .top,
-                endPoint: .center
-            )
-            .allowsHitTesting(false)
-
-            HStack(spacing: 8) {
-                Label(
-                    coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title,
-                    systemImage: coordinator.selectedSourceKind.systemImage
-                )
-                .lineLimit(1)
-
-                Spacer(minLength: 8)
-
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 7, height: 7)
-                    Text(coordinator.state == .paused ? "PAUSED" : "LIVE")
+                if coordinator.settings.includeCamera {
+                    CapturePreviewView(pipeline: coordinator.cameraPreviewPipeline)
+                        .background(.black)
+                        .frame(
+                            width: geometry.size.width * 0.28,
+                            height: geometry.size.height * 0.28
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .stroke(.white.opacity(0.8), lineWidth: 1)
+                        }
+                        .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
+                        .position(
+                            x: geometry.size.width * 0.83,
+                            y: geometry.size.height * 0.81
+                        )
+                        .accessibilityLabel("Live camera preview from \(coordinator.selectedCameraName)")
                 }
+
+                LinearGradient(
+                    colors: [.black.opacity(0.62), .clear],
+                    startPoint: .top,
+                    endPoint: .center
+                )
+                .allowsHitTesting(false)
+
+                HStack(spacing: 8) {
+                    Label(
+                        coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title,
+                        systemImage: coordinator.selectedSourceKind.systemImage
+                    )
+                    .lineLimit(1)
+
+                    Spacer(minLength: 8)
+
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(.red)
+                            .frame(width: 7, height: 7)
+                        Text(coordinator.state == .paused ? "PAUSED" : "LIVE")
+                    }
+                    .foregroundStyle(.white)
+                }
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
+                .padding(10)
             }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.white)
-            .padding(10)
         }
         .aspectRatio(16 / 9, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))

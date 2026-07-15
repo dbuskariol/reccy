@@ -73,7 +73,7 @@ nonisolated enum TranscriptTrackRole: String, Codable, CaseIterable, Sendable {
         case .systemAudio: self = .systemAudio
         case .microphone: self = .microphone
         case .voiceover: self = .voiceover
-        case .video: self = .unknown
+        case .video, .camera: self = .unknown
         }
     }
 }
@@ -174,7 +174,7 @@ nonisolated enum TranscriptProjection {
     ) -> [ProjectedTranscriptSegment] {
         var projected: [ProjectedTranscriptSegment] = []
 
-        for lane in project.lanes where lane.kind != .video {
+        for lane in project.lanes where lane.kind.isAudio {
             let role = TranscriptTrackRole(laneKind: lane.kind)
             for clip in lane.clips {
                 guard

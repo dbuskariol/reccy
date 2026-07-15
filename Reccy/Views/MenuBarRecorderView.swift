@@ -129,12 +129,41 @@ struct MenuBarRecorderView: View {
                         sourceButton(kind)
                     }
                 }
+
+                cameraOption
             }
 
             if let source = coordinator.selectedSource {
                 selectedSourceCard(source)
             }
         }
+    }
+
+    private var cameraOption: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $coordinator.settings.includeCamera) {
+                Label("Record camera", systemImage: "video")
+                    .font(.subheadline.weight(.medium))
+            }
+            .toggleStyle(.switch)
+
+            if coordinator.settings.includeCamera {
+                Picker("Camera source", selection: $coordinator.settings.selectedCameraID) {
+                    Text("System Default").tag(String?.none)
+                    ForEach(coordinator.cameraInputDevices) { device in
+                        Text(device.name).tag(Optional(device.id))
+                    }
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+
+                Label("Saved as a separate editable video track", systemImage: "rectangle.on.rectangle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private var permissionNotice: some View {
@@ -297,6 +326,13 @@ struct MenuBarRecorderView: View {
             )
             .font(.subheadline.weight(.medium))
             .lineLimit(1)
+
+            if coordinator.settings.includeCamera {
+                Label(coordinator.selectedCameraName, systemImage: "video.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
 
             if coordinator.settings.includeSystemAudio || coordinator.settings.includeMicrophone {
                 compactAudioMeters
