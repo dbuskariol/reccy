@@ -39,15 +39,18 @@ struct LibraryView: View {
                         description: "Your completed recordings will appear here."
                     )
                 } else {
-                    HStack(spacing: 0) {
-                        recordingBrowser
-                            .frame(width: 360)
-
-                        Divider()
-
-                        previewPane
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
+                    ReccySplitView(
+                        axis: .horizontal,
+                        autosaveName: "library.browser-preview",
+                        initialFraction: 0.28,
+                        firstMinimum: 340,
+                        firstMaximum: 520,
+                        secondMinimum: 360,
+                        firstPaneName: "recording browser",
+                        secondPaneName: "recording preview",
+                        first: { recordingBrowser },
+                        second: { previewPane }
+                    )
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -304,8 +307,7 @@ struct LibraryView: View {
                     recordingDetailsCard(item)
                 }
                 .padding(22)
-                .frame(maxWidth: 760, alignment: .topLeading)
-                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .background(Color(nsColor: .windowBackgroundColor))
         } else {
@@ -393,17 +395,14 @@ struct LibraryView: View {
         ZStack {
             NativeLibraryVideoPlayer(player: player)
 
-            if let previewCaptionTrack,
-               previewCaptionTrack.isVisible,
-               previewRenderSize.width > 0,
-               previewRenderSize.height > 0
-            {
+            if let previewCaptionTrack {
                 TimelineCaptionOverlay(
                     track: previewCaptionTrack,
                     time: playbackTime,
                     renderSize: previewRenderSize
                 )
                 .allowsHitTesting(false)
+                .zIndex(2)
             }
 
             if isPreviewLoading {
@@ -414,7 +413,7 @@ struct LibraryView: View {
             }
         }
             .aspectRatio(previewAspectRatio(for: item), contentMode: .fit)
-            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity)
             .background(.black)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
@@ -591,13 +590,13 @@ struct LibraryView: View {
             waveformScrubber(item)
         }
         .padding(12)
-        .frame(maxWidth: 560)
+        .frame(maxWidth: .infinity)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(.separator.opacity(0.4), lineWidth: 0.5)
         }
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity)
     }
 
     private func playbackButton(

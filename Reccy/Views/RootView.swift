@@ -15,9 +15,14 @@ struct RootView: View {
             .navigationSplitViewColumnWidth(min: 200, ideal: 218, max: 260)
         } detail: {
             detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
+                .frame(
+                    minWidth: 0,
+                    maxWidth: .infinity,
+                    minHeight: 0,
+                    maxHeight: .infinity
+                )
         }
+        .navigationSplitViewStyle(.balanced)
         .onChange(of: coordinator.state) { oldState, newState in
             if newState.isRecording, !oldState.isRecording {
                 navigation.section = .monitor

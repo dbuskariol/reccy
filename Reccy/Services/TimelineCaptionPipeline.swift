@@ -10,7 +10,6 @@ nonisolated enum TimelineCaptionCueGenerator {
     static let maximumCharacters = 84
     static let maximumDuration: TimeInterval = 6
     static let maximumJoinGap: TimeInterval = 0.65
-    static let minimumReadableDuration: TimeInterval = 0.9
 
     static func cues(
         from segments: [ProjectedTranscriptSegment],
@@ -71,18 +70,9 @@ nonisolated enum TimelineCaptionCueGenerator {
         }
         candidatesWithRoles = removingCrossTrackEchoes(from: candidatesWithRoles)
         candidatesWithRoles = combiningConcurrentSpeech(in: candidatesWithRoles)
-        var cues = candidatesWithRoles.map(\.cue)
+        let cues = candidatesWithRoles.map(\.cue)
 
-        for index in cues.indices {
-            let nextStart = cues.indices.contains(index + 1)
-                ? cues[index + 1].timelineStart
-                : projectDuration
-            let maximumEnd = max(cues[index].timelineStart + 0.1, nextStart)
-            let readableEnd = min(maximumEnd, cues[index].timelineStart + minimumReadableDuration)
-            let naturalEnd = min(cues[index].timelineEnd, maximumEnd)
-            cues[index].duration = max(0.1, max(naturalEnd, readableEnd) - cues[index].timelineStart)
-        }
-        return cues
+        return TimelineCaptionTrack(cues: cues).presentationCues(through: projectDuration)
     }
 
     /// Separate microphone and system tracks can contain the same audible
@@ -210,7 +200,7 @@ enum TimelineCaptionVideoRenderer {
         videoLayer.frame = parentLayer.bounds
         parentLayer.addSublayer(videoLayer)
 
-        for cue in track.cues where cue.timelineStart < projectDuration && cue.timelineEnd > 0 {
+        for cue in track.presentationCues(through: projectDuration) {
             guard let layer = captionLayer(
                 cue: cue,
                 style: track.style,

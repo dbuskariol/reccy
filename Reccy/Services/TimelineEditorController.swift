@@ -424,18 +424,20 @@ final class TimelineEditorController: ObservableObject {
     @discardableResult
     func addCaption(at time: TimeInterval) -> UUID? {
         guard let project else { return nil }
-        let existingCues = project.captionTrack?.cues.sorted { $0.timelineStart < $1.timelineStart } ?? []
-        var start = min(max(time, 0), max(0, project.duration - project.frameDuration))
-        for cue in existingCues where cue.timelineEnd > start + 0.000_1
-            && cue.timelineStart <= start + project.frameDuration
-        {
-            start = cue.timelineEnd
+        var track = project.captionTrack ?? TimelineCaptionTrack(cues: [])
+        let existingCues = track.cues.sorted { $0.timelineStart < $1.timelineStart }
+        let start = min(max(time, 0), max(0, project.duration - project.frameDuration))
+        guard !existingCues.contains(where: {
+            abs($0.timelineStart - start) < project.frameDuration
+        }) else {
+            errorMessage = "There is already a caption boundary at the playhead. Select that cue to edit it."
+            return nil
         }
         let nextStart = existingCues.first(where: { $0.timelineStart > start + 0.000_1 })?
             .timelineStart ?? project.duration
-        let duration = min(2, nextStart - start, project.duration - start)
+        let duration = min(nextStart - start, project.duration - start)
         guard duration >= project.frameDuration else {
-            errorMessage = "There isn’t an open caption gap at or after the playhead. Edit the nearby caption text or seek to an open gap."
+            errorMessage = "There isn’t enough room to add another caption boundary at the playhead."
             return nil
         }
         let cue = TimelineCaptionCue(
@@ -444,10 +446,9 @@ final class TimelineEditorController: ObservableObject {
             duration: duration,
             origin: .manual
         )
+        track.cues.append(cue)
+        track.cues = track.presentationCues(through: project.duration)
         updateProjectWithoutRebuild { project in
-            var track = project.captionTrack ?? TimelineCaptionTrack(cues: [])
-            track.cues.append(cue)
-            track.cues.sort { $0.timelineStart < $1.timelineStart }
             project.captionTrack = track
             selectedCaptionID = cue.id
         }
@@ -502,6 +503,32 @@ final class TimelineEditorController: ObservableObject {
         selectedClipID = nil
         selectedGapID = nil
         seek(to: cue.timelineStart)
+    }
+
+    func moveCaption(_ cueID: UUID, to proposedStart: TimeInterval) {
+        guard let project, var track = project.captionTrack,
+              let start = track.moveCue(
+                  id: cueID,
+                  to: proposedStart,
+                  frameDuration: project.frameDuration,
+                  projectDuration: project.duration
+              )
+        else { return }
+
+        updateProjectWithoutRebuild { project in
+            project.captionTrack = track
+        }
+        selectedCaptionID = cueID
+        selectedClipID = nil
+        selectedGapID = nil
+        seek(to: start)
+    }
+
+    func nudgeCaption(_ cueID: UUID, byFrames frames: Int) {
+        guard frames != 0,
+              let cue = project?.captionTrack?.cues.first(where: { $0.id == cueID })
+        else { return }
+        moveCaption(cueID, to: cue.timelineStart + Double(frames) * frameDuration)
     }
 
     func resetVideoLayout(clipID: UUID) {
