@@ -943,6 +943,12 @@ struct ReccyTests {
         #expect(playerView.player === player)
     }
 
+    @Test func workspaceSplitViewKeepsAProductionSizedDragTarget() {
+        let splitView = ReccyNativeSplitView()
+
+        #expect(splitView.dividerThickness == 14)
+    }
+
     @Test func recordingArtifactsCentralizeMediaMetadataAndEditorOwnership() {
         let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Ownership Test.mp4")
         let artifacts = RecordingArtifacts(mediaURL: mediaURL)
