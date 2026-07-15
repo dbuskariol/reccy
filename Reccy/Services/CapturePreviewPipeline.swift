@@ -4,9 +4,9 @@ import Foundation
 import IOSurface
 import ScreenCaptureKit
 
-/// The immutable presentation data Apple exposes for a complete
-/// ScreenCaptureKit video frame. `IOSurface` keeps the preview GPU-native and
-/// shares the exact pixels already owned by the recording stream.
+/// Immutable presentation data for a complete native capture frame.
+/// `IOSurface` keeps both ScreenCaptureKit and AVCaptureVideoDataOutput previews
+/// GPU-shared with the exact pixels already owned by their recording inputs.
 nonisolated struct CapturePreviewFrame: @unchecked Sendable {
     let surface: IOSurface
     let contentRect: CGRect
@@ -14,10 +14,10 @@ nonisolated struct CapturePreviewFrame: @unchecked Sendable {
     let scaleFactor: CGFloat
 }
 
-/// Routes the recorder's existing ScreenCaptureKit sample buffers to the live
-/// monitor without starting another stream or copying frame pixels. Delivery
-/// is coalesced to the newest frame so UI backpressure can never create an
-/// unbounded queue of full-resolution frames.
+/// Routes existing native capture sample buffers to the live monitor without
+/// starting another stream or copying frame pixels. Delivery is coalesced to
+/// the newest frame so UI backpressure can never create an unbounded queue of
+/// full-resolution frames.
 nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
     typealias FrameHandler = @MainActor @Sendable (CapturePreviewFrame?) -> Void
 
@@ -79,9 +79,9 @@ nonisolated final class CapturePreviewPipeline: @unchecked Sendable {
         }
     }
 
-    /// Mirrors Apple's ScreenCaptureKit sample: validate the complete frame,
-    /// retrieve its IOSurface, and retain the metadata that describes the
-    /// content within that surface.
+    /// Mirrors Apple's native sample-buffer presentation path: validate the
+    /// frame, retrieve its IOSurface, and retain ScreenCaptureKit content
+    /// metadata when present. Camera frames use their complete pixel extent.
     static func frame(from sampleBuffer: CMSampleBuffer) -> CapturePreviewFrame? {
         guard sampleBuffer.isValid,
               CMSampleBufferDataIsReady(sampleBuffer),

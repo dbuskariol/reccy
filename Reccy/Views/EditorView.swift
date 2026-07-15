@@ -99,15 +99,36 @@ struct EditorView: View {
 
     private func previewPane(_ project: TimelineProject) -> some View {
         VStack(spacing: 0) {
-            NativeVideoPlayer(player: editor.player)
-                .background(.black)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(.separator.opacity(0.45), lineWidth: 0.5)
+            ZStack {
+                NativeVideoPlayer(player: editor.player)
+                    .background(.black)
+
+                if let cameraClip = editor.activeCameraClip,
+                   editor.previewRenderSize.width > 0,
+                   editor.previewRenderSize.height > 0
+                {
+                    CameraOverlayManipulator(
+                        clip: cameraClip,
+                        renderSize: editor.previewRenderSize,
+                        isSelected: editor.selectedClipID == cameraClip.id,
+                        onSelect: {
+                            guard editor.selectedClipID != cameraClip.id else { return }
+                            editor.select(cameraClip, at: editor.playhead)
+                        },
+                        onCommit: { layout in
+                            editor.setVideoLayout(layout, clipID: cameraClip.id)
+                        }
+                    )
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(.separator.opacity(0.45), lineWidth: 0.5)
+                    .allowsHitTesting(false)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             transportBar(project)
         }
@@ -225,6 +246,16 @@ struct EditorView: View {
             }
             .disabled(editor.selectedClipID == nil)
             .keyboardShortcut(.delete, modifiers: [])
+
+            if editor.selectedClipIsCamera, let selectedClipID = editor.selectedClipID {
+                editorAction(
+                    "Reset Camera Position",
+                    systemImage: "arrow.counterclockwise",
+                    help: "Reset camera position and size"
+                ) {
+                    editor.resetVideoLayout(clipID: selectedClipID)
+                }
+            }
 
             editorAction("Close Gap", systemImage: "arrow.left.and.right", help: "Delete the selected time range and close the gap") {
                 editor.rippleDeleteSelection()
@@ -384,7 +415,7 @@ struct EditorView: View {
                 Spacer(minLength: 0)
             }
 
-            if lane.kind != .video {
+            if lane.kind.isAudio {
                 HStack(spacing: 7) {
                     Button {
                         editor.toggleMute(laneID: lane.id)
@@ -744,6 +775,7 @@ struct EditorView: View {
     private func laneColor(_ kind: TimelineLaneKind) -> Color {
         switch kind {
         case .video: .indigo
+        case .camera: .blue
         case .systemAudio: .teal
         case .microphone: .orange
         case .voiceover: .pink
@@ -871,7 +903,7 @@ private struct TimelineClipView: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            if lane.kind != .video {
+            if lane.kind.isAudio {
                 ReccyAssetWaveform(
                     sourceURL: clip.sourceURL,
                     sourceTrackID: clip.sourceTrackID,
@@ -892,7 +924,7 @@ private struct TimelineClipView: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 9)
-            .shadow(color: .black.opacity(lane.kind == .video ? 0 : 0.45), radius: 2)
+            .shadow(color: .black.opacity(lane.kind.isVideo ? 0 : 0.45), radius: 2)
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(.white)
@@ -1024,6 +1056,164 @@ private struct TimelinePlayhead: View {
         .foregroundStyle(.red)
         .frame(width: 11)
         .accessibilityHidden(true)
+    }
+}
+
+/// Direct manipulation for the active camera clip. The outline updates at
+/// pointer rate while AVFoundation rebuilds once on commit, keeping editing
+/// responsive without asking the compositor to reconstruct on every mouse event.
+private struct CameraOverlayManipulator: View {
+    let clip: TimelineClip
+    let renderSize: CGSize
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onCommit: (TimelineVideoLayout) -> Void
+
+    @State private var draftLayout: TimelineVideoLayout?
+    @State private var isHovering = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            let videoRect = aspectFitRect(content: renderSize, in: geometry.size)
+            let layout = (draftLayout ?? clip.videoLayout ?? .defaultCamera).clamped()
+            let overlayRect = CGRect(
+                x: videoRect.minX + CGFloat(layout.x) * videoRect.width,
+                y: videoRect.minY + CGFloat(layout.y) * videoRect.height,
+                width: CGFloat(layout.width) * videoRect.width,
+                height: CGFloat(layout.height) * videoRect.height
+            )
+
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(
+                                isSelected || isHovering ? Color.accentColor : .white.opacity(0.45),
+                                style: StrokeStyle(lineWidth: isSelected ? 2 : 1, dash: isSelected ? [] : [5, 4])
+                            )
+                    }
+                    .frame(width: overlayRect.width, height: overlayRect.height)
+                    .offset(x: overlayRect.minX, y: overlayRect.minY)
+                    .onHover { isHovering = $0 }
+                    .simultaneousGesture(TapGesture().onEnded(onSelect))
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                onSelect()
+                                draftLayout = movedLayout(
+                                    clip.videoLayout ?? .defaultCamera,
+                                    translation: value.translation,
+                                    videoRect: videoRect
+                                )
+                            }
+                            .onEnded { value in
+                                let final = movedLayout(
+                                    clip.videoLayout ?? .defaultCamera,
+                                    translation: value.translation,
+                                    videoRect: videoRect
+                                )
+                                onCommit(final)
+                                draftLayout = nil
+                            }
+                    )
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Camera overlay")
+                    .accessibilityValue("Position \(Int(layout.x * 100)) by \(Int(layout.y * 100)) percent")
+                    .accessibilityHint("Drag to reposition the camera video")
+
+                if isSelected || isHovering {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .overlay(Circle().stroke(.white, lineWidth: 2))
+                        .frame(width: 14, height: 14)
+                        .position(x: overlayRect.maxX, y: overlayRect.maxY)
+                        .shadow(color: .black.opacity(0.35), radius: 2)
+                        .highPriorityGesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    onSelect()
+                                    draftLayout = resizedLayout(
+                                        clip.videoLayout ?? .defaultCamera,
+                                        translation: value.translation,
+                                        videoRect: videoRect
+                                    )
+                                }
+                                .onEnded { value in
+                                    let final = resizedLayout(
+                                        clip.videoLayout ?? .defaultCamera,
+                                        translation: value.translation,
+                                        videoRect: videoRect
+                                    )
+                                    onCommit(final)
+                                    draftLayout = nil
+                                }
+                        )
+                        .onHover { hovering in
+                            if hovering { NSCursor.crosshair.set() } else { NSCursor.arrow.set() }
+                        }
+                        .accessibilityLabel("Resize camera overlay")
+                        .accessibilityHint("Drag to resize while preserving the camera aspect ratio")
+                }
+            }
+        }
+    }
+
+    private func aspectFitRect(content: CGSize, in container: CGSize) -> CGRect {
+        guard content.width > 0,
+              content.height > 0,
+              container.width > 0,
+              container.height > 0
+        else { return CGRect(origin: .zero, size: container) }
+        let scale = min(container.width / content.width, container.height / content.height)
+        let size = CGSize(width: content.width * scale, height: content.height * scale)
+        return CGRect(
+            x: (container.width - size.width) / 2,
+            y: (container.height - size.height) / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    private func movedLayout(
+        _ original: TimelineVideoLayout,
+        translation: CGSize,
+        videoRect: CGRect
+    ) -> TimelineVideoLayout {
+        guard videoRect.width > 0, videoRect.height > 0 else { return original.clamped() }
+        var result = original
+        result.x += Double(translation.width / videoRect.width)
+        result.y += Double(translation.height / videoRect.height)
+        return result.clamped()
+    }
+
+    private func resizedLayout(
+        _ original: TimelineVideoLayout,
+        translation: CGSize,
+        videoRect: CGRect
+    ) -> TimelineVideoLayout {
+        let original = original.clamped()
+        guard videoRect.width > 0,
+              videoRect.height > 0,
+              original.width > 0,
+              original.height > 0
+        else { return original }
+        let horizontalScale = (original.width + Double(translation.width / videoRect.width)) / original.width
+        let verticalScale = (original.height + Double(translation.height / videoRect.height)) / original.height
+        let requestedScale = max(horizontalScale, verticalScale)
+        let minimumScale = max(0.08 / original.width, 0.08 / original.height)
+        let maximumScale = min(
+            (1 - original.x) / original.width,
+            (1 - original.y) / original.height
+        )
+        let scale = min(max(requestedScale, minimumScale), maximumScale)
+        return TimelineVideoLayout(
+            x: original.x,
+            y: original.y,
+            width: original.width * scale,
+            height: original.height * scale
+        ).clamped()
     }
 }
 

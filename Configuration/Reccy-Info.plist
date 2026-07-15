@@ -30,6 +30,10 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Reccy records microphone audio when you enable it for a screen recording or voiceover.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Reccy records the camera you choose as a separate, editable video track.</string>
+	<key>NSCameraUseContinuityCameraDeviceType</key>
+	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSScreenCaptureUsageDescription</key>

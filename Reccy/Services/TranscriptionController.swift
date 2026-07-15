@@ -327,7 +327,7 @@ final class TranscriptionController: ObservableObject {
     }
 
     func transcribeMissingSources(in project: TimelineProject) {
-        let audioLanes = project.lanes.filter { $0.kind != .video }
+        let audioLanes = project.lanes.filter { $0.kind.isAudio }
         let grouped = Dictionary(grouping: audioLanes.flatMap { lane in
             lane.clips.map { clip in
                 ProjectTrackRequest(
@@ -612,7 +612,7 @@ final class TranscriptionController: ObservableObject {
     }
 
     func installProjectQAScenario(_ project: TimelineProject) {
-        for lane in project.lanes where lane.kind != .video {
+        for lane in project.lanes where lane.kind.isAudio {
             for clip in lane.clips {
                 var document = documents[clip.sourceURL]
                     ?? TranscriptDocument(mediaFileName: clip.sourceURL.lastPathComponent, tracks: [])
