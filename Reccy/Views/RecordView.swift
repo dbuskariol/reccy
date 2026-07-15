@@ -91,6 +91,11 @@ struct RecordView: View {
                         ProgressView()
                             .controlSize(.small)
                         Text(coordinator.sourceSelectionMessage ?? "Waiting for macOS…")
+                        Spacer()
+                        Button("Cancel") {
+                            coordinator.cancelSourceSelection()
+                        }
+                        .keyboardShortcut(.cancelAction)
                     }
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -510,6 +515,21 @@ struct RecordView: View {
             )
             .font(.callout.weight(.medium))
             .foregroundStyle(recordControlStatusStyle)
+
+            if coordinator.hasSelectedSource {
+                Button {
+                    coordinator.clearSelectedSource()
+                } label: {
+                    Label("Clear Selected Source", systemImage: "xmark.circle.fill")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.large)
+                .reccyAccessibleControl(
+                    "Clear Selected Source",
+                    help: "Discard the selected capture source"
+                )
+            }
 
             if let url = coordinator.lastRecordingURL {
                 ShareLink(item: url) {

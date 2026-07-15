@@ -139,7 +139,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         // Reccy presents the picker explicitly from its own source controls.
         // Do not publish an additional persistent Control Center entry for an
         // unassociated stream.
-        picker.maximumStreamCount = 0
+        picker.maximumStreamCount = CaptureSourcePickerPolicy.maximumConcurrentStreams
         picker.isActive = false
         refreshAudioInputDevices()
         refreshPermissionStatus()
@@ -262,6 +262,24 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
         picker.isActive = true
         picker.present(using: contentStyle)
+    }
+
+    func cancelSourceSelection() {
+        guard isSelectingSource else { return }
+        isSelectingSource = false
+        regionSelectionController.cancel()
+        deactivateSystemPicker()
+        state = .idle
+        sourceSelectionMessage = "Source selection was cancelled."
+    }
+
+    /// Discards a completed source choice without changing durable capture
+    /// settings. This is the single user-initiated reset path for every source
+    /// kind, including the private system picker and Reccy's region selector.
+    func clearSelectedSource() {
+        guard state.canChangeSettings, hasSelectedSource else { return }
+        clearSourceSelection()
+        state = .idle
     }
 
     private func chooseRegion() async {
@@ -1271,6 +1289,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
     ) {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard isSelectingSource else { return }
             isSelectingSource = false
             deactivateSystemPicker()
             if !hasSelectedSource {
@@ -1287,6 +1306,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
     ) {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard isSelectingSource else { return }
             isSelectingSource = false
             deactivateSystemPicker()
             completeSourceSelection(filter: filter)
@@ -1297,6 +1317,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         let message = error.localizedDescription
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard isSelectingSource else { return }
             isSelectingSource = false
             handleFailure(CaptureError.sourcePickerFailed(message))
         }

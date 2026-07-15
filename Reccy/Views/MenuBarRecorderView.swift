@@ -232,6 +232,17 @@ struct MenuBarRecorderView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
+                Button {
+                    coordinator.clearSelectedSource()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .reccyAccessibleControl(
+                    "Clear Selected Source",
+                    help: "Discard the selected capture source"
+                )
             }
 
             HStack(spacing: 8) {

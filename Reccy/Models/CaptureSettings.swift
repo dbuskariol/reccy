@@ -4,6 +4,13 @@ import Foundation
 import ScreenCaptureKit
 import UniformTypeIdentifiers
 
+/// Reccy enforces its single-session invariant in `CaptureCoordinator` rather
+/// than asking Control Centre to count picker results that aren't associated
+/// with an existing `SCStream` yet.
+nonisolated enum CaptureSourcePickerPolicy {
+    static let maximumConcurrentStreams: Int? = nil
+}
+
 enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
     case display
     case region
