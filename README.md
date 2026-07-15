@@ -22,6 +22,17 @@ Choose an entire display, every window from one application, or one specific win
 
 Monitor shows the exact incoming picture from the writer's shared ScreenCaptureKit surface, elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Pause, resume, or stop from this window while it remains open on another display.
 
+## Transcribe privately on device
+
+Live and post-recording transcription preserve the same source-track boundary as capture: system audio and microphone words remain separate, independently timed tracks rather than one flattened transcript. Reccy supports two interchangeable local engines:
+
+- Apple SpeechAnalyzer uses Apple's downloaded language assets and native time-indexed transcription.
+- [WhisperKit](https://github.com/argmaxinc/argmax-oss-swift) from Argmax Open-Source SDK 1.0 runs downloaded Whisper Core ML models on Apple silicon, with native streaming for microphone captions, an explicit model library, and no implicit network fallback.
+
+Settings controls the default engine, language, automatic transcription, live captions, included audio sources, and model downloads. Monitor shows finalized and in-progress text while recording. Library searches transcript text alongside recording metadata, jumps playback to a selected phrase, and exports plain text, SRT, or WebVTT. Editor projects project each source word through every independent move, trim, split, duplicate, and deletion so captions continue to match the edited timeline.
+
+Transcript sidecars are written atomically beside their recordings as `.reccytranscript` documents. Audio, live buffers, model inference, and transcript text stay on the Mac; network access is only used when the user explicitly downloads a Whisper model or checks for an app update.
+
 ## Edit without flattening the recording
 
 ![Reccy multitrack timeline](Documentation/Screenshots/editor-timeline.jpg)
@@ -80,6 +91,7 @@ Reccy intentionally targets macOS 26 only. There are no availability branches or
 | Live monitor | Apple’s ScreenCaptureKit IOSurface presentation path with latest-frame coalescing, no second stream, and no pixel copy |
 | Timeline | Serializable project model materialized as `AVMutableComposition` |
 | Playback and export | AVKit, `AVAudioMix`, and `AVAssetExportSession` |
+| Transcription | SpeechAnalyzer; WhisperKit 1.0; source-track `.reccytranscript` sidecars |
 | Waveforms | Shared Reccy rendering backed by [DSWaveformImage](https://github.com/dmrschmidt/DSWaveformImage) |
 | Distribution | Universal hardened runtime, Developer ID, notarization, Sparkle 2 |
 
@@ -99,7 +111,7 @@ Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repo
 scripts/verify-ci.sh
 ```
 
-The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, and cancellation. Installed-app Computer Use QA covers every workspace plus the real Library transport, timeline interactions, accessible editor actions, menu-bar pause/resume/stop, and end-to-end export progress.
+The current suite exercises resolution policy, portrait and Retina sources, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, cancellation, transcript persistence/projection/export, exact-track PCM extraction, and real post-recording plus live inference with every installed transcription engine. Model-backed tests skip cleanly on machines where the corresponding optional language asset or Whisper model is not installed. Installed-app Computer Use QA covers every workspace plus the real Library transport, timeline interactions, transcript search and seeking, accessible editor actions, menu-bar pause/resume/stop, and end-to-end export progress.
 
 ### Permission identity matters
 
@@ -121,8 +133,8 @@ Release automation builds an `.xcarchive`, validates a timestamped universal Dev
 
 ## Privacy
 
-Capture, editing, projects, thumbnails, and exports stay on the Mac. Reccy only receives the display, application, window, or region approved through macOS. Its bundled privacy manifest declares no tracking or collected data; its only network surface is the signed Sparkle update feed.
+Capture, editing, projects, thumbnails, transcription inference, transcript text, and exports stay on the Mac. Reccy only receives the display, application, window, or region approved through macOS. Its bundled privacy manifest declares no tracking or collected data. Network access is limited to the signed Sparkle update feed and user-initiated Whisper model catalog/downloads; recordings, audio buffers, and transcript text are never uploaded.
 
 ## Status
 
-Reccy is in active development at version 0.1.0. The core capture, monitoring, library, editing, export, settings, menu-bar, update, storage-reserve, accessibility-navigation, and interrupted-recovery architectures are implemented. External release acceptance still requires the signed hardware capture matrix, long-duration A/V drift tests, HDR validation, a complete spoken VoiceOver acceptance pass, and Intel plus Apple-silicon export coverage.
+Reccy is in active development at version 0.1.0. The core capture, monitoring, transcription, library, editing, export, settings, menu-bar, update, storage-reserve, accessibility-navigation, and interrupted-recovery architectures are implemented. External release acceptance still requires the signed hardware capture matrix, long-duration A/V drift tests, HDR validation, a complete spoken VoiceOver acceptance pass, and Intel plus Apple-silicon export coverage.
