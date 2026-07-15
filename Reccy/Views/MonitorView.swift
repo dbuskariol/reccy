@@ -195,6 +195,8 @@ struct MonitorView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
 
+                Spacer(minLength: 16)
+
                 Button {
                     coordinator.stopRecording()
                 } label: {
@@ -404,7 +406,7 @@ private struct LiveTranscriptCard: View {
                     ScrollView(.vertical) {
                         LazyVStack(alignment: .leading, spacing: 8) {
                             if finalized.isEmpty && volatile.isEmpty {
-                                Text("Waiting for speech…")
+                                Text("Listening… First words can take a moment to appear.")
                                     .foregroundStyle(.tertiary)
                                     .frame(maxWidth: .infinity, alignment: .topLeading)
                             } else {

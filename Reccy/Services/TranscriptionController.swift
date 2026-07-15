@@ -100,7 +100,7 @@ final class TranscriptionController: ObservableObject {
         transcribeMicrophone = defaults.object(forKey: Keys.microphone) as? Bool ?? true
         localeIdentifier = defaults.string(forKey: Keys.locale) ?? Locale.current.identifier
         whisperModelIdentifier = defaults.string(forKey: Keys.whisperModel)
-            ?? WhisperModelManager.recommendedModel
+            ?? WhisperModelManager.defaultModel
     }
 
     func refreshCapabilities() {
@@ -120,6 +120,7 @@ final class TranscriptionController: ObservableObject {
                 didLoadInstalledWhisperModels = true
                 if availableWhisperModels.isEmpty {
                     availableWhisperModels = [
+                        WhisperModelManager.defaultModel,
                         WhisperModelManager.recommendedModel,
                         WhisperModelManager.compactModel,
                     ]
