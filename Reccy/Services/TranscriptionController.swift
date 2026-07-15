@@ -20,13 +20,19 @@ nonisolated enum TranscriptionJobState: Equatable, Sendable {
 @MainActor
 final class TranscriptionController: ObservableObject {
     @Published var provider: TranscriptionProvider {
-        didSet { defaults.set(provider.rawValue, forKey: Keys.provider) }
+        didSet {
+            defaults.set(provider.rawValue, forKey: Keys.provider)
+            prewarmSelectedLiveEngine()
+        }
     }
     @Published var automaticallyTranscribe: Bool {
         didSet { defaults.set(automaticallyTranscribe, forKey: Keys.automaticallyTranscribe) }
     }
     @Published var showLiveTranscript: Bool {
-        didSet { defaults.set(showLiveTranscript, forKey: Keys.showLiveTranscript) }
+        didSet {
+            defaults.set(showLiveTranscript, forKey: Keys.showLiveTranscript)
+            prewarmSelectedLiveEngine()
+        }
     }
     @Published var transcribeSystemAudio: Bool {
         didSet { defaults.set(transcribeSystemAudio, forKey: Keys.systemAudio) }
@@ -35,12 +41,16 @@ final class TranscriptionController: ObservableObject {
         didSet { defaults.set(transcribeMicrophone, forKey: Keys.microphone) }
     }
     @Published var localeIdentifier: String {
-        didSet { defaults.set(localeIdentifier, forKey: Keys.locale) }
+        didSet {
+            defaults.set(localeIdentifier, forKey: Keys.locale)
+            prewarmSelectedLiveEngine()
+        }
     }
     @Published var whisperModelIdentifier: String {
         didSet {
             defaults.set(whisperModelIdentifier, forKey: Keys.whisperModel)
             whisperEngine = nil
+            prewarmSelectedLiveEngine()
         }
     }
     @Published private(set) var supportedLocales: [Locale] = []
@@ -64,6 +74,7 @@ final class TranscriptionController: ObservableObject {
     private var whisperEngine: WhisperKitTranscriptionEngine?
     private var transcriptionTasks: [URL: Task<Void, Never>] = [:]
     private var liveSetupTask: Task<Void, Never>?
+    private var livePrewarmTask: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard, modelManager: WhisperModelManager = WhisperModelManager()) {
         self.defaults = defaults
@@ -115,6 +126,7 @@ final class TranscriptionController: ObservableObject {
                 installedWhisperModels = await modelManager.installedModels()
                 whisperDownloadProgress = nil
                 whisperEngine = nil
+                prewarmSelectedLiveEngine()
             } catch {
                 whisperDownloadProgress = nil
                 whisperModelError = error.localizedDescription
@@ -148,6 +160,38 @@ final class TranscriptionController: ObservableObject {
             } catch {
                 whisperModelError = error.localizedDescription
             }
+        }
+    }
+
+    /// Loads the selected local WhisperKit model while the user configures a
+    /// recording, so capture never owns the expensive Core ML cold start.
+    /// WhisperKitTranscriptionEngine.prepare coalesces this work with any
+    /// concurrent post-recording or live request.
+    func prewarmSelectedLiveEngine() {
+        livePrewarmTask?.cancel()
+        livePrewarmTask = nil
+        guard showLiveTranscript, provider == .whisperKit else { return }
+        let selectedLocale = localeIdentifier
+        let selectedModel = whisperModelIdentifier
+        let engine = engine(for: .whisperKit)
+        livePrewarmTask = Task { [weak self] in
+            guard let self else { return }
+            let availability = await engine.availability(localeIdentifier: selectedLocale)
+            guard availability == .ready, !Task.isCancelled else {
+                if whisperModelIdentifier == selectedModel { livePrewarmTask = nil }
+                return
+            }
+            do {
+                try await engine.prepare(localeIdentifier: selectedLocale) { _ in }
+                if whisperModelIdentifier == selectedModel { whisperModelError = nil }
+            } catch is CancellationError {
+                // A new provider, locale, or model superseded this prewarm.
+            } catch {
+                if whisperModelIdentifier == selectedModel {
+                    whisperModelError = error.localizedDescription
+                }
+            }
+            if whisperModelIdentifier == selectedModel { livePrewarmTask = nil }
         }
     }
 
@@ -311,6 +355,7 @@ final class TranscriptionController: ObservableObject {
             liveSetupTask = nil
             return
         }
+        liveNotice = "Preparing \(selectedProvider.title) for live transcription…"
         liveSetupTask = Task { [weak self] in
             guard let self else { return }
             let engine = engine(for: selectedProvider)
@@ -335,6 +380,8 @@ final class TranscriptionController: ObservableObject {
                     }
                 }
                 await liveRouter.install(sessions)
+                guard !Task.isCancelled else { return }
+                liveNotice = nil
             } catch {
                 liveNotice = error.localizedDescription
             }
@@ -344,6 +391,11 @@ final class TranscriptionController: ObservableObject {
     func finishLive(mediaURL: URL, manifest: RecordingManifest) {
         let setup = liveSetupTask
         liveSetupTask = nil
+        jobs[mediaURL] = .working(.init(
+            phase: .finalizing,
+            fractionCompleted: nil,
+            detail: "Finalizing live transcript"
+        ))
         Task { [weak self] in
             guard let self else { return }
             await setup?.value
@@ -365,6 +417,8 @@ final class TranscriptionController: ObservableObject {
                 try? await store.save(document, for: mediaURL)
                 documents[mediaURL] = document
                 jobs[mediaURL] = .ready
+            } else {
+                jobs[mediaURL] = .idle
             }
             liveUpdates = [:]
             if automaticallyTranscribe {
@@ -549,12 +603,13 @@ actor LiveTranscriptionRouter {
     private let maximumPendingPackets = 1_500
 
     func install(_ sessions: [TranscriptTrackRole: any LiveTranscriptionSession]) async {
+        let bufferedPackets = pending
+        pending.removeAll(keepingCapacity: false)
         self.sessions = sessions
-        for (role, packets) in pending {
+        for (role, packets) in bufferedPackets {
             guard let session = sessions[role] else { continue }
             for packet in packets { await session.ingest(packet) }
         }
-        pending.removeAll(keepingCapacity: false)
     }
 
     func ingest(_ packet: TimedAudioBuffer, role: TranscriptTrackRole) async {
@@ -562,29 +617,33 @@ actor LiveTranscriptionRouter {
             await session.ingest(packet)
             return
         }
-        pending[role, default: []].append(packet)
-        if pending[role, default: []].count > maximumPendingPackets {
-            pending[role]?.removeFirst(pending[role]!.count - maximumPendingPackets)
+        var packets = pending.removeValue(forKey: role) ?? []
+        packets.append(packet)
+        if packets.count > maximumPendingPackets {
+            packets.removeFirst(packets.count - maximumPendingPackets)
         }
+        pending[role] = packets
     }
 
     func finish(trackIDs: [TranscriptTrackRole: Int32]) async -> [TranscriptTrack] {
+        let activeSessions = sessions
+        sessions.removeAll(keepingCapacity: false)
+        pending.removeAll(keepingCapacity: false)
         var tracks: [TranscriptTrack] = []
-        for (role, session) in sessions {
+        for (role, session) in activeSessions {
             guard let trackID = trackIDs[role], let track = try? await session.finish(sourceTrackID: trackID) else {
                 await session.cancel()
                 continue
             }
             tracks.append(track)
         }
-        sessions.removeAll()
-        pending.removeAll()
         return tracks
     }
 
     func cancel() async {
-        for session in sessions.values { await session.cancel() }
-        sessions.removeAll()
-        pending.removeAll()
+        let activeSessions = Array(sessions.values)
+        sessions.removeAll(keepingCapacity: false)
+        pending.removeAll(keepingCapacity: false)
+        for session in activeSessions { await session.cancel() }
     }
 }

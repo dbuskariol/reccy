@@ -30,7 +30,7 @@ nonisolated struct TranscriptionProgressUpdate: Equatable, Sendable {
     let detail: String?
 }
 
-nonisolated struct LiveTranscriptUpdate: Sendable {
+nonisolated struct LiveTranscriptUpdate: Equatable, Sendable {
     let role: TranscriptTrackRole
     let finalizedSegments: [TranscriptSegment]
     let volatileSegments: [TranscriptSegment]

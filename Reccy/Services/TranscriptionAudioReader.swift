@@ -4,11 +4,46 @@ import Foundation
 import os
 
 nonisolated enum TranscriptionAudioReader {
+    static func temporaryPCMTrack(
+        mediaURL: URL,
+        sourceTrackID: Int32
+    ) async throws -> URL {
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        )!
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Speech Track \(UUID().uuidString)")
+            .appendingPathExtension("caf")
+        do {
+            // AVAudioFile flushes its container metadata when it is released. Keep the
+            // writer in an inner scope so analyzeSequence(from:) never observes a
+            // partially finalized CAF file.
+            do {
+                let output = try AVAudioFile(forWriting: destination, settings: format.settings)
+                let packets = try await stream(
+                    mediaURL: mediaURL,
+                    sourceTrackID: sourceTrackID,
+                    outputFormat: format
+                )
+                for try await packet in packets {
+                    try output.write(from: packet.buffer)
+                }
+            }
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
     static func stream(
         mediaURL: URL,
         sourceTrackID: Int32,
         outputFormat: AVAudioFormat
-    ) async throws -> AsyncThrowingStream<TimedAudioBuffer, Error> {
+    ) async throws -> TranscriptionAudioStream {
         let asset = AVURLAsset(url: mediaURL)
         let tracks = try await asset.loadTracks(withMediaType: .audio)
         guard let track = tracks.first(where: { $0.trackID == sourceTrackID }) else {
@@ -29,44 +64,9 @@ nonisolated enum TranscriptionAudioReader {
         output.alwaysCopiesSampleData = false
         guard reader.canAdd(output) else { throw TranscriptionEngineError.cannotReadAudio }
         reader.add(output)
-        let context = TranscriptionReaderContext(reader: reader, output: output)
-
-        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(256)) { continuation in
-            let task = Task.detached(priority: .userInitiated) {
-                guard context.reader.startReading() else {
-                    continuation.finish(throwing: context.reader.error ?? TranscriptionEngineError.cannotReadAudio)
-                    return
-                }
-
-                while !Task.isCancelled, let sampleBuffer = context.output.copyNextSampleBuffer() {
-                    do {
-                        let buffer = try pcmBuffer(from: sampleBuffer)
-                        let result = continuation.yield(TimedAudioBuffer(
-                            buffer: buffer,
-                            startTime: sampleBuffer.presentationTimeStamp
-                        ))
-                        if case .terminated = result {
-                            context.reader.cancelReading()
-                            return
-                        }
-                    } catch {
-                        context.reader.cancelReading()
-                        continuation.finish(throwing: error)
-                        return
-                    }
-                }
-
-                if Task.isCancelled {
-                    context.reader.cancelReading()
-                    continuation.finish(throwing: CancellationError())
-                } else if context.reader.status == .failed {
-                    continuation.finish(throwing: context.reader.error ?? TranscriptionEngineError.cannotReadAudio)
-                } else {
-                    continuation.finish()
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
+        return TranscriptionAudioStream(
+            context: TranscriptionReaderContext(reader: reader, output: output)
+        )
     }
 
     static func pcmBuffer(from sampleBuffer: CMSampleBuffer) throws -> AVAudioPCMBuffer {
@@ -140,12 +140,65 @@ nonisolated enum TranscriptionAudioReader {
     }
 }
 
-private nonisolated final class TranscriptionReaderContext: @unchecked Sendable {
-    let reader: AVAssetReader
-    let output: AVAssetReaderTrackOutput
+/// A pull-based exact-track sequence. AVAssetReader advances only when the
+/// transcription engine asks for the next packet, providing natural
+/// backpressure without buffering or dropping source audio during inference.
+nonisolated struct TranscriptionAudioStream: AsyncSequence, Sendable {
+    typealias Element = TimedAudioBuffer
+
+    struct AsyncIterator: AsyncIteratorProtocol {
+        private let context: TranscriptionReaderContext
+
+        init(context: TranscriptionReaderContext) {
+            self.context = context
+        }
+
+        mutating func next() async throws -> TimedAudioBuffer? {
+            try await context.next()
+        }
+    }
+
+    private let context: TranscriptionReaderContext
+
+    init(context: TranscriptionReaderContext) {
+        self.context = context
+    }
+
+    func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(context: context)
+    }
+}
+
+actor TranscriptionReaderContext {
+    private let reader: AVAssetReader
+    private let output: AVAssetReaderTrackOutput
+    private var started = false
 
     init(reader: AVAssetReader, output: AVAssetReaderTrackOutput) {
         self.reader = reader
         self.output = output
+    }
+
+    func next() throws -> TimedAudioBuffer? {
+        if Task.isCancelled {
+            reader.cancelReading()
+            throw CancellationError()
+        }
+        if !started {
+            guard reader.startReading() else {
+                throw reader.error ?? TranscriptionEngineError.cannotReadAudio
+            }
+            started = true
+        }
+        if let sampleBuffer = output.copyNextSampleBuffer() {
+            return TimedAudioBuffer(
+                buffer: try TranscriptionAudioReader.pcmBuffer(from: sampleBuffer),
+                startTime: sampleBuffer.presentationTimeStamp
+            )
+        }
+        if reader.status == .failed {
+            throw reader.error ?? TranscriptionEngineError.cannotReadAudio
+        }
+        return nil
     }
 }

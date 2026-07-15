@@ -3,6 +3,7 @@ import SwiftUI
 struct RecordView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
     @EnvironmentObject private var navigation: AppNavigationModel
+    @EnvironmentObject private var transcription: TranscriptionController
 
     private let threeColumnLayout = Array(
         repeating: GridItem(.flexible(minimum: 180), spacing: 18, alignment: .topLeading),
@@ -52,6 +53,9 @@ struct RecordView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("Record")
+        .onAppear {
+            transcription.prewarmSelectedLiveEngine()
+        }
         .toolbar {
             ToolbarItem {
                 Button {

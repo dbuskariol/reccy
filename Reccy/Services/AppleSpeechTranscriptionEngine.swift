@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Foundation
+import os
 import Speech
 
 actor AppleSpeechTranscriptionEngine: TranscriptionEngine {
@@ -56,37 +57,15 @@ actor AppleSpeechTranscriptionEngine: TranscriptionEngine {
             modules: [transcriber],
             options: .init(priority: .userInitiated, modelRetention: .lingering)
         )
-        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
-            throw TranscriptionEngineError.cannotConvertAudio
-        }
 
         progress(.init(phase: .readingAudio, fractionCompleted: 0, detail: request.name))
-        let duration = try await AVURLAsset(url: request.mediaURL).load(.duration).seconds
-        let packets = try await TranscriptionAudioReader.stream(
+        let audioURL = try await TranscriptionAudioReader.temporaryPCMTrack(
             mediaURL: request.mediaURL,
-            sourceTrackID: request.sourceTrackID,
-            outputFormat: format
+            sourceTrackID: request.sourceTrackID
         )
-        let inputs = AsyncThrowingStream<AnalyzerInput, Error>(bufferingPolicy: .bufferingNewest(256)) { continuation in
-            let task = Task {
-                do {
-                    for try await packet in packets {
-                        let packetEnd = packet.startTime.seconds
-                            + (Double(packet.buffer.frameLength) / packet.buffer.format.sampleRate)
-                        progress(.init(
-                            phase: .readingAudio,
-                            fractionCompleted: duration.isFinite && duration > 0 ? min(1, packetEnd / duration) : nil,
-                            detail: request.name
-                        ))
-                        continuation.yield(AnalyzerInput(buffer: packet.buffer, bufferStartTime: packet.startTime))
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        let audioFile = try AVAudioFile(forReading: audioURL)
+        progress(.init(phase: .readingAudio, fractionCompleted: 1, detail: request.name))
 
         let accumulator = AppleSpeechResultAccumulator(
             role: request.role,
@@ -99,11 +78,14 @@ actor AppleSpeechTranscriptionEngine: TranscriptionEngine {
         }
 
         do {
-            try await analyzer.prepareToAnalyze(in: format)
             progress(.init(phase: .transcribing, fractionCompleted: nil, detail: request.name))
-            _ = try await analyzer.analyzeSequence(inputs)
+            let lastSampleTime = try await analyzer.analyzeSequence(from: audioFile)
             progress(.init(phase: .finalizing, fractionCompleted: nil, detail: request.name))
-            try await analyzer.finalizeAndFinishThroughEndOfInput()
+            if let lastSampleTime {
+                try await analyzer.finalizeAndFinish(through: lastSampleTime)
+            } else {
+                await analyzer.cancelAndFinishNow()
+            }
             try await resultTask.value
         } catch {
             resultTask.cancel()
@@ -119,7 +101,7 @@ actor AppleSpeechTranscriptionEngine: TranscriptionEngine {
             name: request.name,
             provider: provider,
             localeIdentifier: locale.identifier,
-            modelIdentifier: "apple-speech-(locale.identifier)",
+            modelIdentifier: "apple-speech-\(locale.identifier)",
             segments: segments
         )
     }
@@ -183,7 +165,11 @@ private actor AppleSpeechResultAccumulator {
         let segment = Self.segment(from: result)
         if result.isFinal {
             volatileSegments.removeAll { Self.overlaps($0, segment) }
-            finalizedSegments.removeAll { Self.overlaps($0, segment) }
+            // SpeechTranscriber final results are immutable timeline additions. They
+            // can touch (or slightly cross) phrase boundaries, so deleting every
+            // intersecting final result drops already-confirmed words. Only replace
+            // a result for the same revision window; later finalized phrases append.
+            finalizedSegments.removeAll { Self.isSameRevisionWindow($0, segment) }
             finalizedSegments.append(segment)
             finalizedSegments.sort { $0.sourceStart < $1.sourceStart }
         } else {
@@ -223,7 +209,14 @@ private actor AppleSpeechResultAccumulator {
     }
 
     private static func overlaps(_ lhs: TranscriptSegment, _ rhs: TranscriptSegment) -> Bool {
-        lhs.sourceStart < rhs.sourceEnd + 0.05 && rhs.sourceStart < lhs.sourceEnd + 0.05
+        lhs.sourceStart < rhs.sourceEnd && rhs.sourceStart < lhs.sourceEnd
+    }
+
+    private static func isSameRevisionWindow(_ lhs: TranscriptSegment, _ rhs: TranscriptSegment) -> Bool {
+        let startTolerance = 0.05
+        let durationTolerance = max(0.1, max(lhs.duration, rhs.duration) * 0.1)
+        return abs(lhs.sourceStart - rhs.sourceStart) <= startTolerance
+            && abs(lhs.duration - rhs.duration) <= durationTolerance
     }
 }
 
@@ -238,6 +231,7 @@ private actor AppleSpeechLiveSession: LiveTranscriptionSession {
     private let analysisTask: Task<Void, Error>
     private let resultTask: Task<Void, Error>
     private let accumulator: AppleSpeechResultAccumulator
+    private let converter = AppleSpeechBufferConverter()
     private var isFinished = false
 
     init(
@@ -283,8 +277,8 @@ private actor AppleSpeechLiveSession: LiveTranscriptionSession {
     func ingest(_ packet: TimedAudioBuffer) {
         guard !isFinished else { return }
         do {
-            let converted = try TranscriptionAudioReader.convert(packet, to: format)
-            continuation.yield(AnalyzerInput(buffer: converted.buffer, bufferStartTime: converted.startTime))
+            let converted = try converter.convert(packet.buffer, to: format)
+            continuation.yield(AnalyzerInput(buffer: converted, bufferStartTime: packet.startTime))
         } catch {
             // Capture remains authoritative. A failed transcription conversion is isolated to this session.
         }
@@ -303,7 +297,7 @@ private actor AppleSpeechLiveSession: LiveTranscriptionSession {
             name: name,
             provider: .appleSpeech,
             localeIdentifier: locale.identifier,
-            modelIdentifier: "apple-speech-(locale.identifier)",
+            modelIdentifier: "apple-speech-\(locale.identifier)",
             segments: await accumulator.finalizedSegments
         )
     }
@@ -315,5 +309,45 @@ private actor AppleSpeechLiveSession: LiveTranscriptionSession {
         analysisTask.cancel()
         resultTask.cancel()
         await analyzer.cancelAndFinishNow()
+    }
+}
+
+/// macOS 26's SpeechAnalyzer API requires callers to convert live buffers to
+/// `bestAvailableAudioFormat`. This is the conversion pattern from Apple's
+/// WWDC25 SpeechAnalyzer code-along; the framework-provided
+/// `AnalyzerInputConverter` arrives in macOS 27 and is intentionally not used by
+/// this macOS 26-only target.
+private nonisolated final class AppleSpeechBufferConverter: @unchecked Sendable {
+    private var converter: AVAudioConverter?
+
+    func convert(_ buffer: AVAudioPCMBuffer, to format: AVAudioFormat) throws -> AVAudioPCMBuffer {
+        if buffer.format == format { return buffer }
+        if converter?.inputFormat != buffer.format || converter?.outputFormat != format {
+            converter = AVAudioConverter(from: buffer.format, to: format)
+            converter?.primeMethod = .none
+        }
+        guard let converter else { throw TranscriptionEngineError.cannotConvertAudio }
+        let ratio = converter.outputFormat.sampleRate / converter.inputFormat.sampleRate
+        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up))
+        guard let output = AVAudioPCMBuffer(
+            pcmFormat: converter.outputFormat,
+            frameCapacity: max(1, capacity)
+        ) else { throw TranscriptionEngineError.cannotConvertAudio }
+
+        var conversionError: NSError?
+        let inputState = OSAllocatedUnfairLock(initialState: false)
+        let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+            let shouldSupply = inputState.withLock { suppliedInput in
+                if suppliedInput { return false }
+                suppliedInput = true
+                return true
+            }
+            inputStatus.pointee = shouldSupply ? .haveData : .noDataNow
+            return shouldSupply ? buffer : nil
+        }
+        guard status != .error, conversionError == nil else {
+            throw conversionError ?? TranscriptionEngineError.cannotConvertAudio
+        }
+        return output
     }
 }
