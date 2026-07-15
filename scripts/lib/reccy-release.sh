@@ -92,6 +92,27 @@ reccy_assert_clean_worktree() {
     || reccy_fail 'the worktree is dirty; commit the verified release source first (or set RECCY_ALLOW_DIRTY=1 for a non-shipping rehearsal)'
 }
 
+reccy_assert_capture_access_declarations() {
+  local root="$1"
+  local info="$root/Configuration/Reccy-Info.plist"
+  local entitlements
+
+  [[ -n "$(reccy_plist_value NSMicrophoneUsageDescription "$info")" ]] \
+    || reccy_fail 'the microphone usage description is missing'
+  [[ -n "$(reccy_plist_value NSCameraUsageDescription "$info")" ]] \
+    || reccy_fail 'the camera usage description is missing'
+
+  for entitlements in \
+    "$root/Reccy/Reccy.entitlements" \
+    "$root/Reccy/ReccyDebug.entitlements"
+  do
+    [[ "$(reccy_plist_value com.apple.security.device.audio-input "$entitlements")" == "true" ]] \
+      || reccy_fail "the audio-input entitlement is missing from $entitlements"
+    [[ "$(reccy_plist_value com.apple.security.device.camera "$entitlements")" == "true" ]] \
+      || reccy_fail "the camera entitlement is missing from $entitlements"
+  done
+}
+
 reccy_assert_release_metadata() {
   local root="$1"
   local settings version build notes_heading tag
@@ -107,6 +128,8 @@ reccy_assert_release_metadata() {
     || reccy_fail "MARKETING_VERSION is not a release version: ${version:-missing}"
   [[ "$build" =~ ^[1-9][0-9]*$ ]] \
     || reccy_fail "CURRENT_PROJECT_VERSION must be a positive integer: ${build:-missing}"
+
+  reccy_assert_capture_access_declarations "$root"
 
   notes_heading="$(/usr/bin/sed -n '1p' "$root/Documentation/RELEASE_NOTES.md" 2>/dev/null || true)"
   [[ "$notes_heading" == "# Reccy $version" ]] \
@@ -154,6 +177,10 @@ reccy_assert_release_app() {
   [[ "$build" =~ ^[1-9][0-9]*$ ]] \
     || reccy_fail "invalid app build: ${build:-missing}"
   [[ -x "$executable" ]] || reccy_fail "main executable is missing: $executable"
+  [[ -n "$(reccy_plist_value NSMicrophoneUsageDescription "$info")" ]] \
+    || reccy_fail 'the release is missing its microphone usage description'
+  [[ -n "$(reccy_plist_value NSCameraUsageDescription "$info")" ]] \
+    || reccy_fail 'the release is missing its camera usage description'
 
   /usr/bin/codesign --verify --strict --deep --verbose=2 "$app" \
     || reccy_fail 'the app signature is invalid'
@@ -172,6 +199,8 @@ reccy_assert_release_app() {
     || { /bin/rm -f "$entitlements"; reccy_fail 'unable to inspect release entitlements'; }
   [[ "$(reccy_plist_value com.apple.security.device.audio-input "$entitlements")" == "true" ]] \
     || { /bin/rm -f "$entitlements"; reccy_fail 'the audio-input entitlement is missing'; }
+  [[ "$(reccy_plist_value com.apple.security.device.camera "$entitlements")" == "true" ]] \
+    || { /bin/rm -f "$entitlements"; reccy_fail 'the camera entitlement is missing'; }
   [[ -z "$(reccy_plist_value com.apple.security.get-task-allow "$entitlements")" ]] \
     || { /bin/rm -f "$entitlements"; reccy_fail 'release contains the debug get-task-allow entitlement'; }
   [[ -z "$(reccy_plist_value com.apple.security.cs.disable-library-validation "$entitlements")" ]] \
