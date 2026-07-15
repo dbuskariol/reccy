@@ -36,7 +36,6 @@ struct EditorView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Editor")
-        .toolbar { editorToolbar }
         .sheet(item: $exportSource) { source in
             ExportSheet(source: source)
         }
@@ -88,9 +87,10 @@ struct EditorView: View {
     private func editorWorkspace(_ project: TimelineProject) -> some View {
         Group {
             if showsTranscript {
-                HStack(spacing: 0) {
+                HSplitView {
                     editorCore(project)
-                    Divider()
+                        .frame(minWidth: 460, idealWidth: 720)
+
                     Group {
                         switch inspectorMode {
                         case .transcript:
@@ -99,7 +99,7 @@ struct EditorView: View {
                             captionPanel(project)
                         }
                     }
-                    .frame(width: 340)
+                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 520)
                 }
             } else {
                 editorCore(project)
@@ -239,6 +239,9 @@ struct EditorView: View {
 
     private func timelinePane(_ project: TimelineProject) -> some View {
         VStack(spacing: 0) {
+            timelineToolbar
+            Divider()
+
             HStack(alignment: .top, spacing: 0) {
                 trackHeaders(project)
                     .frame(width: trackHeaderWidth)
@@ -455,157 +458,313 @@ struct EditorView: View {
         .frame(width: trackWidth, alignment: .leading)
     }
 
-    @ToolbarContentBuilder
-    private var editorToolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .automatic) {
-            Menu("Edit", systemImage: "slider.horizontal.3") {
-                Button("Split Clip", systemImage: "scissors") {
-                    editor.splitSelectionAtPlayhead()
-                }
-                .disabled(!editor.canSplitSelection)
-                .keyboardShortcut("b", modifiers: .command)
+    private var timelineToolbar: some View {
+        ViewThatFits(in: .horizontal) {
+            expandedTimelineToolbar
+                .fixedSize(horizontal: true, vertical: false)
+            compactTimelineToolbar
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
+    }
 
-                Button("Split All Tracks", systemImage: "timeline.selection") {
-                    editor.splitAllAtPlayhead()
-                }
-                .disabled(!editor.canSplitAll)
-                .keyboardShortcut("b", modifiers: [.command, .shift])
+    private var expandedTimelineToolbar: some View {
+        HStack(spacing: 8) {
+            timelineEditMenu
+            linkedClipsButton
+            gapFillPicker
 
+            Divider().frame(height: 20)
+
+            voiceoverInputMenu
+            voiceoverButton
+
+            Divider().frame(height: 20)
+
+            inspectorButton(.transcript, title: "Transcript", systemImage: "captions.bubble")
+            inspectorButton(.captions, title: "Captions", systemImage: "captions.bubble.fill")
+            saveButton
+            exportButton
+
+            Divider().frame(height: 20)
+
+            Image(systemName: "minus.magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Slider(value: $editor.pixelsPerSecond, in: 30...220)
+                .frame(width: 104)
+                .accessibilityLabel("Timeline zoom")
+            Image(systemName: "plus.magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var compactTimelineToolbar: some View {
+        HStack(spacing: 8) {
+            timelineEditMenu
+            linkedClipsButton
+            gapFillMenu
+            voiceoverInputMenu
+            voiceoverButton
+            inspectorMenu
+            saveButton
+            exportButton
+            timelineZoomMenu
+        }
+    }
+
+    private var timelineEditMenu: some View {
+        Menu {
+            Button("Split Clip", systemImage: "scissors") {
+                editor.splitSelectionAtPlayhead()
+            }
+            .disabled(!editor.canSplitSelection)
+            .keyboardShortcut("b", modifiers: .command)
+
+            Button("Split All Tracks", systemImage: "timeline.selection") {
+                editor.splitAllAtPlayhead()
+            }
+            .disabled(!editor.canSplitAll)
+            .keyboardShortcut("b", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button("Delete Clip", systemImage: "trash", role: .destructive) {
+                editor.deleteSelection()
+            }
+            .disabled(editor.selectedClipID == nil)
+            .keyboardShortcut(.delete, modifiers: [])
+
+            Button("Close Gap", systemImage: "arrow.left.and.right") {
+                editor.rippleDeleteSelection()
+            }
+            .disabled(editor.selectedClipID == nil)
+            .keyboardShortcut(.delete, modifiers: .command)
+
+            if editor.selectedClipIsCamera, let selectedClipID = editor.selectedClipID {
                 Divider()
-
-                Button("Delete Clip", systemImage: "trash", role: .destructive) {
-                    editor.deleteSelection()
-                }
-                .disabled(editor.selectedClipID == nil)
-                .keyboardShortcut(.delete, modifiers: [])
-
-                Button("Close Gap", systemImage: "arrow.left.and.right") {
-                    editor.rippleDeleteSelection()
-                }
-                .disabled(editor.selectedClipID == nil)
-                .keyboardShortcut(.delete, modifiers: .command)
-
-                if editor.selectedClipIsCamera, let selectedClipID = editor.selectedClipID {
-                    Divider()
-                    Button("Reset Camera Position", systemImage: "arrow.counterclockwise") {
-                        editor.resetVideoLayout(clipID: selectedClipID)
-                    }
+                Button("Reset Camera Position", systemImage: "arrow.counterclockwise") {
+                    editor.resetVideoLayout(clipID: selectedClipID)
                 }
             }
-            .reccyTooltip("Timeline editing actions")
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .frame(width: 20, height: 18)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .frame(width: 44)
+        .accessibilityLabel("Edit timeline")
+        .reccyTooltip("Timeline editing actions")
+    }
 
-            Button {
-                editor.moveLinkedClips.toggle()
-            } label: {
-                Label(
-                    editor.moveLinkedClips ? "Linked Clips" : "Independent Clips",
-                    systemImage: editor.moveLinkedClips ? "link" : "link.badge.plus"
-                )
+    private var linkedClipsButton: some View {
+        Button {
+            editor.moveLinkedClips.toggle()
+        } label: {
+            Image(systemName: editor.moveLinkedClips ? "link" : "link.badge.plus")
+                .frame(width: 20, height: 18)
+        }
+        .buttonStyle(.bordered)
+        .frame(width: 44)
+        .tint(editor.moveLinkedClips ? .accentColor : nil)
+        .reccyAccessibleControl("Move linked audio and video")
+        .reccyTooltip(editor.moveLinkedClips
+            ? "Linked movement is on — video and matching audio move or trim together"
+            : "Independent movement is on — each audio or video clip moves and trims separately")
+    }
+
+    private var gapFillPicker: some View {
+        Picker(
+            "Gap Fill",
+            selection: Binding(
+                get: { editor.selectedGapFillMode },
+                set: { editor.setSelectedGapFillMode($0) }
+            )
+        ) {
+            ForEach(TimelineGapFillMode.allCases) { mode in
+                Image(systemName: mode.systemImage)
+                    .accessibilityLabel(mode.title)
+                    .tag(mode)
             }
-            .tint(editor.moveLinkedClips ? .accentColor : nil)
-            .reccyAccessibleControl("Move linked audio and video")
-            .reccyTooltip(editor.moveLinkedClips
-                ? "Linked movement is on — video and matching audio move or trim together"
-                : "Independent movement is on — each audio or video clip moves and trims separately")
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .frame(width: 126)
+        .disabled(editor.selectedGapID == nil)
+        .reccyTooltip(gapFillHelp)
+    }
 
-            Menu("Gap Fill", systemImage: editor.selectedGapFillMode.systemImage) {
-                ForEach(TimelineGapFillMode.allCases) { mode in
-                    Button {
-                        editor.setSelectedGapFillMode(mode)
-                    } label: {
-                        Label(
-                            mode.title,
-                            systemImage: editor.selectedGapFillMode == mode ? "checkmark" : mode.systemImage
-                        )
-                    }
-                }
-            }
-            .disabled(editor.selectedGapID == nil)
-            .reccyTooltip(editor.selectedGapID == nil
-                ? "Select a video gap to choose how it renders"
-                : "Render this gap as black, the previous frame, or the next frame")
-
-            Menu("Voiceover Input", systemImage: "mic.badge.plus") {
+    private var gapFillMenu: some View {
+        Menu {
+            ForEach(TimelineGapFillMode.allCases) { mode in
                 Button {
-                    editor.selectedVoiceoverInputID = nil
+                    editor.setSelectedGapFillMode(mode)
                 } label: {
                     Label(
-                        "System Default",
-                        systemImage: editor.selectedVoiceoverInputID == nil ? "checkmark" : "circle"
+                        mode.title,
+                        systemImage: editor.selectedGapFillMode == mode ? "checkmark" : mode.systemImage
                     )
                 }
-                Divider()
-                ForEach(editor.voiceoverInputDevices) { device in
-                    Button {
-                        editor.selectedVoiceoverInputID = device.id
-                    } label: {
-                        Label(
-                            device.name,
-                            systemImage: editor.selectedVoiceoverInputID == device.id ? "checkmark" : "circle"
-                        )
-                    }
-                }
             }
-            .disabled(editor.isVoiceoverRecording)
-            .reccyTooltip("Voiceover input: \(editor.selectedVoiceoverInputName)")
+        } label: {
+            Image(systemName: editor.selectedGapFillMode.systemImage)
+                .frame(width: 20, height: 18)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .frame(width: 44)
+        .disabled(editor.selectedGapID == nil)
+        .accessibilityLabel("Gap Fill")
+        .reccyTooltip(gapFillHelp)
+    }
 
+    private var gapFillHelp: String {
+        editor.selectedGapID == nil
+            ? "Select a video gap to choose how it renders"
+            : "Render this gap as black, the previous frame, or the next frame"
+    }
+
+    private var voiceoverInputMenu: some View {
+        Menu {
             Button {
-                editor.toggleVoiceover()
+                editor.selectedVoiceoverInputID = nil
             } label: {
                 Label(
-                    editor.isVoiceoverRecording ? "Stop Voiceover" : "Record Voiceover",
-                    systemImage: editor.isVoiceoverRecording ? "stop.fill" : "mic.fill"
+                    "System Default",
+                    systemImage: editor.selectedVoiceoverInputID == nil ? "checkmark" : "circle"
                 )
             }
-            .tint(editor.isVoiceoverRecording ? .red : nil)
-            .reccyTooltip("Record a new, independently editable audio clip at the playhead")
-
-            Menu("Timeline Zoom", systemImage: "magnifyingglass") {
-                Button("Zoom In", systemImage: "plus.magnifyingglass") {
-                    editor.pixelsPerSecond = min(220, editor.pixelsPerSecond + 20)
-                }
-                .disabled(editor.pixelsPerSecond >= 220)
-                Button("Zoom Out", systemImage: "minus.magnifyingglass") {
-                    editor.pixelsPerSecond = max(30, editor.pixelsPerSecond - 20)
-                }
-                .disabled(editor.pixelsPerSecond <= 30)
-                Divider()
-                Button("Reset Zoom", systemImage: "arrow.counterclockwise") {
-                    editor.pixelsPerSecond = 72
+            Divider()
+            ForEach(editor.voiceoverInputDevices) { device in
+                Button {
+                    editor.selectedVoiceoverInputID = device.id
+                } label: {
+                    Label(
+                        device.name,
+                        systemImage: editor.selectedVoiceoverInputID == device.id ? "checkmark" : "circle"
+                    )
                 }
             }
-            .reccyTooltip("Timeline zoom")
+        } label: {
+            Image(systemName: "mic.badge.plus")
+                .frame(width: 20, height: 18)
         }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .frame(width: 44)
+        .disabled(editor.isVoiceoverRecording)
+        .accessibilityLabel("Voiceover Input")
+        .reccyTooltip("Voiceover input: \(editor.selectedVoiceoverInputName)")
+    }
 
-        ToolbarItemGroup(placement: .automatic) {
+    private var voiceoverButton: some View {
+        Button {
+            editor.toggleVoiceover()
+        } label: {
+            Image(systemName: editor.isVoiceoverRecording ? "stop.fill" : "mic.fill")
+                .frame(width: 20, height: 18)
+        }
+        .buttonStyle(.borderedProminent)
+        .frame(width: 44)
+        .tint(editor.isVoiceoverRecording ? .red : .accentColor)
+        .reccyAccessibleControl(editor.isVoiceoverRecording ? "Stop Voiceover" : "Record Voiceover")
+        .reccyTooltip("Record a new, independently editable audio clip at the playhead")
+    }
+
+    private func inspectorButton(
+        _ mode: EditorInspectorMode,
+        title: String,
+        systemImage: String
+    ) -> some View {
+        Button {
+            toggleInspector(mode)
+        } label: {
+            Image(systemName: systemImage)
+                .frame(width: 20, height: 18)
+        }
+        .buttonStyle(.bordered)
+        .frame(width: 44)
+        .tint(showsTranscript && inspectorMode == mode ? .accentColor : nil)
+        .reccyAccessibleControl(title)
+    }
+
+    private var inspectorMenu: some View {
+        Menu {
             Button("Transcript", systemImage: "captions.bubble") {
                 toggleInspector(.transcript)
             }
-            .disabled(!editor.hasProject)
-            .tint(showsTranscript && inspectorMode == .transcript ? .accentColor : nil)
-
             Button("Captions", systemImage: "captions.bubble.fill") {
                 toggleInspector(.captions)
             }
-            .disabled(!editor.hasProject)
-            .tint(showsTranscript && inspectorMode == .captions ? .accentColor : nil)
-
-            Button("Save", systemImage: "square.and.arrow.down") {
-                do { try editor.save() } catch { exportError = error.localizedDescription }
-            }
-            .disabled(!editor.hasProject)
+        } label: {
+            Image(systemName: "sidebar.trailing")
+                .frame(width: 20, height: 18)
         }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .frame(width: 44)
+        .accessibilityLabel("Editor panels")
+        .reccyTooltip("Show transcript or caption controls")
+    }
 
-        ToolbarItem(placement: .primaryAction) {
-            Button("Export", systemImage: "square.and.arrow.up") {
-                do {
-                    exportSource = try editor.makeExportSource()
-                } catch {
-                    exportError = error.localizedDescription
-                }
-            }
-            .disabled(!editor.hasProject || editor.isRebuilding)
+    private var saveButton: some View {
+        Button {
+            do { try editor.save() } catch { exportError = error.localizedDescription }
+        } label: {
+            Image(systemName: "square.and.arrow.down")
+                .frame(width: 20, height: 18)
         }
+        .buttonStyle(.bordered)
+        .frame(width: 44)
+        .disabled(!editor.hasProject)
+        .reccyAccessibleControl("Save")
+    }
+
+    private var exportButton: some View {
+        Button {
+            do {
+                exportSource = try editor.makeExportSource()
+            } catch {
+                exportError = error.localizedDescription
+            }
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+                .frame(width: 20, height: 18)
+        }
+        .buttonStyle(.borderedProminent)
+        .frame(width: 44)
+        .disabled(!editor.hasProject || editor.isRebuilding)
+        .reccyAccessibleControl("Export")
+    }
+
+    private var timelineZoomMenu: some View {
+        Menu {
+            Button("Zoom In", systemImage: "plus.magnifyingglass") {
+                editor.pixelsPerSecond = min(220, editor.pixelsPerSecond + 20)
+            }
+            .disabled(editor.pixelsPerSecond >= 220)
+            Button("Zoom Out", systemImage: "minus.magnifyingglass") {
+                editor.pixelsPerSecond = max(30, editor.pixelsPerSecond - 20)
+            }
+            .disabled(editor.pixelsPerSecond <= 30)
+            Divider()
+            Button("Reset Zoom", systemImage: "arrow.counterclockwise") {
+                editor.pixelsPerSecond = 72
+            }
+        } label: {
+            Image(systemName: "magnifyingglass")
+                .frame(width: 20, height: 18)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .frame(width: 44)
+        .accessibilityLabel("Timeline Zoom")
+        .reccyTooltip("Timeline zoom")
     }
 
     private func captionPanel(_ project: TimelineProject) -> some View {
