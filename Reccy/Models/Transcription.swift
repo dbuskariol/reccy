@@ -30,6 +30,20 @@ nonisolated enum TranscriptionProvider: String, Codable, CaseIterable, Identifia
     }
 }
 
+/// The immutable transcription decisions attached to one capture session.
+/// Preferences can continue changing elsewhere in the app without altering a
+/// recording that has already started.
+nonisolated struct CaptureTranscriptionConfiguration: Equatable, Sendable {
+    let isEnabled: Bool
+    let provider: TranscriptionProvider
+    let localeIdentifier: String
+    let whisperModelIdentifier: String
+    let createsLiveTranscript: Bool
+    let automaticallyTranscribes: Bool
+    let includesSystemAudio: Bool
+    let includesMicrophone: Bool
+}
+
 nonisolated enum TranscriptTrackRole: String, Codable, CaseIterable, Sendable {
     case systemAudio
     case microphone

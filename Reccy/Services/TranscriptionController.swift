@@ -19,6 +19,12 @@ nonisolated enum TranscriptionJobState: Equatable, Sendable {
 
 @MainActor
 final class TranscriptionController: ObservableObject {
+    @Published var isEnabledForCapture: Bool {
+        didSet {
+            defaults.set(isEnabledForCapture, forKey: Keys.captureEnabled)
+            prewarmSelectedLiveEngine()
+        }
+    }
     @Published var provider: TranscriptionProvider {
         didSet {
             defaults.set(provider.rawValue, forKey: Keys.provider)
@@ -59,19 +65,21 @@ final class TranscriptionController: ObservableObject {
     @Published private(set) var applePreparationError: String?
     @Published private(set) var availableWhisperModels: [String] = []
     @Published private(set) var installedWhisperModels: [WhisperModelRecord] = []
+    @Published private(set) var didLoadInstalledWhisperModels = false
     @Published private(set) var whisperDownloadProgress: Double?
     @Published private(set) var whisperModelError: String?
     @Published private(set) var jobs: [URL: TranscriptionJobState] = [:]
     @Published private(set) var documents: [URL: TranscriptDocument] = [:]
     @Published private(set) var liveUpdates: [TranscriptTrackRole: LiveTranscriptUpdate] = [:]
     @Published private(set) var liveNotice: String?
+    @Published private(set) var isLiveCaptureEnabled = false
 
     nonisolated let liveRouter = LiveTranscriptionRouter()
     private let defaults: UserDefaults
     private let store = TranscriptStore()
     private let modelManager: WhisperModelManager
     private let appleEngine = AppleSpeechTranscriptionEngine()
-    private var whisperEngine: WhisperKitTranscriptionEngine?
+    private var whisperEngine: (modelIdentifier: String, engine: WhisperKitTranscriptionEngine)?
     private var transcriptionTasks: [URL: Task<Void, Never>] = [:]
     private var liveSetupTask: Task<Void, Never>?
     private var livePrewarmTask: Task<Void, Never>?
@@ -79,6 +87,7 @@ final class TranscriptionController: ObservableObject {
     init(defaults: UserDefaults = .standard, modelManager: WhisperModelManager = WhisperModelManager()) {
         self.defaults = defaults
         self.modelManager = modelManager
+        isEnabledForCapture = defaults.object(forKey: Keys.captureEnabled) as? Bool ?? true
         provider = TranscriptionProvider(rawValue: defaults.string(forKey: Keys.provider) ?? "") ?? .appleSpeech
         automaticallyTranscribe = defaults.object(forKey: Keys.automaticallyTranscribe) as? Bool ?? true
         showLiveTranscript = defaults.object(forKey: Keys.showLiveTranscript) as? Bool ?? true
@@ -98,16 +107,35 @@ final class TranscriptionController: ObservableObject {
             do {
                 try await modelManager.load()
                 installedWhisperModels = await modelManager.installedModels()
+                didLoadInstalledWhisperModels = true
                 availableWhisperModels = try await modelManager.availableModels()
                 whisperModelError = nil
             } catch {
                 installedWhisperModels = await modelManager.installedModels()
+                didLoadInstalledWhisperModels = true
                 if availableWhisperModels.isEmpty {
                     availableWhisperModels = [
                         WhisperModelManager.recommendedModel,
                         WhisperModelManager.compactModel,
                     ]
                 }
+                whisperModelError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Refreshes only Reccy's local model index for the capture surface. The
+    /// network-backed model catalogue remains a Settings responsibility.
+    func refreshInstalledWhisperModels() {
+        Task {
+            do {
+                try await modelManager.load()
+                installedWhisperModels = await modelManager.installedModels()
+                didLoadInstalledWhisperModels = true
+                whisperModelError = nil
+            } catch {
+                installedWhisperModels = await modelManager.installedModels()
+                didLoadInstalledWhisperModels = true
                 whisperModelError = error.localizedDescription
             }
         }
@@ -124,6 +152,7 @@ final class TranscriptionController: ObservableObject {
                     Task { @MainActor in self?.whisperDownloadProgress = fraction }
                 }
                 installedWhisperModels = await modelManager.installedModels()
+                didLoadInstalledWhisperModels = true
                 whisperDownloadProgress = nil
                 whisperEngine = nil
                 prewarmSelectedLiveEngine()
@@ -156,6 +185,7 @@ final class TranscriptionController: ObservableObject {
             do {
                 try await modelManager.remove(identifier)
                 installedWhisperModels = await modelManager.installedModels()
+                didLoadInstalledWhisperModels = true
                 whisperEngine = nil
             } catch {
                 whisperModelError = error.localizedDescription
@@ -170,10 +200,10 @@ final class TranscriptionController: ObservableObject {
     func prewarmSelectedLiveEngine() {
         livePrewarmTask?.cancel()
         livePrewarmTask = nil
-        guard showLiveTranscript, provider == .whisperKit else { return }
+        guard isEnabledForCapture, showLiveTranscript, provider == .whisperKit else { return }
         let selectedLocale = localeIdentifier
         let selectedModel = whisperModelIdentifier
-        let engine = engine(for: .whisperKit)
+        let engine = engine(for: .whisperKit, whisperModelIdentifier: selectedModel)
         livePrewarmTask = Task { [weak self] in
             guard let self else { return }
             let availability = await engine.availability(localeIdentifier: selectedLocale)
@@ -221,18 +251,25 @@ final class TranscriptionController: ObservableObject {
     func transcribe(
         mediaURL: URL,
         manifest: RecordingManifest,
-        replacingExisting: Bool = true
+        replacingExisting: Bool = true,
+        configuration: CaptureTranscriptionConfiguration? = nil
     ) {
         transcriptionTasks[mediaURL]?.cancel()
         jobs[mediaURL] = .queued
-        let selectedProvider = provider
-        let selectedLocale = localeIdentifier
-        let includeSystem = transcribeSystemAudio && manifest.includesSystemAudio
-        let includeMicrophone = transcribeMicrophone && manifest.includesMicrophone
+        let selectedProvider = configuration?.provider ?? provider
+        let selectedLocale = configuration?.localeIdentifier ?? localeIdentifier
+        let selectedWhisperModel = configuration?.whisperModelIdentifier ?? whisperModelIdentifier
+        let includeSystem = (configuration?.includesSystemAudio ?? transcribeSystemAudio)
+            && manifest.includesSystemAudio
+        let includeMicrophone = (configuration?.includesMicrophone ?? transcribeMicrophone)
+            && manifest.includesMicrophone
         transcriptionTasks[mediaURL] = Task { [weak self] in
             guard let self else { return }
             do {
-                let engine = engine(for: selectedProvider)
+                let engine = engine(
+                    for: selectedProvider,
+                    whisperModelIdentifier: selectedWhisperModel
+                )
                 let tracks = try await AVURLAsset(url: mediaURL).loadTracks(withMediaType: .audio)
                 var requests: [TranscriptionTrackRequest] = []
                 var index = 0
@@ -307,7 +344,7 @@ final class TranscriptionController: ObservableObject {
                 .compactMap(\.value.first)
             transcriptionTasks[mediaURL]?.cancel()
             jobs[mediaURL] = .queued
-            let engine = engine(for: provider)
+            let engine = engine(for: provider, whisperModelIdentifier: whisperModelIdentifier)
             let selectedLocale = localeIdentifier
             transcriptionTasks[mediaURL] = Task { [weak self] in
                 guard let self else { return }
@@ -341,24 +378,50 @@ final class TranscriptionController: ObservableObject {
         }
     }
 
-    func beginLive(systemAudio: Bool, microphone: Bool, microphoneName: String) {
+    func makeCaptureConfiguration(
+        systemAudio: Bool,
+        microphone: Bool
+    ) -> CaptureTranscriptionConfiguration {
+        let includesSystemAudio = isEnabledForCapture && systemAudio && transcribeSystemAudio
+        let includesMicrophone = isEnabledForCapture && microphone && transcribeMicrophone
+        let hasTranscribableAudio = includesSystemAudio || includesMicrophone
+        return CaptureTranscriptionConfiguration(
+            isEnabled: isEnabledForCapture && hasTranscribableAudio,
+            provider: provider,
+            localeIdentifier: localeIdentifier,
+            whisperModelIdentifier: whisperModelIdentifier,
+            createsLiveTranscript: isEnabledForCapture && hasTranscribableAudio && showLiveTranscript,
+            automaticallyTranscribes: isEnabledForCapture && hasTranscribableAudio && automaticallyTranscribe,
+            includesSystemAudio: includesSystemAudio,
+            includesMicrophone: includesMicrophone
+        )
+    }
+
+    func beginLive(
+        configuration: CaptureTranscriptionConfiguration,
+        microphoneName: String
+    ) {
         liveSetupTask?.cancel()
         liveUpdates = [:]
         liveNotice = nil
-        let selectedProvider = provider
-        let selectedLocale = localeIdentifier
+        let selectedProvider = configuration.provider
+        let selectedLocale = configuration.localeIdentifier
         let roles: [(TranscriptTrackRole, String)] = [
-            systemAudio && transcribeSystemAudio ? (.systemAudio, "System Audio") : nil,
-            microphone && transcribeMicrophone ? (.microphone, microphoneName) : nil,
+            configuration.includesSystemAudio ? (.systemAudio, "System Audio") : nil,
+            configuration.includesMicrophone ? (.microphone, microphoneName) : nil,
         ].compactMap { $0 }
-        guard showLiveTranscript, !roles.isEmpty else {
+        isLiveCaptureEnabled = configuration.createsLiveTranscript && !roles.isEmpty
+        guard configuration.createsLiveTranscript, !roles.isEmpty else {
             liveSetupTask = nil
             return
         }
         liveNotice = "Preparing \(selectedProvider.title) for live transcription…"
         liveSetupTask = Task { [weak self] in
             guard let self else { return }
-            let engine = engine(for: selectedProvider)
+            let engine = engine(
+                for: selectedProvider,
+                whisperModelIdentifier: configuration.whisperModelIdentifier
+            )
             let availability = await engine.availability(localeIdentifier: selectedLocale)
             if case .unavailable(let reason) = availability {
                 liveNotice = reason
@@ -388,14 +451,24 @@ final class TranscriptionController: ObservableObject {
         }
     }
 
-    func finishLive(mediaURL: URL, manifest: RecordingManifest) {
+    func finishLive(
+        mediaURL: URL,
+        manifest: RecordingManifest,
+        configuration: CaptureTranscriptionConfiguration
+    ) {
+        guard configuration.isEnabled else {
+            cancelLive()
+            return
+        }
         let setup = liveSetupTask
         liveSetupTask = nil
-        jobs[mediaURL] = .working(.init(
-            phase: .finalizing,
-            fractionCompleted: nil,
-            detail: "Finalizing live transcript"
-        ))
+        if configuration.createsLiveTranscript {
+            jobs[mediaURL] = .working(.init(
+                phase: .finalizing,
+                fractionCompleted: nil,
+                detail: "Finalizing live transcript"
+            ))
+        }
         Task { [weak self] in
             guard let self else { return }
             await setup?.value
@@ -409,7 +482,9 @@ final class TranscriptionController: ObservableObject {
             if manifest.includesMicrophone, audioTracks.indices.contains(index) {
                 trackIDs[.microphone] = audioTracks[index].trackID
             }
-            let liveTracks = await liveRouter.finish(trackIDs: trackIDs)
+            let liveTracks = configuration.createsLiveTranscript
+                ? await liveRouter.finish(trackIDs: trackIDs)
+                : []
             if !liveTracks.isEmpty {
                 var document = (try? await store.load(for: mediaURL))
                     ?? TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: [])
@@ -421,8 +496,13 @@ final class TranscriptionController: ObservableObject {
                 jobs[mediaURL] = .idle
             }
             liveUpdates = [:]
-            if automaticallyTranscribe {
-                transcribe(mediaURL: mediaURL, manifest: manifest)
+            isLiveCaptureEnabled = false
+            if configuration.automaticallyTranscribes {
+                transcribe(
+                    mediaURL: mediaURL,
+                    manifest: manifest,
+                    configuration: configuration
+                )
             }
         }
     }
@@ -433,6 +513,7 @@ final class TranscriptionController: ObservableObject {
         Task { await liveRouter.cancel() }
         liveUpdates = [:]
         liveNotice = nil
+        isLiveCaptureEnabled = false
     }
 
     func export(
@@ -462,21 +543,28 @@ final class TranscriptionController: ObservableObject {
         installedWhisperModels.contains { $0.id == identifier }
     }
 
-    private func engine(for provider: TranscriptionProvider) -> any TranscriptionEngine {
+    private func engine(
+        for provider: TranscriptionProvider,
+        whisperModelIdentifier requestedWhisperModel: String
+    ) -> any TranscriptionEngine {
         switch provider {
         case .appleSpeech: return appleEngine
         case .whisperKit:
-            if let whisperEngine { return whisperEngine }
+            if let whisperEngine,
+               whisperEngine.modelIdentifier == requestedWhisperModel {
+                return whisperEngine.engine
+            }
             let engine = WhisperKitTranscriptionEngine(
                 modelManager: modelManager,
-                modelIdentifier: whisperModelIdentifier
+                modelIdentifier: requestedWhisperModel
             )
-            whisperEngine = engine
+            whisperEngine = (requestedWhisperModel, engine)
             return engine
         }
     }
 
     private enum Keys {
+        static let captureEnabled = "transcription.capture-enabled"
         static let provider = "transcription.provider"
         static let automaticallyTranscribe = "transcription.automatic"
         static let showLiveTranscript = "transcription.live"
@@ -495,6 +583,7 @@ final class TranscriptionController: ObservableObject {
 
 #if DEBUG
     func installMonitorQAScenario() {
+        isLiveCaptureEnabled = true
         let system = TranscriptSegment(
             text: "Welcome to the product walkthrough. The export is ready.",
             sourceStart: 2.1,

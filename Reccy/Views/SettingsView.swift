@@ -358,32 +358,41 @@ struct SettingsView: View {
 
             SettingsCard(title: "Recording Workflow") {
                 SettingsToggleRow(
-                    title: "Transcribe new recordings",
-                    detail: "Create a source-aligned transcript automatically after every capture.",
-                    systemImage: "text.badge.checkmark",
-                    isOn: $transcription.automaticallyTranscribe
-                )
-                SettingsDivider()
-                SettingsToggleRow(
-                    title: "Show live transcript",
-                    detail: "Display finalized and in-progress words in Monitor without affecting capture performance.",
+                    title: "Enable transcription",
+                    detail: "Allow live and post-recording transcription during capture.",
                     systemImage: "captions.bubble",
-                    isOn: $transcription.showLiveTranscript
+                    isOn: $transcription.isEnabledForCapture
                 )
-                SettingsDivider()
-                SettingsToggleRow(
-                    title: "System audio",
-                    detail: "Transcribe remote speakers and app audio on its independent source track.",
-                    systemImage: "speaker.wave.2",
-                    isOn: $transcription.transcribeSystemAudio
-                )
-                SettingsDivider()
-                SettingsToggleRow(
-                    title: "Microphone & voiceover",
-                    detail: "Transcribe your microphone as a separate editable source track.",
-                    systemImage: "mic",
-                    isOn: $transcription.transcribeMicrophone
-                )
+                if transcription.isEnabledForCapture {
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "Create post-recording transcript",
+                        detail: "Create a source-aligned transcript automatically after every capture.",
+                        systemImage: "text.badge.checkmark",
+                        isOn: $transcription.automaticallyTranscribe
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "Show live transcript",
+                        detail: "Display finalized and in-progress words in Monitor without affecting capture performance.",
+                        systemImage: "captions.bubble",
+                        isOn: $transcription.showLiveTranscript
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "System audio",
+                        detail: "Transcribe remote speakers and app audio on its independent source track.",
+                        systemImage: "speaker.wave.2",
+                        isOn: $transcription.transcribeSystemAudio
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "Microphone & voiceover",
+                        detail: "Transcribe your microphone as a separate editable source track.",
+                        systemImage: "mic",
+                        isOn: $transcription.transcribeMicrophone
+                    )
+                }
             }
 
             SettingsCard(title: "Apple Speech") {

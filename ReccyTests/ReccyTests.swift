@@ -122,6 +122,7 @@ struct ReccyTests {
         controller?.provider = .whisperKit
         controller?.whisperModelIdentifier = WhisperModelManager.compactModel
         controller?.showLiveTranscript = false
+        controller?.isEnabledForCapture = false
         controller = nil
 
         let restored = TranscriptionController(
@@ -131,6 +132,44 @@ struct ReccyTests {
         #expect(restored.provider == .whisperKit)
         #expect(restored.whisperModelIdentifier == WhisperModelManager.compactModel)
         #expect(restored.showLiveTranscript == false)
+        #expect(restored.isEnabledForCapture == false)
+    }
+
+    @Test @MainActor func captureTranscriptionConfigurationIsAnImmutableSessionSnapshot() {
+        let suiteName = "ReccyTests.TranscriptionSnapshot.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let modelDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Model Snapshot Test \(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: modelDirectory) }
+        let controller = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory)
+        )
+        controller.isEnabledForCapture = true
+        controller.provider = .whisperKit
+        controller.localeIdentifier = "en_AU"
+        controller.whisperModelIdentifier = WhisperModelManager.compactModel
+        controller.automaticallyTranscribe = true
+        controller.showLiveTranscript = true
+        controller.transcribeSystemAudio = true
+        controller.transcribeMicrophone = false
+
+        let configuration = controller.makeCaptureConfiguration(
+            systemAudio: true,
+            microphone: true
+        )
+        controller.provider = .appleSpeech
+        controller.isEnabledForCapture = false
+
+        #expect(configuration.isEnabled)
+        #expect(configuration.provider == .whisperKit)
+        #expect(configuration.localeIdentifier == "en_AU")
+        #expect(configuration.whisperModelIdentifier == WhisperModelManager.compactModel)
+        #expect(configuration.createsLiveTranscript)
+        #expect(configuration.automaticallyTranscribes)
+        #expect(configuration.includesSystemAudio)
+        #expect(!configuration.includesMicrophone)
     }
 
     @Test func transcriptProjectionFollowsIndependentTimelineEdits() {

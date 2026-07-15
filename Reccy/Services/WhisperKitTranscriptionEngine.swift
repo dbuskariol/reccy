@@ -206,9 +206,21 @@ actor WhisperKitTranscriptionEngine: TranscriptionEngine {
     }
 
     nonisolated static func displayName(_ identifier: String) -> String {
-        identifier
+        let variant = identifier
             .replacingOccurrences(of: "openai_whisper-", with: "Whisper ")
+            .replacingOccurrences(of: #"-v\d{8}"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"_\d+(?:MB|GB)$"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+        return variant
+            .split(separator: " ")
+            .map { word in
+                let value = String(word)
+                return value.range(of: #"^v\d+$"#, options: .regularExpression) == nil
+                    ? value.localizedCapitalized
+                    : value
+            }
+            .joined(separator: " ")
     }
 }
 

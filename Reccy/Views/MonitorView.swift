@@ -17,7 +17,7 @@ struct MonitorView: View {
                         header
                         monitoringOverview
                         audioSection
-                        if transcription.showLiveTranscript {
+                        if transcription.isLiveCaptureEnabled {
                             liveTranscriptSection
                         }
                     }

@@ -54,6 +54,7 @@ struct RecordView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("Record")
         .onAppear {
+            transcription.refreshInstalledWhisperModels()
             transcription.prewarmSelectedLiveEngine()
         }
         .toolbar {
@@ -252,7 +253,87 @@ struct RecordView: View {
                         }
                         optionToggleRow("Exclude Reccy audio", isOn: $coordinator.settings.excludeOwnAudio)
                     }
+
                 }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Transcription", systemImage: "captions.bubble")
+                        .font(.headline)
+
+                    LazyVGrid(columns: threeColumnLayout, alignment: .leading, spacing: 18) {
+                        transcriptionToggle
+
+                        if transcription.isEnabledForCapture {
+                            settingPicker("Engine", selection: $transcription.provider) {
+                                ForEach(TranscriptionProvider.allCases) { provider in
+                                    Text(provider.title).tag(provider)
+                                }
+                            }
+
+                            if transcription.provider == .whisperKit {
+                                whisperModelControl
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var transcriptionToggle: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Recording transcript")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Toggle("Transcribe", isOn: $transcription.isEnabledForCapture)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var whisperModelControl: some View {
+        if !transcription.didLoadInstalledWhisperModels {
+            HStack(spacing: 7) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading models")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(minHeight: 26)
+        } else if transcription.installedWhisperModels.isEmpty {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Model")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Button("Download a model") {
+                    navigation.openSettings(.transcription)
+                }
+                .buttonStyle(.link)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Model")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Picker("Model", selection: $transcription.whisperModelIdentifier) {
+                    if !transcription.isWhisperModelInstalled(transcription.whisperModelIdentifier) {
+                        Text("Choose Model")
+                            .tag(transcription.whisperModelIdentifier)
+                            .disabled(true)
+                    }
+                    ForEach(transcription.installedWhisperModels) { model in
+                        Text(transcription.whisperModelDisplayName(model.id))
+                            .tag(model.id)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
             }
         }
     }

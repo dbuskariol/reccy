@@ -112,6 +112,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var recordingLease: RecordingSessionLease?
     private var activeOutputURL: URL?
     private var activeRecordingManifest: RecordingManifest?
+    private var activeTranscriptionConfiguration: CaptureTranscriptionConfiguration?
     private var pendingCompletionNotice: String?
     private var countdownTask: Task<Void, Never>?
     private var recordingStartTask: Task<Void, Never>?
@@ -610,9 +611,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             )
 
             let recorder = MultitrackRecorder()
-            transcription.beginLive(
+            let transcriptionConfiguration = transcription.makeCaptureConfiguration(
                 systemAudio: settings.includeSystemAudio,
-                microphone: settings.includeMicrophone,
+                microphone: settings.includeMicrophone
+            )
+            transcription.beginLive(
+                configuration: transcriptionConfiguration,
                 microphoneName: selectedMicrophoneName
             )
             let liveRouter = transcription.liveRouter
@@ -643,6 +647,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             multitrackRecorder = recorder
             activeOutputURL = outputURL
             activeRecordingManifest = manifest
+            activeTranscriptionConfiguration = transcriptionConfiguration
             try await recorder.start(
                 filter: filter,
                 configuration: streamConfiguration,
@@ -837,8 +842,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             lastRecordingURL = completedURL
         }
         let completedManifest = activeRecordingManifest
+        let completedTranscriptionConfiguration = activeTranscriptionConfiguration
         activeOutputURL = nil
         activeRecordingManifest = nil
+        activeTranscriptionConfiguration = nil
         clearSourceSelection()
         resetSessionTelemetry()
         state = .idle
@@ -862,8 +869,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         recordingLease = nil
         NSApp.requestUserAttention(.informationalRequest)
         if let completedURL {
-            if let completedManifest {
-                transcription.finishLive(mediaURL: completedURL, manifest: completedManifest)
+            if let completedManifest, let completedTranscriptionConfiguration {
+                transcription.finishLive(
+                    mediaURL: completedURL,
+                    manifest: completedManifest,
+                    configuration: completedTranscriptionConfiguration
+                )
             } else {
                 transcription.cancelLive()
             }
@@ -887,6 +898,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         multitrackRecorder = nil
         activeOutputURL = nil
         activeRecordingManifest = nil
+        activeTranscriptionConfiguration = nil
         pendingCompletionNotice = nil
         recordingLease = nil
         previewPipeline.clear()
@@ -967,6 +979,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         multitrackRecorder = nil
         activeOutputURL = nil
         activeRecordingManifest = nil
+        activeTranscriptionConfiguration = nil
         clearSourceSelection()
         resetSessionTelemetry()
         previewPipeline.clear()
