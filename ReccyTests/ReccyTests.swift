@@ -64,6 +64,40 @@ struct ReccyTests {
         await router.cancel()
     }
 
+    @Test func transcriptionBatchKeepsSpokenTrackWhenAnotherSourceHasNoSpeech() async throws {
+        let engine = SelectiveTranscriptionEngine(failingRoles: [.systemAudio])
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Independent Transcription.mp4")
+        let requests = [
+            TranscriptionTrackRequest(
+                mediaURL: mediaURL,
+                sourceTrackID: 1,
+                role: .systemAudio,
+                name: "System Audio",
+                localeIdentifier: "en-AU"
+            ),
+            TranscriptionTrackRequest(
+                mediaURL: mediaURL,
+                sourceTrackID: 2,
+                role: .microphone,
+                name: "Microphone",
+                localeIdentifier: "en-AU"
+            ),
+        ]
+
+        let result = try await TranscriptionBatchProcessor.transcribe(
+            requests,
+            with: engine
+        ) { _ in }
+
+        #expect(result.tracks.map(\.role) == [.microphone])
+        #expect(result.failures == [TranscriptionTrackFailure(
+            role: .systemAudio,
+            name: "System Audio",
+            message: TranscriptionEngineError.noSpeechRecognized.localizedDescription
+        )])
+        #expect(await engine.attemptedRoles == [.systemAudio, .microphone])
+    }
+
     @Test func appleSpeechAdvertisesAPlatformSupportedLocaleWhenAvailable() async {
         guard SpeechTranscriber.isAvailable else { return }
         let supportedLocales = await SpeechTranscriber.supportedLocales
@@ -2327,6 +2361,58 @@ private actor CountingLiveTranscriptionSession: LiveTranscriptionSession {
     }
 
     func cancel() {}
+}
+
+private actor SelectiveTranscriptionEngine: TranscriptionEngine {
+    nonisolated let provider = TranscriptionProvider.appleSpeech
+    private let failingRoles: Set<TranscriptTrackRole>
+    private(set) var attemptedRoles: [TranscriptTrackRole] = []
+
+    init(failingRoles: Set<TranscriptTrackRole>) {
+        self.failingRoles = failingRoles
+    }
+
+    func availability(localeIdentifier: String) -> TranscriptionEngineAvailability { .ready }
+
+    func prepare(
+        localeIdentifier: String,
+        progress: @escaping @Sendable (TranscriptionProgressUpdate) -> Void
+    ) {}
+
+    func transcribe(
+        _ request: TranscriptionTrackRequest,
+        progress: @escaping @Sendable (TranscriptionProgressUpdate) -> Void
+    ) throws -> TranscriptTrack {
+        attemptedRoles.append(request.role)
+        if failingRoles.contains(request.role) {
+            throw TranscriptionEngineError.noSpeechRecognized
+        }
+        return TranscriptTrack(
+            sourceTrackID: request.sourceTrackID,
+            role: request.role,
+            name: request.name,
+            provider: provider,
+            localeIdentifier: request.localeIdentifier,
+            modelIdentifier: "test",
+            segments: [
+                TranscriptSegment(
+                    text: "This source contains speech.",
+                    sourceStart: 0,
+                    duration: 1,
+                    words: []
+                ),
+            ]
+        )
+    }
+
+    func makeLiveSession(
+        role: TranscriptTrackRole,
+        name: String,
+        localeIdentifier: String,
+        update: @escaping @Sendable (LiveTranscriptUpdate) -> Void
+    ) throws -> any LiveTranscriptionSession {
+        throw TranscriptionEngineError.providerUnavailable("Not used by this test.")
+    }
 }
 
 private enum TestMediaError: Error {

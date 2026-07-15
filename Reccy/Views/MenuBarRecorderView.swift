@@ -8,6 +8,7 @@ struct MenuBarRecorderView: View {
     @EnvironmentObject private var editor: TimelineEditorController
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var softwareUpdates: SoftwareUpdateController
+    @EnvironmentObject private var transcription: TranscriptionController
     @State private var menuContentHeight: CGFloat = 300
 
     private let sourceColumns = [
@@ -274,16 +275,28 @@ struct MenuBarRecorderView: View {
                 )
             }
 
+            if captureTranscriptionNeedsAttention {
+                menuTranscriptionReadiness
+            }
+
             HStack(spacing: 8) {
                 Button {
-                    coordinator.startRecording()
-                    dismiss()
+                    if captureTranscriptionNeedsAttention {
+                        if !transcription.captureReadiness.isPreparing {
+                            transcription.prepareSelectedCaptureEngine()
+                        }
+                        showMain(.record)
+                    } else {
+                        coordinator.startRecording()
+                        dismiss()
+                    }
                 } label: {
-                    Label("Start Recording", systemImage: "record.circle")
+                    Label(menuRecordActionTitle, systemImage: menuRecordActionImage)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
+                .disabled(transcription.captureReadiness.isPreparing && captureTranscriptionNeedsAttention)
 
                 Button {
                     coordinator.captureScreenshot()
@@ -299,6 +312,57 @@ struct MenuBarRecorderView: View {
         }
         .padding(12)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 11))
+    }
+
+    private var captureTranscriptionConfiguration: CaptureTranscriptionConfiguration {
+        transcription.makeCaptureConfiguration(
+            systemAudio: coordinator.settings.includeSystemAudio,
+            microphone: coordinator.settings.includeMicrophone
+        )
+    }
+
+    private var captureTranscriptionNeedsAttention: Bool {
+        captureTranscriptionConfiguration.isEnabled && !transcription.captureReadiness.isReady
+    }
+
+    @ViewBuilder
+    private var menuTranscriptionReadiness: some View {
+        switch transcription.captureReadiness {
+        case .preparing(let update):
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(update.detail ?? "Preparing transcription")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        case .unavailable(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .lineLimit(3)
+        case .disabled:
+            Label("Prepare the selected transcription engine before recording.", systemImage: "waveform.badge.magnifyingglass")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .ready:
+            EmptyView()
+        }
+    }
+
+    private var menuRecordActionTitle: String {
+        guard captureTranscriptionNeedsAttention else { return "Start Recording" }
+        return switch transcription.captureReadiness {
+        case .preparing: "Preparing Transcription…"
+        case .unavailable: "Review Transcription"
+        case .disabled: "Prepare Transcription"
+        case .ready: "Start Recording"
+        }
+    }
+
+    private var menuRecordActionImage: String {
+        captureTranscriptionNeedsAttention ? "waveform.badge.magnifyingglass" : "record.circle"
     }
 
     private var activeRecording: some View {

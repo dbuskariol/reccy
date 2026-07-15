@@ -398,7 +398,7 @@ struct LibraryView: View {
                 HStack {
                     SectionHeading(
                         "Transcript",
-                        subtitle: "On-device, source-aligned, and searchable."
+                        subtitle: transcriptSubtitle(for: item)
                     )
                     Spacer()
                     transcriptActions(item)
@@ -509,6 +509,15 @@ struct LibraryView: View {
                 }
             }
             if let fraction { ProgressView(value: fraction) } else { ProgressView() }
+        }
+    }
+
+    private func transcriptSubtitle(for item: RecordingItem) -> String {
+        switch transcription.jobState(for: item.url) {
+        case .queued, .working:
+            "Recording saved. On-device transcription continues here in the background."
+        case .idle, .ready, .failed:
+            "On-device, source-aligned, and searchable."
         }
     }
 
@@ -722,11 +731,15 @@ struct LibraryView: View {
     @ViewBuilder
     private func transcriptStatusBadge(_ item: RecordingItem) -> some View {
         switch transcription.jobState(for: item.url) {
-        case .queued, .working:
-            Image(systemName: "captions.bubble.fill")
-                .font(.caption2)
+        case .queued:
+            compactBadge("Transcript queued", systemImage: "clock.badge")
                 .foregroundStyle(.tint)
-                .accessibilityLabel("Transcribing")
+        case .working(let update):
+            compactBadge(
+                update.phase == .preparing ? "Loading model" : "Transcribing",
+                systemImage: "captions.bubble.fill"
+            )
+            .foregroundStyle(.tint)
         case .ready:
             Image(systemName: "captions.bubble.fill")
                 .font(.caption2)

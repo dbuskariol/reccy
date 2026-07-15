@@ -198,29 +198,33 @@ struct MonitorView: View {
                 Button {
                     coordinator.stopRecording()
                 } label: {
-                    Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
-                        .frame(minWidth: 130)
+                    recordingControlLabel(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .tint(.red)
                 .disabled(coordinator.state == .stopping)
-                .frame(maxWidth: .infinity)
 
                 Button {
                     coordinator.toggleRecordingPause()
                 } label: {
-                    Label(
+                    recordingControlLabel(
                         coordinator.state == .paused ? "Resume Recording" : "Pause Recording",
                         systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill"
                     )
-                    .frame(minWidth: 130)
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.large)
                 .disabled(coordinator.state != .recording && coordinator.state != .paused)
-                .frame(maxWidth: .infinity)
             }
             .frame(maxHeight: .infinity, alignment: .topLeading)
         }
+    }
+
+    private func recordingControlLabel(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .contentShape(Rectangle())
     }
 
     private var audioSection: some View {
