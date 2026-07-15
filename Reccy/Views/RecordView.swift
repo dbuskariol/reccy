@@ -5,14 +5,12 @@ struct RecordView: View {
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var transcription: TranscriptionController
 
-    private let threeColumnLayout = Array(
-        repeating: GridItem(.flexible(minimum: 180), spacing: 18, alignment: .topLeading),
-        count: 3
-    )
-    private let sourceColumnLayout = Array(
-        repeating: GridItem(.flexible(minimum: 160), spacing: 14, alignment: .topLeading),
-        count: 4
-    )
+    private let threeColumnLayout = [
+        GridItem(.adaptive(minimum: 220), spacing: 18, alignment: .topLeading),
+    ]
+    private let sourceColumnLayout = [
+        GridItem(.adaptive(minimum: 160), spacing: 14, alignment: .topLeading),
+    ]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,8 +37,7 @@ struct RecordView: View {
                     }
                 }
                 .padding(28)
-                .frame(maxWidth: 1040, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
 
             if !coordinator.state.isRecording {
@@ -48,7 +45,6 @@ struct RecordView: View {
                 recordControls
                     .padding(.horizontal, 28)
                     .padding(.vertical, 12)
-                    .frame(maxWidth: 1040)
                     .frame(maxWidth: .infinity)
                     .background(.bar)
             }

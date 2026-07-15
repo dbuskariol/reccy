@@ -4,27 +4,10 @@ struct MonitorView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
     @EnvironmentObject private var transcription: TranscriptionController
 
-    private let meterColumns = [
-        GridItem(.flexible(), spacing: 16),
-        GridItem(.flexible(), spacing: 16),
-    ]
-
     var body: some View {
         Group {
             if coordinator.state.isRecording {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        header
-                        monitoringOverview
-                        audioSection
-                        if transcription.isLiveCaptureEnabled {
-                            liveTranscriptSection
-                        }
-                    }
-                    .padding(28)
-                    .frame(maxWidth: 980)
-                    .frame(maxWidth: .infinity, alignment: .top)
-                }
+                activeMonitor
             } else {
                 WorkspaceEmptyState(
                     "No Active Recording",
@@ -57,6 +40,34 @@ struct MonitorView: View {
         }
     }
 
+    private var activeMonitor: some View {
+        VStack(spacing: 0) {
+            header
+                .padding(.horizontal, 28)
+                .padding(.vertical, 20)
+
+            Divider()
+
+            VSplitView {
+                monitoringOverview
+                    .padding(20)
+                    .frame(minHeight: 260, idealHeight: 390)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        audioSection
+                        if transcription.isLiveCaptureEnabled {
+                            liveTranscriptSection
+                        }
+                    }
+                    .padding(28)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .frame(minHeight: 220, idealHeight: 320)
+            }
+        }
+    }
+
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 5) {
@@ -79,18 +90,11 @@ struct MonitorView: View {
     }
 
     private var monitoringOverview: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 16) {
-                livePreview
-                    .frame(maxWidth: .infinity)
-                recordingStatusCard
-                    .frame(width: 260)
-            }
-
-            VStack(spacing: 16) {
-                livePreview
-                recordingStatusCard
-            }
+        HSplitView {
+            livePreview
+                .frame(minWidth: 360, idealWidth: 680, maxWidth: .infinity)
+            recordingStatusCard
+                .frame(minWidth: 240, idealWidth: 280, maxWidth: 380)
         }
     }
 
@@ -236,7 +240,7 @@ struct MonitorView: View {
                 subtitle: "Live levels verify that each enabled source is reaching the recording."
             )
 
-            LazyVGrid(columns: meterColumns, alignment: .leading, spacing: 16) {
+            HSplitView {
                 audioMeterCard(
                     title: "System Audio",
                     systemImage: "speaker.wave.2.fill",
@@ -245,6 +249,8 @@ struct MonitorView: View {
                     history: coordinator.systemAudioHistory,
                     color: .teal
                 )
+                .frame(minWidth: 240, idealWidth: 420)
+
                 audioMeterCard(
                     title: "Microphone",
                     systemImage: "mic.fill",
@@ -253,6 +259,7 @@ struct MonitorView: View {
                     history: coordinator.microphoneAudioHistory,
                     color: .orange
                 )
+                .frame(minWidth: 240, idealWidth: 420)
             }
         }
     }
@@ -310,16 +317,30 @@ struct MonitorView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                LazyVGrid(columns: meterColumns, alignment: .leading, spacing: 16) {
-                    if coordinator.settings.includeSystemAudio && transcription.transcribeSystemAudio {
+                if showsSystemTranscript && showsMicrophoneTranscript {
+                    HSplitView {
                         liveTranscriptCard(role: .systemAudio, color: .teal)
-                    }
-                    if coordinator.settings.includeMicrophone && transcription.transcribeMicrophone {
+                            .frame(minWidth: 240, idealWidth: 420)
                         liveTranscriptCard(role: .microphone, color: .orange)
+                            .frame(minWidth: 240, idealWidth: 420)
                     }
+                } else if showsSystemTranscript {
+                    liveTranscriptCard(role: .systemAudio, color: .teal)
+                        .frame(maxWidth: .infinity)
+                } else if showsMicrophoneTranscript {
+                    liveTranscriptCard(role: .microphone, color: .orange)
+                        .frame(maxWidth: .infinity)
                 }
             }
         }
+    }
+
+    private var showsSystemTranscript: Bool {
+        coordinator.settings.includeSystemAudio && transcription.transcribeSystemAudio
+    }
+
+    private var showsMicrophoneTranscript: Bool {
+        coordinator.settings.includeMicrophone && transcription.transcribeMicrophone
     }
 
     private func liveTranscriptCard(role: TranscriptTrackRole, color: Color) -> some View {

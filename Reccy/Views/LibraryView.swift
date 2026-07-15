@@ -39,14 +39,16 @@ struct LibraryView: View {
                         description: "Your completed recordings will appear here."
                     )
                 } else {
-                    HStack(spacing: 0) {
+                    HSplitView {
                         recordingBrowser
-                            .frame(width: 360)
-
-                        Divider()
+                            .frame(minWidth: 340, idealWidth: 380, maxWidth: 520)
 
                         previewPane
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .frame(
+                                minWidth: 360,
+                                maxWidth: .infinity,
+                                maxHeight: .infinity
+                            )
                     }
                 }
             }
@@ -304,8 +306,7 @@ struct LibraryView: View {
                     recordingDetailsCard(item)
                 }
                 .padding(22)
-                .frame(maxWidth: 760, alignment: .topLeading)
-                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .background(Color(nsColor: .windowBackgroundColor))
         } else {
@@ -414,7 +415,7 @@ struct LibraryView: View {
             }
         }
             .aspectRatio(previewAspectRatio(for: item), contentMode: .fit)
-            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity)
             .background(.black)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
@@ -591,13 +592,13 @@ struct LibraryView: View {
             waveformScrubber(item)
         }
         .padding(12)
-        .frame(maxWidth: 560)
+        .frame(maxWidth: .infinity)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(.separator.opacity(0.4), lineWidth: 0.5)
         }
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity)
     }
 
     private func playbackButton(
