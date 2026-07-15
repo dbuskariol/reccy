@@ -5,6 +5,7 @@ import CoreImage
 import CoreVideo
 import Foundation
 import IOSurface
+import Speech
 import Testing
 import VideoToolbox
 @testable import Reccy
@@ -63,11 +64,14 @@ struct ReccyTests {
         await router.cancel()
     }
 
-    @Test func appleSpeechAdvertisesTheCurrentLocaleWithoutCloudAuthorization() async {
+    @Test func appleSpeechAdvertisesAPlatformSupportedLocaleWhenAvailable() async {
+        guard SpeechTranscriber.isAvailable else { return }
+        let supportedLocales = await SpeechTranscriber.supportedLocales
+        guard let locale = supportedLocales.first else { return }
         let engine = AppleSpeechTranscriptionEngine()
-        let availability = await engine.availability(localeIdentifier: Locale.current.identifier)
+        let availability = await engine.availability(localeIdentifier: locale.identifier)
         if case .unavailable(let reason) = availability {
-            Issue.record("Apple Speech should support the current macOS locale: \(reason)")
+            Issue.record("Apple Speech rejected its own supported locale \(locale.identifier): \(reason)")
         }
     }
 
