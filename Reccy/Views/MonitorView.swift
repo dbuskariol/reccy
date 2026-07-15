@@ -4,27 +4,10 @@ struct MonitorView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
     @EnvironmentObject private var transcription: TranscriptionController
 
-    private let meterColumns = [
-        GridItem(.flexible(), spacing: 16),
-        GridItem(.flexible(), spacing: 16),
-    ]
-
     var body: some View {
         Group {
             if coordinator.state.isRecording {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        header
-                        monitoringOverview
-                        audioSection
-                        if transcription.isLiveCaptureEnabled {
-                            liveTranscriptSection
-                        }
-                    }
-                    .padding(28)
-                    .frame(maxWidth: 980)
-                    .frame(maxWidth: .infinity, alignment: .top)
-                }
+                activeMonitor
             } else {
                 WorkspaceEmptyState(
                     "No Active Recording",
@@ -57,6 +40,42 @@ struct MonitorView: View {
         }
     }
 
+    private var activeMonitor: some View {
+        VStack(spacing: 0) {
+            header
+                .padding(.horizontal, 28)
+                .padding(.vertical, 20)
+
+            Divider()
+
+            ReccySplitView(
+                axis: .vertical,
+                autosaveName: "monitor.overview-details",
+                initialFraction: 0.54,
+                firstMinimum: 260,
+                secondMinimum: 220,
+                firstPaneName: "recording overview",
+                secondPaneName: "recording details",
+                first: {
+                    monitoringOverview
+                        .padding(20)
+                },
+                second: {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            audioSection
+                            if transcription.isLiveCaptureEnabled {
+                                liveTranscriptSection
+                            }
+                        }
+                        .padding(28)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                }
+            )
+        }
+    }
+
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 5) {
@@ -79,19 +98,18 @@ struct MonitorView: View {
     }
 
     private var monitoringOverview: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 16) {
-                livePreview
-                    .frame(maxWidth: .infinity)
-                recordingStatusCard
-                    .frame(width: 260)
-            }
-
-            VStack(spacing: 16) {
-                livePreview
-                recordingStatusCard
-            }
-        }
+        ReccySplitView(
+            axis: .horizontal,
+            autosaveName: "monitor.preview-status",
+            initialFraction: 0.72,
+            firstMinimum: 360,
+            secondMinimum: 240,
+            secondMaximum: 380,
+            firstPaneName: "live preview",
+            secondPaneName: "recording status",
+            first: { livePreview },
+            second: { recordingStatusCard }
+        )
     }
 
     private var livePreview: some View {
@@ -236,24 +254,36 @@ struct MonitorView: View {
                 subtitle: "Live levels verify that each enabled source is reaching the recording."
             )
 
-            LazyVGrid(columns: meterColumns, alignment: .leading, spacing: 16) {
-                audioMeterCard(
-                    title: "System Audio",
-                    systemImage: "speaker.wave.2.fill",
-                    isEnabled: coordinator.settings.includeSystemAudio,
-                    level: coordinator.systemAudioLevel,
-                    history: coordinator.systemAudioHistory,
-                    color: .teal
-                )
-                audioMeterCard(
-                    title: "Microphone",
-                    systemImage: "mic.fill",
-                    isEnabled: coordinator.settings.includeMicrophone,
-                    level: coordinator.microphoneAudioLevel,
-                    history: coordinator.microphoneAudioHistory,
-                    color: .orange
-                )
-            }
+            ReccySplitView(
+                axis: .horizontal,
+                autosaveName: "monitor.audio-sources",
+                initialFraction: 0.5,
+                firstMinimum: 240,
+                secondMinimum: 240,
+                firstPaneName: "system audio meter",
+                secondPaneName: "microphone meter",
+                first: {
+                    audioMeterCard(
+                        title: "System Audio",
+                        systemImage: "speaker.wave.2.fill",
+                        isEnabled: coordinator.settings.includeSystemAudio,
+                        level: coordinator.systemAudioLevel,
+                        history: coordinator.systemAudioHistory,
+                        color: .teal
+                    )
+                },
+                second: {
+                    audioMeterCard(
+                        title: "Microphone",
+                        systemImage: "mic.fill",
+                        isEnabled: coordinator.settings.includeMicrophone,
+                        level: coordinator.microphoneAudioLevel,
+                        history: coordinator.microphoneAudioHistory,
+                        color: .orange
+                    )
+                }
+            )
+            .frame(height: 220)
         }
     }
 
@@ -310,16 +340,36 @@ struct MonitorView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                LazyVGrid(columns: meterColumns, alignment: .leading, spacing: 16) {
-                    if coordinator.settings.includeSystemAudio && transcription.transcribeSystemAudio {
-                        liveTranscriptCard(role: .systemAudio, color: .teal)
-                    }
-                    if coordinator.settings.includeMicrophone && transcription.transcribeMicrophone {
-                        liveTranscriptCard(role: .microphone, color: .orange)
-                    }
+                if showsSystemTranscript && showsMicrophoneTranscript {
+                    ReccySplitView(
+                        axis: .horizontal,
+                        autosaveName: "monitor.live-transcripts",
+                        initialFraction: 0.5,
+                        firstMinimum: 240,
+                        secondMinimum: 240,
+                        firstPaneName: "system audio transcript",
+                        secondPaneName: "microphone transcript",
+                        first: { liveTranscriptCard(role: .systemAudio, color: .teal) },
+                        second: { liveTranscriptCard(role: .microphone, color: .orange) }
+                    )
+                    .frame(height: 180)
+                } else if showsSystemTranscript {
+                    liveTranscriptCard(role: .systemAudio, color: .teal)
+                        .frame(maxWidth: .infinity)
+                } else if showsMicrophoneTranscript {
+                    liveTranscriptCard(role: .microphone, color: .orange)
+                        .frame(maxWidth: .infinity)
                 }
             }
         }
+    }
+
+    private var showsSystemTranscript: Bool {
+        coordinator.settings.includeSystemAudio && transcription.transcribeSystemAudio
+    }
+
+    private var showsMicrophoneTranscript: Bool {
+        coordinator.settings.includeMicrophone && transcription.transcribeMicrophone
     }
 
     private func liveTranscriptCard(role: TranscriptTrackRole, color: Color) -> some View {

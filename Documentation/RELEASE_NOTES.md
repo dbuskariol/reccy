@@ -1,12 +1,13 @@
-# Reccy 0.3.0
+# Reccy 0.3.1
 
-This release adds a native, non-destructive caption workflow to Reccy's editor and fixes application-window presentation throughout playback and export:
+This maintenance release polishes Reccy's native macOS workspace and caption workflow:
 
-- Generates an editable caption track from source-aligned Apple Speech or WhisperKit transcripts while preserving independent system-audio and microphone timing.
-- Lets editors correct recognized transcript segments, regenerate readable caption cues, or add, edit, and remove captions manually at the playhead.
-- Provides native caption placement, sizing, visibility, live Editor and Library previews, and AVFoundation-rendered captions in exported video.
-- Keeps caption edits in the timeline project so the source recording and transcript sidecars remain intact until a finished export is rendered.
-- Fixes selected application-window recordings appearing small inside a black canvas by retaining canonical AVFoundation composition tracks, fitting content without distortion, and using the recording's actual display aspect throughout Library, Editor, and export.
-- Reorganizes the editor around native macOS sidebar, toolbar, menu, material, sizing, keyboard, and accessibility conventions while preserving Reccy's timeline, camera, transcript, and export actions.
+- Makes the sidebar a true layout participant so every page expands and contracts without hiding controls or content.
+- Uses native adjustable split views for Library, Monitor, Editor preview, timeline, and inspector regions, with responsive full-width content, persistent sizing, precise one-point separators, and forgiving 14-point drag targets.
+- Fixes Monitor's active layout and sidebar interaction, including constrained window sizes.
+- Places direct, consistently sized timeline commands above the timeline, keeps borderless zoom controls pinned at the far right, and restores Save and Export to the window's trailing toolbar.
+- Keeps each caption visible from its detected start until the next cue begins in Editor preview, Library playback, and exported video.
+- Adds a dedicated caption timeline lane whose held ranges can be selected, dragged, nudged by frame, edited, added, and removed non-destructively.
+- Mounts enabled caption overlays on first load so captions no longer require an off/on toggle before appearing.
 
 Requires macOS 26 or later. Download the notarized DMG for a standard drag-to-Applications install, or the signed ZIP for Sparkle-compatible deployment. `SHA256SUMS` and `release.json` provide independent artifact integrity and provenance metadata.

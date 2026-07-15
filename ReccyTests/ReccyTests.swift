@@ -396,9 +396,59 @@ struct ReccyTests {
 
         #expect(cues.count == 2)
         #expect(cues[0].text == "Hello world.")
-        #expect(cues[0].duration >= TimelineCaptionCueGenerator.minimumReadableDuration)
+        #expect(abs(cues[0].duration - 1.2) < 0.001)
         #expect(cues[1].text == "A second sentence")
+        #expect(abs(cues[1].timelineEnd - 5) < 0.001)
         #expect(cues.allSatisfy { $0.origin == .transcript })
+    }
+
+    @Test func captionTrackHoldsEachCueUntilTheNextDetectedStart() {
+        let track = TimelineCaptionTrack(cues: [
+            TimelineCaptionCue(text: "Hello", timelineStart: 0.9, duration: 2.4),
+            TimelineCaptionCue(text: "Next phrase", timelineStart: 15.5, duration: 1.2),
+        ])
+
+        let presented = track.presentationCues(through: 20)
+
+        #expect(track.activeCue(at: 10)?.text == "Hello")
+        #expect(track.activeCue(at: 15.5)?.text == "Next phrase")
+        #expect(abs(presented[0].timelineEnd - 15.5) < 0.001)
+        #expect(abs(presented[1].timelineEnd - 20) < 0.001)
+    }
+
+    @Test func captionBoundaryMovesStayOrderedAndRenormalizePresentationRanges() throws {
+        let firstID = UUID()
+        let middleID = UUID()
+        let lastID = UUID()
+        var track = TimelineCaptionTrack(cues: [
+            TimelineCaptionCue(id: firstID, text: "First", timelineStart: 0, duration: 1),
+            TimelineCaptionCue(id: middleID, text: "Middle", timelineStart: 5, duration: 1),
+            TimelineCaptionCue(id: lastID, text: "Last", timelineStart: 10, duration: 1),
+        ])
+
+        let movedStartValue = track.moveCue(
+            id: middleID,
+            to: 8,
+            frameDuration: 0.1,
+            projectDuration: 15
+        )
+        let movedStart = try #require(movedStartValue)
+        let moved = track.presentationCues(through: 15)
+
+        #expect(abs(movedStart - 8) < 0.001)
+        #expect(moved.map(\.id) == [firstID, middleID, lastID])
+        #expect(abs(moved[0].timelineEnd - 8) < 0.001)
+        #expect(abs(moved[1].timelineEnd - 10) < 0.001)
+        #expect(abs(moved[2].timelineEnd - 15) < 0.001)
+
+        let clampedStartValue = track.moveCue(
+            id: middleID,
+            to: 12,
+            frameDuration: 0.1,
+            projectDuration: 15
+        )
+        let clampedStart = try #require(clampedStartValue)
+        #expect(abs(clampedStart - 9.9) < 0.001)
     }
 
     @Test func captionCueGeneratorDoesNotMergeIndependentSpeakers() {
@@ -891,6 +941,12 @@ struct ReccyTests {
         playerView.player = player
 
         #expect(playerView.player === player)
+    }
+
+    @Test func workspaceSplitViewKeepsAProductionSizedDragTarget() {
+        let splitView = ReccyNativeSplitView()
+
+        #expect(splitView.dividerThickness == 14)
     }
 
     @Test func recordingArtifactsCentralizeMediaMetadataAndEditorOwnership() {
@@ -2162,7 +2218,7 @@ struct ReccyTests {
         #expect(composition.instructions.count == build.videoComposition?.instructions.count)
     }
 
-    @Test @MainActor func captionRendererBurnsTimedTextIntoExportedVideo() async throws {
+    @Test @MainActor func captionRendererHoldsTimedTextThroughExportedVideo() async throws {
         let background = RGBAColor(red: 70, green: 120, blue: 180)
         let sourceURL = try await makeColorTestVideo(
             frameCount: 60,
@@ -2242,8 +2298,8 @@ struct ReccyTests {
             "Caption region \(duringCaption) should differ from its encoded frame background \(duringBackground)"
         )
         #expect(
-            afterCaption.isClose(to: afterBackground, tolerance: 18),
-            "Expired caption region \(afterCaption) should match its encoded frame background \(afterBackground)"
+            !afterCaption.isClose(to: afterBackground, tolerance: 18),
+            "Final caption region \(afterCaption) should remain visible through the exported project \(afterBackground)"
         )
     }
 

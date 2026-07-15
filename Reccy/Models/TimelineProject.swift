@@ -148,8 +148,67 @@ struct TimelineCaptionTrack: Codable, Hashable, Sendable {
     var style = TimelineCaptionStyle()
     var cues: [TimelineCaptionCue]
 
-    func activeCue(at time: TimeInterval) -> TimelineCaptionCue? {
-        cues.last { $0.contains(time) }
+    nonisolated func activeCue(at time: TimeInterval) -> TimelineCaptionCue? {
+        let ordered = cues.sorted { $0.timelineStart < $1.timelineStart }
+        guard let index = ordered.lastIndex(where: { $0.timelineStart <= time }) else {
+            return nil
+        }
+        let nextStart = ordered.indices.contains(index + 1)
+            ? ordered[index + 1].timelineStart
+            : .greatestFiniteMagnitude
+        return time < nextStart ? ordered[index] : nil
+    }
+
+    /// Returns non-overlapping cues whose visible ranges meet exactly at the
+    /// next detected caption. This is the single timing policy used by editor
+    /// preview, Library playback, and offline export.
+    nonisolated func presentationCues(through projectDuration: TimeInterval) -> [TimelineCaptionCue] {
+        let endOfProject = max(0, projectDuration)
+        let ordered = cues.sorted { $0.timelineStart < $1.timelineStart }
+
+        return ordered.indices.compactMap { index in
+            var cue = ordered[index]
+            cue.timelineStart = max(0, cue.timelineStart)
+            guard cue.timelineStart < endOfProject else { return nil }
+
+            let nextStart = ordered.indices.contains(index + 1)
+                ? max(cue.timelineStart, ordered[index + 1].timelineStart)
+                : endOfProject
+            let presentationEnd = min(endOfProject, nextStart)
+            guard presentationEnd > cue.timelineStart else { return nil }
+            cue.duration = presentationEnd - cue.timelineStart
+            return cue
+        }
+    }
+
+    /// Moves one caption boundary without allowing cues to cross. Caption
+    /// durations are then normalized to the next boundary so preview, timeline,
+    /// and export continue to share exactly the same presentation ranges.
+    @discardableResult
+    nonisolated mutating func moveCue(
+        id: UUID,
+        to proposedStart: TimeInterval,
+        frameDuration: TimeInterval,
+        projectDuration: TimeInterval
+    ) -> TimeInterval? {
+        let ordered = cues.sorted { $0.timelineStart < $1.timelineStart }
+        guard let orderedIndex = ordered.firstIndex(where: { $0.id == id }),
+              let storageIndex = cues.firstIndex(where: { $0.id == id })
+        else { return nil }
+
+        let spacing = max(frameDuration, 1 / 600)
+        let lowerBound = orderedIndex > 0
+            ? ordered[orderedIndex - 1].timelineStart + spacing
+            : 0
+        let upperBound = ordered.indices.contains(orderedIndex + 1)
+            ? ordered[orderedIndex + 1].timelineStart - spacing
+            : max(0, projectDuration - spacing)
+        guard lowerBound <= upperBound else { return nil }
+
+        let start = min(max(proposedStart, lowerBound), upperBound)
+        cues[storageIndex].timelineStart = start
+        cues = presentationCues(through: projectDuration)
+        return start
     }
 }
 

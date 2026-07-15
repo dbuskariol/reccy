@@ -21,8 +21,7 @@ struct SettingsView: View {
                     categoryContent
                 }
                 .padding(28)
-                .frame(maxWidth: 820, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
