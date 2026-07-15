@@ -25,7 +25,7 @@ struct TimelineCaptionOverlay: View {
     var body: some View {
         GeometryReader { geometry in
             let videoRect = timelineAspectFitRect(content: renderSize, in: geometry.size)
-            if let cue = track.activeCue(at: time) {
+            if track.isVisible, let cue = track.activeCue(at: time) {
                 VStack {
                     if track.style.placement == .bottom { Spacer(minLength: 0) }
                     Text(cue.text)

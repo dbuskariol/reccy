@@ -394,17 +394,14 @@ struct LibraryView: View {
         ZStack {
             NativeLibraryVideoPlayer(player: player)
 
-            if let previewCaptionTrack,
-               previewCaptionTrack.isVisible,
-               previewRenderSize.width > 0,
-               previewRenderSize.height > 0
-            {
+            if let previewCaptionTrack {
                 TimelineCaptionOverlay(
                     track: previewCaptionTrack,
                     time: playbackTime,
                     renderSize: previewRenderSize
                 )
                 .allowsHitTesting(false)
+                .zIndex(2)
             }
 
             if isPreviewLoading {
