@@ -46,13 +46,13 @@ Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen 
 - Trim either edge, split one clip, split every lane, delete independently, or close time across the project.
 - Undo and redo clip, track-audio, camera-layout, caption, and voiceover edits through the standard macOS Edit commands and keyboard shortcuts.
 - Keep every committed edit atomically autosaved in the project package; source media is never rewritten.
-- Move and resize the camera directly over the player; its normalized layout is reused by preview and export.
+- Move and resize the camera directly over the player with a pointer or equivalent VoiceOver actions; its normalized layout is reused by preview and export.
 - Generate readable timed captions from the source-aligned transcript, correct recognized text, edit caption copy, or add a manual cue at the playhead.
 - Preview the same caption placement in Editor and Library, then burn it into video through native AVFoundation export rendering.
 - Record voiceover at the playhead with an explicit input-device picker.
 - Read detailed cached waveforms for recorded audio, timeline clips, live monitoring, and library playback.
 - Select each empty video segment independently and render it as black, the previous held frame, or the next held frame.
-- Step the preview with Control–Left/Right, nudge a selected clip by one frame with Option–Left/Right, or use equivalent VoiceOver custom actions for move, trim, and gap-fill commands.
+- Step the preview with Control–Left/Right, nudge a selected clip by one frame with Option–Left/Right, or use equivalent VoiceOver custom actions for clip, gap-fill, and camera-layout commands.
 
 ## A useful recording library
 

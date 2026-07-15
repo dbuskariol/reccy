@@ -3,6 +3,7 @@
 This production-readiness release continues Reccy's native macOS polish and reliability work:
 
 - Gives every global-shortcut recorder a unique assistive label so VoiceOver users can identify the action they are assigning.
+- Makes the Editor camera overlay fully operable with VoiceOver actions for selection, movement, aspect-preserving sizing, and reset instead of requiring pointer-only dragging.
 - Gives remaining icon-only folder, search, and transcript-export controls explicit spoken names, and removes the duplicated app name from update status.
 - Consolidates Monitor recording state, elapsed time, and Pause/Stop controls into one authoritative status card instead of duplicating them in the page header and toolbar.
 - Removes the ambiguous duplicate Choose Source footer action and aligns repeated Library command names across the recording row menu and detail pane.

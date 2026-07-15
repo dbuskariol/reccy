@@ -186,6 +186,9 @@ struct EditorView: View {
                         },
                         onCommit: { layout in
                             editor.setVideoLayout(layout, clipID: cameraClip.id)
+                        },
+                        onReset: {
+                            editor.resetVideoLayout(clipID: cameraClip.id)
                         }
                     )
                 }
@@ -1633,6 +1636,7 @@ private struct CameraOverlayManipulator: View {
     let isSelected: Bool
     let onSelect: () -> Void
     let onCommit: (TimelineVideoLayout) -> Void
+    let onReset: () -> Void
 
     @State private var draftLayout: TimelineVideoLayout?
     @State private var isHovering = false
@@ -1649,80 +1653,131 @@ private struct CameraOverlayManipulator: View {
             )
 
             ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(
-                                isSelected || isHovering ? Color.accentColor : .white.opacity(0.45),
-                                style: StrokeStyle(lineWidth: isSelected ? 2 : 1, dash: isSelected ? [] : [5, 4])
-                            )
-                    }
-                    .frame(width: overlayRect.width, height: overlayRect.height)
-                    .offset(x: overlayRect.minX, y: overlayRect.minY)
-                    .onHover { isHovering = $0 }
-                    .simultaneousGesture(TapGesture().onEnded(onSelect))
-                    .gesture(
-                        DragGesture(minimumDistance: 1)
-                            .onChanged { value in
-                                onSelect()
-                                draftLayout = movedLayout(
-                                    clip.videoLayout ?? .defaultCamera,
-                                    translation: value.translation,
-                                    videoRect: videoRect
-                                )
-                            }
-                            .onEnded { value in
-                                let final = movedLayout(
-                                    clip.videoLayout ?? .defaultCamera,
-                                    translation: value.translation,
-                                    videoRect: videoRect
-                                )
-                                onCommit(final)
-                                draftLayout = nil
-                            }
-                    )
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Camera overlay")
-                    .accessibilityValue("Position \(Int(layout.x * 100)) by \(Int(layout.y * 100)) percent")
-                    .accessibilityHint("Drag to reposition the camera video")
+                overlayControl(layout: layout, overlayRect: overlayRect, videoRect: videoRect)
 
                 if isSelected || isHovering {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .overlay(Circle().stroke(.white, lineWidth: 2))
-                        .frame(width: 14, height: 14)
-                        .position(x: overlayRect.maxX, y: overlayRect.maxY)
-                        .shadow(color: .black.opacity(0.35), radius: 2)
-                        .highPriorityGesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { value in
-                                    onSelect()
-                                    draftLayout = resizedLayout(
-                                        clip.videoLayout ?? .defaultCamera,
-                                        translation: value.translation,
-                                        videoRect: videoRect
-                                    )
-                                }
-                                .onEnded { value in
-                                    let final = resizedLayout(
-                                        clip.videoLayout ?? .defaultCamera,
-                                        translation: value.translation,
-                                        videoRect: videoRect
-                                    )
-                                    onCommit(final)
-                                    draftLayout = nil
-                                }
-                        )
-                        .onHover { hovering in
-                            if hovering { NSCursor.crosshair.set() } else { NSCursor.arrow.set() }
-                        }
-                        .accessibilityLabel("Resize camera overlay")
-                        .accessibilityHint("Drag to resize while preserving the camera aspect ratio")
+                    resizeHandle(overlayRect: overlayRect, videoRect: videoRect)
                 }
             }
         }
+    }
+
+    private func overlayControl(
+        layout: TimelineVideoLayout,
+        overlayRect: CGRect,
+        videoRect: CGRect
+    ) -> some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(.clear)
+            .contentShape(Rectangle())
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(
+                        isSelected || isHovering ? Color.accentColor : .white.opacity(0.45),
+                        style: StrokeStyle(lineWidth: isSelected ? 2 : 1, dash: isSelected ? [] : [5, 4])
+                    )
+            }
+            .frame(width: overlayRect.width, height: overlayRect.height)
+            .offset(x: overlayRect.minX, y: overlayRect.minY)
+            .onHover { isHovering = $0 }
+            .simultaneousGesture(TapGesture().onEnded(onSelect))
+            .gesture(moveGesture(videoRect: videoRect))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Camera overlay")
+            .accessibilityValue(accessibilityValue(for: layout))
+            .accessibilityHint("Activate to select. Additional actions move, resize, or reset the camera video.")
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction { onSelect() }
+            .accessibilityActions {
+                Button("Move Left") {
+                    commitAccessibilityLayout { $0.movedBy(x: -0.02, y: 0) }
+                }
+                Button("Move Right") {
+                    commitAccessibilityLayout { $0.movedBy(x: 0.02, y: 0) }
+                }
+                Button("Move Up") {
+                    commitAccessibilityLayout { $0.movedBy(x: 0, y: -0.02) }
+                }
+                Button("Move Down") {
+                    commitAccessibilityLayout { $0.movedBy(x: 0, y: 0.02) }
+                }
+                Button("Make Smaller") {
+                    commitAccessibilityLayout { $0.scaledBy(1 / 1.1) }
+                }
+                Button("Make Larger") {
+                    commitAccessibilityLayout { $0.scaledBy(1.1) }
+                }
+                Button("Reset Position and Size", action: onReset)
+            }
+    }
+
+    private func resizeHandle(overlayRect: CGRect, videoRect: CGRect) -> some View {
+        Circle()
+            .fill(Color.accentColor)
+            .overlay(Circle().stroke(.white, lineWidth: 2))
+            .frame(width: 14, height: 14)
+            .position(x: overlayRect.maxX, y: overlayRect.maxY)
+            .shadow(color: .black.opacity(0.35), radius: 2)
+            .highPriorityGesture(resizeGesture(videoRect: videoRect))
+            .onHover { hovering in
+                if hovering { NSCursor.crosshair.set() } else { NSCursor.arrow.set() }
+            }
+            .accessibilityHidden(true)
+    }
+
+    private func moveGesture(videoRect: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                onSelect()
+                draftLayout = movedLayout(
+                    clip.videoLayout ?? .defaultCamera,
+                    translation: value.translation,
+                    videoRect: videoRect
+                )
+            }
+            .onEnded { value in
+                let final = movedLayout(
+                    clip.videoLayout ?? .defaultCamera,
+                    translation: value.translation,
+                    videoRect: videoRect
+                )
+                onCommit(final)
+                draftLayout = nil
+            }
+    }
+
+    private func resizeGesture(videoRect: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                onSelect()
+                draftLayout = resizedLayout(
+                    clip.videoLayout ?? .defaultCamera,
+                    translation: value.translation,
+                    videoRect: videoRect
+                )
+            }
+            .onEnded { value in
+                let final = resizedLayout(
+                    clip.videoLayout ?? .defaultCamera,
+                    translation: value.translation,
+                    videoRect: videoRect
+                )
+                onCommit(final)
+                draftLayout = nil
+            }
+    }
+
+    private func accessibilityValue(for layout: TimelineVideoLayout) -> String {
+        "\(isSelected ? "Selected" : "Not selected"), "
+            + "position \(Int(layout.x * 100)) by \(Int(layout.y * 100)) percent, "
+            + "size \(Int(layout.width * 100)) by \(Int(layout.height * 100)) percent"
+    }
+
+    private func commitAccessibilityLayout(
+        _ transform: (TimelineVideoLayout) -> TimelineVideoLayout
+    ) {
+        onSelect()
+        onCommit(transform(clip.videoLayout ?? .defaultCamera))
     }
 
     private func movedLayout(
@@ -1731,10 +1786,10 @@ private struct CameraOverlayManipulator: View {
         videoRect: CGRect
     ) -> TimelineVideoLayout {
         guard videoRect.width > 0, videoRect.height > 0 else { return original.clamped() }
-        var result = original
-        result.x += Double(translation.width / videoRect.width)
-        result.y += Double(translation.height / videoRect.height)
-        return result.clamped()
+        return original.movedBy(
+            x: Double(translation.width / videoRect.width),
+            y: Double(translation.height / videoRect.height)
+        )
     }
 
     private func resizedLayout(
