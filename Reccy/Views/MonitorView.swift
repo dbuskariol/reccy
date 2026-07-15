@@ -195,32 +195,38 @@ struct MonitorView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
 
+                Spacer(minLength: 16)
+
                 Button {
                     coordinator.stopRecording()
                 } label: {
-                    Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
-                        .frame(minWidth: 130)
+                    recordingControlLabel(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .tint(.red)
                 .disabled(coordinator.state == .stopping)
-                .frame(maxWidth: .infinity)
 
                 Button {
                     coordinator.toggleRecordingPause()
                 } label: {
-                    Label(
+                    recordingControlLabel(
                         coordinator.state == .paused ? "Resume Recording" : "Pause Recording",
                         systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill"
                     )
-                    .frame(minWidth: 130)
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.large)
                 .disabled(coordinator.state != .recording && coordinator.state != .paused)
-                .frame(maxWidth: .infinity)
             }
             .frame(maxHeight: .infinity, alignment: .topLeading)
         }
+    }
+
+    private func recordingControlLabel(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .contentShape(Rectangle())
     }
 
     private var audioSection: some View {
@@ -400,7 +406,7 @@ private struct LiveTranscriptCard: View {
                     ScrollView(.vertical) {
                         LazyVStack(alignment: .leading, spacing: 8) {
                             if finalized.isEmpty && volatile.isEmpty {
-                                Text("Waiting for speech…")
+                                Text("Listening… First words can take a moment to appear.")
                                     .foregroundStyle(.tertiary)
                                     .frame(maxWidth: .infinity, alignment: .topLeading)
                             } else {

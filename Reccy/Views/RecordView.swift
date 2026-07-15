@@ -57,7 +57,7 @@ struct RecordView: View {
         .navigationTitle("Record")
         .onAppear {
             transcription.refreshInstalledWhisperModels()
-            transcription.prewarmSelectedLiveEngine()
+            transcription.prepareSelectedCaptureEngine()
         }
         .toolbar {
             ToolbarItem {
@@ -336,6 +336,11 @@ struct RecordView: View {
                         }
                     }
                 }
+
+                if transcription.isEnabledForCapture {
+                    Divider()
+                    captureTranscriptionReadiness
+                }
             }
         }
     }
@@ -392,6 +397,48 @@ struct RecordView: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var captureTranscriptionReadiness: some View {
+        switch transcription.captureReadiness {
+        case .disabled:
+            EmptyView()
+        case .ready:
+            Label(
+                "\(transcription.provider.title) is loaded and ready before recording starts.",
+                systemImage: "checkmark.circle.fill"
+            )
+            .font(.callout.weight(.medium))
+            .foregroundStyle(.green)
+        case .preparing(let update):
+            HStack(alignment: .center, spacing: 11) {
+                if let fraction = update.fractionCompleted {
+                    ProgressView(value: fraction)
+                        .frame(width: 88)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(update.detail ?? "Preparing \(transcription.provider.title)")
+                        .font(.callout.weight(.medium))
+                    Text("Start Recording becomes available as soon as the on-device engine is ready.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        case .unavailable(let message):
+            HStack(spacing: 12) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Transcription Settings") {
+                    navigation.openSettings(.transcription)
+                }
             }
         }
     }
@@ -616,13 +663,41 @@ struct RecordView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .tint(.red)
+            .disabled(
+                coordinator.hasSelectedSource
+                    && captureTranscriptionConfiguration.isEnabled
+                    && transcription.captureReadiness.isPreparing
+            )
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var captureTranscriptionConfiguration: CaptureTranscriptionConfiguration {
+        transcription.makeCaptureConfiguration(
+            systemAudio: coordinator.settings.includeSystemAudio,
+            microphone: coordinator.settings.includeMicrophone
+        )
+    }
+
+    private var captureTranscriptionNeedsAttention: Bool {
+        captureTranscriptionConfiguration.isEnabled && !transcription.captureReadiness.isReady
     }
 
     private var recordControlStatus: String {
         if needsDirectCaptureAccess {
             return "Direct Portion access required"
+        }
+        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
+            switch transcription.captureReadiness {
+            case .preparing(let update):
+                return update.detail ?? "Preparing transcription"
+            case .unavailable:
+                return "Transcription needs attention"
+            case .disabled:
+                return "Transcription needs preparation"
+            case .ready:
+                break
+            }
         }
         if coordinator.hasSelectedSource {
             return "\(coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title) selected"
@@ -632,27 +707,59 @@ struct RecordView: View {
 
     private var recordControlStatusImage: String {
         if needsDirectCaptureAccess { return "exclamationmark.circle.fill" }
+        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
+            return transcription.captureReadiness.isPreparing
+                ? "waveform.badge.magnifyingglass"
+                : "exclamationmark.triangle.fill"
+        }
         return coordinator.hasSelectedSource ? "checkmark.circle.fill" : "1.circle"
     }
 
     private var recordControlStatusStyle: AnyShapeStyle {
         if needsDirectCaptureAccess { return AnyShapeStyle(.orange) }
+        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
+            if case .unavailable = transcription.captureReadiness {
+                return AnyShapeStyle(.orange)
+            }
+            return AnyShapeStyle(.secondary)
+        }
         return coordinator.hasSelectedSource ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary)
     }
 
     private var primaryRecordActionTitle: String {
         if needsDirectCaptureAccess { return "Review Permissions" }
+        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
+            switch transcription.captureReadiness {
+            case .preparing:
+                return "Preparing Transcription…"
+            case .unavailable:
+                return "Review Transcription"
+            case .disabled:
+                return "Prepare Transcription"
+            case .ready:
+                break
+            }
+        }
         return coordinator.hasSelectedSource ? "2. Start Recording" : "Choose Source"
     }
 
     private var primaryRecordActionImage: String {
         if needsDirectCaptureAccess { return "hand.raised.fill" }
+        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
+            return "waveform.badge.magnifyingglass"
+        }
         return coordinator.hasSelectedSource ? "record.circle.fill" : "rectangle.dashed.badge.record"
     }
 
     private func performPrimaryRecordAction() {
         if needsDirectCaptureAccess {
             navigation.openSettings(.permissions)
+        } else if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
+            if case .unavailable = transcription.captureReadiness {
+                navigation.openSettings(.transcription)
+            } else {
+                transcription.prepareSelectedCaptureEngine()
+            }
         } else if coordinator.hasSelectedSource {
             coordinator.startRecording()
         } else {

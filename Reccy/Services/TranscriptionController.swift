@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Foundation
+import OSLog
 import Speech
 
 nonisolated enum TranscriptionJobState: Equatable, Sendable {
@@ -22,13 +23,13 @@ final class TranscriptionController: ObservableObject {
     @Published var isEnabledForCapture: Bool {
         didSet {
             defaults.set(isEnabledForCapture, forKey: Keys.captureEnabled)
-            prewarmSelectedLiveEngine()
+            prepareSelectedCaptureEngine()
         }
     }
     @Published var provider: TranscriptionProvider {
         didSet {
             defaults.set(provider.rawValue, forKey: Keys.provider)
-            prewarmSelectedLiveEngine()
+            prepareSelectedCaptureEngine()
         }
     }
     @Published var automaticallyTranscribe: Bool {
@@ -37,7 +38,7 @@ final class TranscriptionController: ObservableObject {
     @Published var showLiveTranscript: Bool {
         didSet {
             defaults.set(showLiveTranscript, forKey: Keys.showLiveTranscript)
-            prewarmSelectedLiveEngine()
+            prepareSelectedCaptureEngine()
         }
     }
     @Published var transcribeSystemAudio: Bool {
@@ -49,14 +50,14 @@ final class TranscriptionController: ObservableObject {
     @Published var localeIdentifier: String {
         didSet {
             defaults.set(localeIdentifier, forKey: Keys.locale)
-            prewarmSelectedLiveEngine()
+            prepareSelectedCaptureEngine()
         }
     }
     @Published var whisperModelIdentifier: String {
         didSet {
             defaults.set(whisperModelIdentifier, forKey: Keys.whisperModel)
             whisperEngine = nil
-            prewarmSelectedLiveEngine()
+            prepareSelectedCaptureEngine()
         }
     }
     @Published private(set) var supportedLocales: [Locale] = []
@@ -73,8 +74,10 @@ final class TranscriptionController: ObservableObject {
     @Published private(set) var liveUpdates: [TranscriptTrackRole: LiveTranscriptUpdate] = [:]
     @Published private(set) var liveNotice: String?
     @Published private(set) var isLiveCaptureEnabled = false
+    @Published private(set) var captureReadiness: CaptureTranscriptionReadiness = .disabled
 
     nonisolated let liveRouter = LiveTranscriptionRouter()
+    private let logger = Logger(subsystem: "com.reccy.mac", category: "Transcription")
     private let defaults: UserDefaults
     private let store = TranscriptStore()
     private let modelManager: WhisperModelManager
@@ -82,7 +85,9 @@ final class TranscriptionController: ObservableObject {
     private var whisperEngine: (modelIdentifier: String, engine: WhisperKitTranscriptionEngine)?
     private var transcriptionTasks: [URL: Task<Void, Never>] = [:]
     private var liveSetupTask: Task<Void, Never>?
-    private var livePrewarmTask: Task<Void, Never>?
+    private var capturePreparationTask: Task<Void, Never>?
+    private var capturePreparationID: UUID?
+    private var liveSessionID: UUID?
 
     init(defaults: UserDefaults = .standard, modelManager: WhisperModelManager = WhisperModelManager()) {
         self.defaults = defaults
@@ -95,7 +100,7 @@ final class TranscriptionController: ObservableObject {
         transcribeMicrophone = defaults.object(forKey: Keys.microphone) as? Bool ?? true
         localeIdentifier = defaults.string(forKey: Keys.locale) ?? Locale.current.identifier
         whisperModelIdentifier = defaults.string(forKey: Keys.whisperModel)
-            ?? WhisperModelManager.recommendedModel
+            ?? WhisperModelManager.defaultModel
     }
 
     func refreshCapabilities() {
@@ -115,6 +120,7 @@ final class TranscriptionController: ObservableObject {
                 didLoadInstalledWhisperModels = true
                 if availableWhisperModels.isEmpty {
                     availableWhisperModels = [
+                        WhisperModelManager.defaultModel,
                         WhisperModelManager.recommendedModel,
                         WhisperModelManager.compactModel,
                     ]
@@ -155,7 +161,7 @@ final class TranscriptionController: ObservableObject {
                 didLoadInstalledWhisperModels = true
                 whisperDownloadProgress = nil
                 whisperEngine = nil
-                prewarmSelectedLiveEngine()
+                prepareSelectedCaptureEngine()
             } catch {
                 whisperDownloadProgress = nil
                 whisperModelError = error.localizedDescription
@@ -193,35 +199,68 @@ final class TranscriptionController: ObservableObject {
         }
     }
 
-    /// Loads the selected local WhisperKit model while the user configures a
-    /// recording, so capture never owns the expensive Core ML cold start.
-    /// WhisperKitTranscriptionEngine.prepare coalesces this work with any
-    /// concurrent post-recording or live request.
-    func prewarmSelectedLiveEngine() {
-        livePrewarmTask?.cancel()
-        livePrewarmTask = nil
-        guard isEnabledForCapture, showLiveTranscript, provider == .whisperKit else { return }
+    /// Makes the selected on-device engine capture-ready while the user is on
+    /// the Record surface. This is deliberately independent of live transcript
+    /// visibility: automatic post-recording transcription benefits from the
+    /// same expensive model load and must expose the same readiness state.
+    func prepareSelectedCaptureEngine() {
+        capturePreparationTask?.cancel()
+        capturePreparationTask = nil
+        let preparationID = UUID()
+        capturePreparationID = preparationID
+        guard isEnabledForCapture else {
+            captureReadiness = .disabled
+            return
+        }
         let selectedLocale = localeIdentifier
+        let selectedProvider = provider
         let selectedModel = whisperModelIdentifier
-        let engine = engine(for: .whisperKit, whisperModelIdentifier: selectedModel)
-        livePrewarmTask = Task { [weak self] in
+        let engine = engine(for: selectedProvider, whisperModelIdentifier: selectedModel)
+        captureReadiness = .preparing(.init(
+            phase: .preparing,
+            fractionCompleted: nil,
+            detail: "Checking \(selectedProvider.title)"
+        ))
+        capturePreparationTask = Task { [weak self] in
             guard let self else { return }
             let availability = await engine.availability(localeIdentifier: selectedLocale)
-            guard availability == .ready, !Task.isCancelled else {
-                if whisperModelIdentifier == selectedModel { livePrewarmTask = nil }
+            guard capturePreparationID == preparationID, !Task.isCancelled else { return }
+            switch availability {
+            case .unavailable(let reason):
+                captureReadiness = .unavailable(reason)
+                capturePreparationTask = nil
                 return
+            case .requiresDownload where selectedProvider == .whisperKit:
+                captureReadiness = .unavailable(
+                    "Download \(whisperModelDisplayName(selectedModel)) in Transcription Settings before recording."
+                )
+                capturePreparationTask = nil
+                return
+            case .ready, .requiresDownload:
+                break
             }
             do {
-                try await engine.prepare(localeIdentifier: selectedLocale) { _ in }
-                if whisperModelIdentifier == selectedModel { whisperModelError = nil }
+                try await engine.prepare(localeIdentifier: selectedLocale) { [weak self] update in
+                    Task { @MainActor in
+                        guard self?.capturePreparationID == preparationID else { return }
+                        self?.captureReadiness = .preparing(update)
+                    }
+                }
+                guard capturePreparationID == preparationID, !Task.isCancelled else { return }
+                captureReadiness = .ready
+                if selectedProvider == .whisperKit, whisperModelIdentifier == selectedModel {
+                    whisperModelError = nil
+                }
             } catch is CancellationError {
-                // A new provider, locale, or model superseded this prewarm.
+                // A new provider, locale, or model superseded this preparation.
             } catch {
-                if whisperModelIdentifier == selectedModel {
+                guard capturePreparationID == preparationID else { return }
+                captureReadiness = .unavailable(error.localizedDescription)
+                if selectedProvider == .whisperKit, whisperModelIdentifier == selectedModel {
                     whisperModelError = error.localizedDescription
                 }
             }
-            if whisperModelIdentifier == selectedModel { livePrewarmTask = nil }
+            if capturePreparationID == preparationID { capturePreparationTask = nil }
         }
     }
 
@@ -298,23 +337,46 @@ final class TranscriptionController: ObservableObject {
                     throw TranscriptionEngineError.noSpeechRecognized
                 }
 
+                logger.info(
+                    "Starting post-recording transcription provider=\(selectedProvider.rawValue, privacy: .public) sources=\(requests.count) file=\(mediaURL.lastPathComponent, privacy: .public)"
+                )
+                let result = try await TranscriptionBatchProcessor.transcribe(
+                    requests,
+                    with: engine
+                ) { [weak self] update in
+                    Task { @MainActor in self?.jobs[mediaURL] = .working(update) }
+                }
                 var document = replacingExisting
                     ? TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: [])
                     : (try await store.load(for: mediaURL)
                         ?? TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: []))
-                for request in requests {
-                    try Task.checkCancellation()
-                    let track = try await engine.transcribe(request) { [weak self] update in
-                        Task { @MainActor in self?.jobs[mediaURL] = .working(update) }
-                    }
+                for track in result.tracks {
                     document.replace(track)
                     try await store.save(document, for: mediaURL)
                     documents[mediaURL] = document
+                    logger.info(
+                        "Transcription source completed role=\(track.role.rawValue, privacy: .public) segments=\(track.segments.count) file=\(mediaURL.lastPathComponent, privacy: .public)"
+                    )
                 }
-                jobs[mediaURL] = .ready
+                for failure in result.failures {
+                    logger.notice(
+                        "Transcription source skipped role=\(failure.role.rawValue, privacy: .public) reason=\(failure.message, privacy: .public) file=\(mediaURL.lastPathComponent, privacy: .public)"
+                    )
+                }
+                if !result.tracks.isEmpty {
+                    jobs[mediaURL] = .ready
+                } else if let existing = try await store.load(for: mediaURL), !existing.tracks.isEmpty {
+                    documents[mediaURL] = existing
+                    jobs[mediaURL] = .ready
+                } else {
+                    jobs[mediaURL] = .failed(result.failureMessage)
+                }
             } catch is CancellationError {
                 jobs[mediaURL] = documents[mediaURL] == nil ? .idle : .ready
             } catch {
+                logger.error(
+                    "Post-recording transcription failed reason=\(error.localizedDescription, privacy: .public) file=\(mediaURL.lastPathComponent, privacy: .public)"
+                )
                 jobs[mediaURL] = .failed(error.localizedDescription)
             }
             transcriptionTasks[mediaURL] = nil
@@ -402,6 +464,8 @@ final class TranscriptionController: ObservableObject {
         microphoneName: String
     ) {
         liveSetupTask?.cancel()
+        let sessionID = UUID()
+        liveSessionID = sessionID
         liveUpdates = [:]
         liveNotice = nil
         let selectedProvider = configuration.provider
@@ -413,6 +477,7 @@ final class TranscriptionController: ObservableObject {
         isLiveCaptureEnabled = configuration.createsLiveTranscript && !roles.isEmpty
         guard configuration.createsLiveTranscript, !roles.isEmpty else {
             liveSetupTask = nil
+            liveSessionID = nil
             return
         }
         liveNotice = "Preparing \(selectedProvider.title) for live transcription…"
@@ -424,28 +489,50 @@ final class TranscriptionController: ObservableObject {
             )
             let availability = await engine.availability(localeIdentifier: selectedLocale)
             if case .unavailable(let reason) = availability {
+                guard !Task.isCancelled, liveSessionID == sessionID else { return }
                 liveNotice = reason
                 return
             }
             if selectedProvider == .whisperKit, availability == .requiresDownload {
+                guard !Task.isCancelled, liveSessionID == sessionID else { return }
                 liveNotice = "Download the selected WhisperKit model in Settings to enable live transcription."
                 return
             }
             do {
                 var sessions: [TranscriptTrackRole: any LiveTranscriptionSession] = [:]
                 for (role, name) in roles {
+                    try Task.checkCancellation()
                     sessions[role] = try await engine.makeLiveSession(
                         role: role,
                         name: name,
                         localeIdentifier: selectedLocale
                     ) { [weak self] update in
-                        Task { @MainActor in self?.liveUpdates[update.role] = update }
+                        Task { @MainActor in
+                            guard self?.liveSessionID == sessionID else { return }
+                            self?.liveUpdates[update.role] = update
+                        }
                     }
                 }
+                guard !Task.isCancelled, liveSessionID == sessionID else {
+                    for session in sessions.values { await session.cancel() }
+                    return
+                }
                 await liveRouter.install(sessions)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, liveSessionID == sessionID else {
+                    await liveRouter.cancel()
+                    return
+                }
                 liveNotice = nil
+                logger.info(
+                    "Live transcription ready provider=\(selectedProvider.rawValue, privacy: .public) sources=\(roles.count)"
+                )
+            } catch is CancellationError {
+                logger.info("Live transcription setup cancelled")
             } catch {
+                guard liveSessionID == sessionID else { return }
+                logger.error(
+                    "Live transcription setup failed provider=\(selectedProvider.rawValue, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+                )
                 liveNotice = error.localizedDescription
             }
         }
@@ -460,7 +547,8 @@ final class TranscriptionController: ObservableObject {
             cancelLive()
             return
         }
-        let setup = liveSetupTask
+        liveSessionID = nil
+        liveSetupTask?.cancel()
         liveSetupTask = nil
         if configuration.createsLiveTranscript {
             jobs[mediaURL] = .working(.init(
@@ -469,9 +557,13 @@ final class TranscriptionController: ObservableObject {
                 detail: "Finalizing live transcript"
             ))
         }
+        let snapshot = liveUpdates
+        liveUpdates = [:]
+        liveNotice = nil
+        isLiveCaptureEnabled = false
+        Task { await liveRouter.cancel() }
         Task { [weak self] in
             guard let self else { return }
-            await setup?.value
             let audioTracks = (try? await AVURLAsset(url: mediaURL).loadTracks(withMediaType: .audio)) ?? []
             var trackIDs: [TranscriptTrackRole: Int32] = [:]
             var index = 0
@@ -482,9 +574,25 @@ final class TranscriptionController: ObservableObject {
             if manifest.includesMicrophone, audioTracks.indices.contains(index) {
                 trackIDs[.microphone] = audioTracks[index].trackID
             }
-            let liveTracks = configuration.createsLiveTranscript
-                ? await liveRouter.finish(trackIDs: trackIDs)
-                : []
+            let liveTracks = snapshot.compactMap { role, update -> TranscriptTrack? in
+                guard let trackID = trackIDs[role] else { return nil }
+                let segments = (update.finalizedSegments + update.volatileSegments)
+                    .sorted { $0.sourceStart < $1.sourceStart }
+                guard !segments.isEmpty else { return nil }
+                return TranscriptTrack(
+                    sourceTrackID: trackID,
+                    role: role,
+                    name: role == .microphone
+                        ? (manifest.microphoneName ?? role.title)
+                        : role.title,
+                    provider: configuration.provider,
+                    localeIdentifier: configuration.localeIdentifier,
+                    modelIdentifier: configuration.provider == .whisperKit
+                        ? configuration.whisperModelIdentifier
+                        : "apple-speech-\(configuration.localeIdentifier)",
+                    segments: segments
+                )
+            }
             if !liveTracks.isEmpty {
                 var document = (try? await store.load(for: mediaURL))
                     ?? TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: [])
@@ -495,8 +603,6 @@ final class TranscriptionController: ObservableObject {
             } else {
                 jobs[mediaURL] = .idle
             }
-            liveUpdates = [:]
-            isLiveCaptureEnabled = false
             if configuration.automaticallyTranscribes {
                 transcribe(
                     mediaURL: mediaURL,
@@ -508,6 +614,7 @@ final class TranscriptionController: ObservableObject {
     }
 
     func cancelLive() {
+        liveSessionID = nil
         liveSetupTask?.cancel()
         liveSetupTask = nil
         Task { await liveRouter.cancel() }

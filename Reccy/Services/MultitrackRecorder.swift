@@ -2,6 +2,7 @@
 import CoreMedia
 import CoreVideo
 import Foundation
+import OSLog
 @preconcurrency import ScreenCaptureKit
 import VideoToolbox
 
@@ -165,6 +166,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         qos: .userInitiated
     )
     private let streamLifecycleLock = NSLock()
+    private let logger = Logger(subsystem: "com.reccy.mac", category: "Recorder")
 
     private var stream: SCStream?
     private var webcamSession: WebcamCaptureSession?
@@ -226,7 +228,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         var cameraFormat: WebcamCaptureFormat?
         if options.includesCamera {
             let webcam = WebcamCaptureSession(
-                sampleQueue: sampleQueue,
+                deliveryQueue: sampleQueue,
                 sampleHandler: { [weak self] sampleBuffer in
                     self?.handleCamera(sampleBuffer)
                 }
@@ -283,21 +285,43 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             throw MultitrackRecorderError.noVideoFrames
         }
         if request.startWasInFlight {
-            await webcamSession?.stop()
+            let webcam = webcamSession
             webcamSession = nil
             try? await stream.stopCapture()
+            logger.info("Screen capture stopped while recording start was settling")
+            await webcam?.stop()
+            logger.info("Camera samples drained while recording start was settling")
             await waitForStreamStartToSettle()
             try await finishWriting()
+            logger.info("Recording writer finalized after in-flight start")
             return
         }
+        let webcam = webcamSession
+        webcamSession = nil
         do {
-            await webcamSession?.stop()
-            webcamSession = nil
+            // Stop the high-volume ScreenCaptureKit producer first. Camera and
+            // screen callbacks share the serial writer queue; draining the
+            // camera first can otherwise wait behind an active screen stream.
             try await stream.stopCapture()
-            clearStreamIfOwned(stream)
-            try await finishWriting()
+            logger.info("Screen capture stopped")
         } catch {
             clearStreamIfOwned(stream)
+            await webcam?.stop()
+            logger.error(
+                "Recording stop failed reason=\(error.localizedDescription, privacy: .public)"
+            )
+            throw error
+        }
+        clearStreamIfOwned(stream)
+        await webcam?.stop()
+        logger.info("Camera samples drained")
+        do {
+            try await finishWriting()
+            logger.info("Recording writer finalized")
+        } catch {
+            logger.error(
+                "Recording writer finalization failed reason=\(error.localizedDescription, privacy: .public)"
+            )
             throw error
         }
     }
@@ -318,9 +342,10 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
     func cancel() async {
         let cancellation = requestStreamCancellation()
-        await webcamSession?.stop()
+        let webcam = webcamSession
         webcamSession = nil
         try? await cancellation.stream?.stopCapture()
+        await webcam?.stop()
         if !cancellation.startWasInFlight, let stream = cancellation.stream {
             clearStreamIfOwned(stream)
         }
