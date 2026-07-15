@@ -44,6 +44,8 @@ Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen 
 - Reorder clips magnetically, snap to useful boundaries, or link matching audio and video when desired.
 - Trim either edge, split one clip, split every lane, delete independently, or close time across the project.
 - Move and resize the camera directly over the player; its normalized layout is reused by preview and export.
+- Generate readable timed captions from the source-aligned transcript, correct recognized text, edit caption copy, or add a manual cue at the playhead.
+- Preview the same caption placement in Editor and Library, then burn it into video through native AVFoundation export rendering.
 - Record voiceover at the playhead with an explicit input-device picker.
 - Read detailed cached waveforms for recorded audio, timeline clips, live monitoring, and library playback.
 - Select each empty video segment independently and render it as black, the previous held frame, or the next held frame.
@@ -53,7 +55,7 @@ Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen 
 
 ![Reccy recording library](Documentation/Screenshots/library.jpg)
 
-The Library combines a compact recording browser with a native preview, waveform scrubber, source and application metadata, camera and audio-track details, resolution, frame rate, codec, dynamic range, pointer settings, and direct Edit, Export, Share, Reveal, and Trash actions.
+The Library combines a compact recording browser with a native, source-aspect preview, waveform scrubber, saved camera and caption overlays, source and application metadata, camera and audio-track details, resolution, frame rate, codec, dynamic range, pointer settings, and direct Edit, Export, Share, Reveal, and Trash actions.
 
 Delivery presets cover the common cases without turning export into a codec control panel:
 
@@ -91,8 +93,8 @@ Reccy intentionally targets macOS 26 only. There are no availability branches or
 | Capture | `SCStream` screen/system-audio/microphone plus native `AVCaptureSession` camera frames |
 | Recording | `AVAssetWriter`, AAC, HEVC/H.264, VideoToolbox color metadata |
 | Live monitor | IOSurface-backed screen and camera presentation with latest-frame coalescing and no extra capture sessions |
-| Timeline | Serializable project model materialized as `AVMutableComposition` and `AVVideoComposition` |
-| Playback and export | AVKit, `AVVideoComposition`, `AVAudioMix`, and `AVAssetExportSession` |
+| Timeline | Serializable media lanes and editable timed captions materialized as `AVMutableComposition` and `AVVideoComposition` |
+| Playback and export | AVKit, shared SwiftUI overlays, Core Animation offline caption rendering, `AVAudioMix`, and `AVAssetExportSession` |
 | Transcription | SpeechAnalyzer; WhisperKit 1.0; source-track `.reccytranscript` sidecars |
 | Waveforms | Shared Reccy rendering backed by [DSWaveformImage](https://github.com/dmrschmidt/DSWaveformImage) |
 | Distribution | Universal hardened runtime, Developer ID, notarization, Sparkle 2 |
@@ -113,7 +115,7 @@ Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repo
 scripts/verify-ci.sh
 ```
 
-The current suite exercises resolution policy, portrait and Retina sources, camera settings compatibility, independent video-track composition, camera layout rendering, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, cancellation, transcript persistence/projection/export, exact-track PCM extraction, and real post-recording plus live inference with every installed transcription engine. Model-backed tests skip cleanly on machines where the corresponding optional language asset or Whisper model is not installed. Installed-app Computer Use QA covers every workspace plus the real Library transport, timeline interactions, transcript search and seeking, accessible editor actions, menu-bar pause/resume/stop, and end-to-end export progress.
+The current suite exercises resolution policy, portrait and Retina sources, camera settings compatibility, independent video-track composition, canonical preview track binding, camera layout rendering, caption cue generation and timed burn-in export, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, cancellation, transcript persistence/projection/correction/export, exact-track PCM extraction, and real post-recording plus live inference with every installed transcription engine. Model-backed tests skip cleanly on machines where the corresponding optional language asset or Whisper model is not installed. Installed-app Computer Use QA covers every workspace plus the real Library transport, source-aspect preview, saved caption overlays, native editor toolbar, caption editing, transcript search and seeking, accessible editor actions, menu-bar pause/resume/stop, and end-to-end export progress.
 
 ### Permission identity matters
 

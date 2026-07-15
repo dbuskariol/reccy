@@ -26,6 +26,7 @@ struct ReccyApp: App {
                 .frame(minWidth: minimumWindowWidth, minHeight: minimumWindowHeight)
         }
         .defaultSize(width: defaultWindowWidth, height: defaultWindowHeight)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandMenu("Recording") {
                 Button("Choose Display…") {
