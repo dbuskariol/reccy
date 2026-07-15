@@ -98,7 +98,7 @@ The service writes into a private, same-volume staging directory and reserves ca
 
 The application uses SwiftUI scenes, a native `NavigationSplitView`, native toolbars, AppKit file panels, AVKit rendering surfaces, a menu-bar extra, standard materials, semantic colors, SF Symbols, and system content sharing. The system owns sidebar presentation, resizing, and the toolbar toggle. Editor actions use native toolbar items and menus instead of a second in-content control strip, keeping macOS sizing, materials, customization, and accessibility behavior consistent across every workspace.
 
-Icon controls use one shared semantic-label and tooltip primitive so the visible interface, hover help, and assistive descriptions cannot drift. The timeline exposes each clip and gap as one adjustable accessibility object instead of leaking decorative handles. Frame-accurate move, trim, and gap-fill operations are available through VoiceOver custom actions and matching Editor-menu keyboard commands.
+Icon controls use one shared semantic-label and tooltip primitive so the visible interface, hover help, and assistive descriptions cannot drift. The timeline exposes each clip and gap as one adjustable accessibility object instead of leaking decorative handles. Frame-accurate move, trim, and gap-fill operations are available through VoiceOver custom actions and matching Editor-menu keyboard commands. The camera overlay is likewise one authoritative accessibility object: its position and size are spoken, and custom actions select, move, resize, or reset it without requiring a pointer drag.
 
 ## Privacy and distribution
 

@@ -82,6 +82,47 @@ struct TimelineVideoLayout: Codable, Hashable, Sendable {
             height: height
         )
     }
+
+    /// Applies a normalized canvas offset while preserving the overlay size.
+    /// This is shared by direct manipulation and non-pointer editor commands.
+    func movedBy(x deltaX: Double, y deltaY: Double) -> TimelineVideoLayout {
+        let original = clamped()
+        return TimelineVideoLayout(
+            x: original.x + deltaX,
+            y: original.y + deltaY,
+            width: original.width,
+            height: original.height
+        ).clamped()
+    }
+
+    /// Resizes around the overlay center without changing its aspect ratio.
+    /// If the requested size reaches a canvas edge, the box moves only as much
+    /// as needed to remain fully visible.
+    func scaledBy(_ requestedScale: Double, minimumSize: Double = 0.08) -> TimelineVideoLayout {
+        let original = clamped(minimumSize: minimumSize)
+        guard requestedScale.isFinite, requestedScale > 0 else { return original }
+
+        let minimumScale = max(
+            minimumSize / original.width,
+            minimumSize / original.height
+        )
+        let maximumScale = min(
+            1 / original.width,
+            1 / original.height
+        )
+        let scale = min(max(requestedScale, minimumScale), maximumScale)
+        let width = original.width * scale
+        let height = original.height * scale
+        let centerX = original.x + original.width / 2
+        let centerY = original.y + original.height / 2
+
+        return TimelineVideoLayout(
+            x: centerX - width / 2,
+            y: centerY - height / 2,
+            width: width,
+            height: height
+        ).clamped(minimumSize: minimumSize)
+    }
 }
 
 enum TimelineCaptionPlacement: String, Codable, CaseIterable, Identifiable, Sendable {

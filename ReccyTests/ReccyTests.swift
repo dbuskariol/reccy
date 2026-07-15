@@ -2559,6 +2559,34 @@ struct ReccyTests {
         #expect(clamped.height == 0.08)
     }
 
+    @Test func cameraLayoutKeyboardOperationsMoveResizeAndClamp() {
+        let layout = TimelineVideoLayout(x: 0.4, y: 0.35, width: 0.32, height: 0.18)
+        let moved = layout.movedBy(x: -0.05, y: 0.04)
+        let bounded = layout.movedBy(x: 1, y: -1)
+        let enlarged = layout.scaledBy(1.25)
+        let minimum = layout.scaledBy(0.01)
+        let maximum = layout.scaledBy(100)
+
+        #expect(abs(moved.x - 0.35) < 0.000_1)
+        #expect(abs(moved.y - 0.39) < 0.000_1)
+        #expect(moved.width == layout.width)
+        #expect(moved.height == layout.height)
+        #expect(abs(bounded.x - 0.68) < 0.000_1)
+        #expect(bounded.y == 0)
+
+        #expect(abs(enlarged.width / enlarged.height - layout.width / layout.height) < 0.000_1)
+        #expect(abs(enlarged.x + enlarged.width / 2 - (layout.x + layout.width / 2)) < 0.000_1)
+        #expect(abs(enlarged.y + enlarged.height / 2 - (layout.y + layout.height / 2)) < 0.000_1)
+
+        #expect(abs(minimum.height - 0.08) < 0.000_1)
+        #expect(abs(minimum.width / minimum.height - layout.width / layout.height) < 0.000_1)
+        #expect(abs(maximum.width - 1) < 0.000_1)
+        #expect(maximum.x == 0)
+        #expect(maximum.y >= 0)
+        #expect(maximum.y + maximum.height <= 1)
+        #expect(abs(maximum.width / maximum.height - layout.width / layout.height) < 0.000_1)
+    }
+
     @Test func cameraVideoTransformMapsNormalizedLayoutIntoTheScreenCanvas() {
         let transform = TimelineCompositionBuilder.videoTransform(
             naturalSize: CGSize(width: 1280, height: 720),
