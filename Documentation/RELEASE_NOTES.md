@@ -1,13 +1,12 @@
-# Reccy 0.2.2
+# Reccy 0.3.0
 
-This patch makes transcription, recording finalization, and separate-camera playback substantially more reliable and understandable:
+This release adds a native, non-destructive caption workflow to Reccy's editor and fixes application-window presentation throughout playback and export:
 
-- Fixes Apple Speech and WhisperKit transcription across independent system-audio and microphone tracks, including recordings where only one source contains recognizable speech.
-- Prepares the selected on-device transcription engine before capture and defaults new WhisperKit users to its fastest Tiny model while preserving existing model choices.
-- Saves the screen, camera, and audio tracks before post-recording transcription continues in the Library, with visible progress instead of a blocking finishing state.
-- Drains native screen and camera sample queues before writer completion to prevent recordings from hanging during finalization.
-- Composites the separate camera track in Library playback using the same movable, resizable layout as the editor, including saved camera placement.
-- Identifies camera recordings from the first frame while preserving the camera track's true first-sample timestamp for accurate synchronization.
-- Makes the Monitor's Stop and Pause controls larger, full-width, and bottom-aligned, and clarifies that the first live transcript words can take a moment to appear.
+- Generates an editable caption track from source-aligned Apple Speech or WhisperKit transcripts while preserving independent system-audio and microphone timing.
+- Lets editors correct recognized transcript segments, regenerate readable caption cues, or add, edit, and remove captions manually at the playhead.
+- Provides native caption placement, sizing, visibility, live Editor and Library previews, and AVFoundation-rendered captions in exported video.
+- Keeps caption edits in the timeline project so the source recording and transcript sidecars remain intact until a finished export is rendered.
+- Fixes selected application-window recordings appearing small inside a black canvas by retaining canonical AVFoundation composition tracks, fitting content without distortion, and using the recording's actual display aspect throughout Library, Editor, and export.
+- Reorganizes the editor around native macOS sidebar, toolbar, menu, material, sizing, keyboard, and accessibility conventions while preserving Reccy's timeline, camera, transcript, and export actions.
 
 Requires macOS 26 or later. Download the notarized DMG for a standard drag-to-Applications install, or the signed ZIP for Sparkle-compatible deployment. `SHA256SUMS` and `release.json` provide independent artifact integrity and provenance metadata.
