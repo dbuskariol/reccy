@@ -283,6 +283,45 @@ final class TranscriptionController: ObservableObject {
         }
     }
 
+    func correctSegment(
+        mediaURL: URL,
+        sourceTrackID: Int32,
+        role: TranscriptTrackRole,
+        segmentID: UUID,
+        text: String
+    ) {
+        Task {
+            do {
+                let loadedDocument: TranscriptDocument?
+                if let cached = documents[mediaURL] {
+                    loadedDocument = cached
+                } else {
+                    loadedDocument = try await store.load(for: mediaURL)
+                }
+                guard var document = loadedDocument,
+                      let trackIndex = document.tracks.firstIndex(where: {
+                          $0.sourceTrackID == sourceTrackID && $0.role == role
+                      }),
+                      let segmentIndex = document.tracks[trackIndex].segments.firstIndex(where: {
+                          $0.id == segmentID
+                      })
+                else { return }
+                let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalized.isEmpty else { return }
+                let original = document.tracks[trackIndex].segments[segmentIndex].text
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                document.tracks[trackIndex].segments[segmentIndex].correctedText =
+                    normalized == original ? nil : normalized
+                document.modifiedAt = Date()
+                try await store.save(document, for: mediaURL)
+                documents[mediaURL] = document
+                jobs[mediaURL] = .ready
+            } catch {
+                jobs[mediaURL] = .failed(error.localizedDescription)
+            }
+        }
+    }
+
     func transcribe(_ recording: RecordingItem, replacingExisting: Bool = true) {
         transcribe(mediaURL: recording.url, manifest: recording.manifest, replacingExisting: replacingExisting)
     }

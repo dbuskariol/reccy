@@ -52,6 +52,19 @@ struct TimelineCompositionBuild {
     let videoComposition: AVVideoComposition?
     let audioMix: AVAudioMix?
     let renderSize: CGSize?
+
+    /// Video-composition instructions are bound to the tracks in this exact
+    /// composition. Keep playback on the canonical asset instead of copying it
+    /// independently, which can make AVFoundation resolve layered screen and
+    /// camera instructions against different track instances.
+    @MainActor
+    func makePlayerItem() -> AVPlayerItem {
+        let item = AVPlayerItem(asset: composition)
+        item.videoComposition = videoComposition
+        item.audioMix = audioMix
+        item.seekingWaitsForVideoCompositionRendering = true
+        return item
+    }
 }
 
 /// Assembles the editable timeline into AVFoundation playback primitives.
