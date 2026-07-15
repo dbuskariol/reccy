@@ -396,9 +396,24 @@ struct ReccyTests {
 
         #expect(cues.count == 2)
         #expect(cues[0].text == "Hello world.")
-        #expect(cues[0].duration >= TimelineCaptionCueGenerator.minimumReadableDuration)
+        #expect(abs(cues[0].duration - 1.2) < 0.001)
         #expect(cues[1].text == "A second sentence")
+        #expect(abs(cues[1].timelineEnd - 5) < 0.001)
         #expect(cues.allSatisfy { $0.origin == .transcript })
+    }
+
+    @Test func captionTrackHoldsEachCueUntilTheNextDetectedStart() {
+        let track = TimelineCaptionTrack(cues: [
+            TimelineCaptionCue(text: "Hello", timelineStart: 0.9, duration: 2.4),
+            TimelineCaptionCue(text: "Next phrase", timelineStart: 15.5, duration: 1.2),
+        ])
+
+        let presented = track.presentationCues(through: 20)
+
+        #expect(track.activeCue(at: 10)?.text == "Hello")
+        #expect(track.activeCue(at: 15.5)?.text == "Next phrase")
+        #expect(abs(presented[0].timelineEnd - 15.5) < 0.001)
+        #expect(abs(presented[1].timelineEnd - 20) < 0.001)
     }
 
     @Test func captionCueGeneratorDoesNotMergeIndependentSpeakers() {
@@ -2162,7 +2177,7 @@ struct ReccyTests {
         #expect(composition.instructions.count == build.videoComposition?.instructions.count)
     }
 
-    @Test @MainActor func captionRendererBurnsTimedTextIntoExportedVideo() async throws {
+    @Test @MainActor func captionRendererHoldsTimedTextThroughExportedVideo() async throws {
         let background = RGBAColor(red: 70, green: 120, blue: 180)
         let sourceURL = try await makeColorTestVideo(
             frameCount: 60,
@@ -2242,8 +2257,8 @@ struct ReccyTests {
             "Caption region \(duringCaption) should differ from its encoded frame background \(duringBackground)"
         )
         #expect(
-            afterCaption.isClose(to: afterBackground, tolerance: 18),
-            "Expired caption region \(afterCaption) should match its encoded frame background \(afterBackground)"
+            !afterCaption.isClose(to: afterBackground, tolerance: 18),
+            "Final caption region \(afterCaption) should remain visible through the exported project \(afterBackground)"
         )
     }
 

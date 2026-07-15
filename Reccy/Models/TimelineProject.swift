@@ -148,8 +148,37 @@ struct TimelineCaptionTrack: Codable, Hashable, Sendable {
     var style = TimelineCaptionStyle()
     var cues: [TimelineCaptionCue]
 
-    func activeCue(at time: TimeInterval) -> TimelineCaptionCue? {
-        cues.last { $0.contains(time) }
+    nonisolated func activeCue(at time: TimeInterval) -> TimelineCaptionCue? {
+        let ordered = cues.sorted { $0.timelineStart < $1.timelineStart }
+        guard let index = ordered.lastIndex(where: { $0.timelineStart <= time }) else {
+            return nil
+        }
+        let nextStart = ordered.indices.contains(index + 1)
+            ? ordered[index + 1].timelineStart
+            : .greatestFiniteMagnitude
+        return time < nextStart ? ordered[index] : nil
+    }
+
+    /// Returns non-overlapping cues whose visible ranges meet exactly at the
+    /// next detected caption. This is the single timing policy used by editor
+    /// preview, Library playback, and offline export.
+    nonisolated func presentationCues(through projectDuration: TimeInterval) -> [TimelineCaptionCue] {
+        let endOfProject = max(0, projectDuration)
+        let ordered = cues.sorted { $0.timelineStart < $1.timelineStart }
+
+        return ordered.indices.compactMap { index in
+            var cue = ordered[index]
+            cue.timelineStart = max(0, cue.timelineStart)
+            guard cue.timelineStart < endOfProject else { return nil }
+
+            let nextStart = ordered.indices.contains(index + 1)
+                ? max(cue.timelineStart, ordered[index + 1].timelineStart)
+                : endOfProject
+            let presentationEnd = min(endOfProject, nextStart)
+            guard presentationEnd > cue.timelineStart else { return nil }
+            cue.duration = presentationEnd - cue.timelineStart
+            return cue
+        }
     }
 }
 
