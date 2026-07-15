@@ -180,6 +180,36 @@ struct TimelineCaptionTrack: Codable, Hashable, Sendable {
             return cue
         }
     }
+
+    /// Moves one caption boundary without allowing cues to cross. Caption
+    /// durations are then normalized to the next boundary so preview, timeline,
+    /// and export continue to share exactly the same presentation ranges.
+    @discardableResult
+    nonisolated mutating func moveCue(
+        id: UUID,
+        to proposedStart: TimeInterval,
+        frameDuration: TimeInterval,
+        projectDuration: TimeInterval
+    ) -> TimeInterval? {
+        let ordered = cues.sorted { $0.timelineStart < $1.timelineStart }
+        guard let orderedIndex = ordered.firstIndex(where: { $0.id == id }),
+              let storageIndex = cues.firstIndex(where: { $0.id == id })
+        else { return nil }
+
+        let spacing = max(frameDuration, 1 / 600)
+        let lowerBound = orderedIndex > 0
+            ? ordered[orderedIndex - 1].timelineStart + spacing
+            : 0
+        let upperBound = ordered.indices.contains(orderedIndex + 1)
+            ? ordered[orderedIndex + 1].timelineStart - spacing
+            : max(0, projectDuration - spacing)
+        guard lowerBound <= upperBound else { return nil }
+
+        let start = min(max(proposedStart, lowerBound), upperBound)
+        cues[storageIndex].timelineStart = start
+        cues = presentationCues(through: projectDuration)
+        return start
+    }
 }
 
 struct TimelineClip: Identifiable, Codable, Hashable, Sendable {

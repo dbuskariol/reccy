@@ -416,6 +416,41 @@ struct ReccyTests {
         #expect(abs(presented[1].timelineEnd - 20) < 0.001)
     }
 
+    @Test func captionBoundaryMovesStayOrderedAndRenormalizePresentationRanges() throws {
+        let firstID = UUID()
+        let middleID = UUID()
+        let lastID = UUID()
+        var track = TimelineCaptionTrack(cues: [
+            TimelineCaptionCue(id: firstID, text: "First", timelineStart: 0, duration: 1),
+            TimelineCaptionCue(id: middleID, text: "Middle", timelineStart: 5, duration: 1),
+            TimelineCaptionCue(id: lastID, text: "Last", timelineStart: 10, duration: 1),
+        ])
+
+        let movedStartValue = track.moveCue(
+            id: middleID,
+            to: 8,
+            frameDuration: 0.1,
+            projectDuration: 15
+        )
+        let movedStart = try #require(movedStartValue)
+        let moved = track.presentationCues(through: 15)
+
+        #expect(abs(movedStart - 8) < 0.001)
+        #expect(moved.map(\.id) == [firstID, middleID, lastID])
+        #expect(abs(moved[0].timelineEnd - 8) < 0.001)
+        #expect(abs(moved[1].timelineEnd - 10) < 0.001)
+        #expect(abs(moved[2].timelineEnd - 15) < 0.001)
+
+        let clampedStartValue = track.moveCue(
+            id: middleID,
+            to: 12,
+            frameDuration: 0.1,
+            projectDuration: 15
+        )
+        let clampedStart = try #require(clampedStartValue)
+        #expect(abs(clampedStart - 9.9) < 0.001)
+    }
+
     @Test func captionCueGeneratorDoesNotMergeIndependentSpeakers() {
         let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Caption Speakers.mov")
         let system = projectedTranscriptSegment(
