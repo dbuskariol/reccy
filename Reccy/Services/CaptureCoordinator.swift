@@ -405,6 +405,17 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             return
         }
 
+        let transcriptionConfiguration = transcription.makeCaptureConfiguration(
+            systemAudio: settings.includeSystemAudio,
+            microphone: settings.includeMicrophone
+        )
+        guard !transcriptionConfiguration.isEnabled || transcription.captureReadiness.isReady else {
+            if !transcription.captureReadiness.isPreparing {
+                transcription.prepareSelectedCaptureEngine()
+            }
+            return
+        }
+
         countdownTask?.cancel()
         sessionCompletion = nil
         let seconds = settings.countdown.rawValue

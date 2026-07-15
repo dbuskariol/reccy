@@ -8,6 +8,23 @@ nonisolated enum TranscriptionEngineAvailability: Equatable, Sendable {
     case unavailable(String)
 }
 
+/// One canonical readiness state for capture-time transcription. Recording
+/// surfaces use this to explain cold model loading and to avoid starting a
+/// live-transcription session before its on-device engine is usable.
+nonisolated enum CaptureTranscriptionReadiness: Equatable, Sendable {
+    case disabled
+    case preparing(TranscriptionProgressUpdate)
+    case ready
+    case unavailable(String)
+
+    var isReady: Bool { self == .ready }
+
+    var isPreparing: Bool {
+        if case .preparing = self { return true }
+        return false
+    }
+}
+
 nonisolated struct TranscriptionTrackRequest: Sendable {
     let mediaURL: URL
     let sourceTrackID: Int32
@@ -65,6 +82,55 @@ nonisolated protocol TranscriptionEngine: Actor {
         localeIdentifier: String,
         update: @escaping @Sendable (LiveTranscriptUpdate) -> Void
     ) async throws -> any LiveTranscriptionSession
+}
+
+nonisolated struct TranscriptionTrackFailure: Equatable, Sendable {
+    let role: TranscriptTrackRole
+    let name: String
+    let message: String
+}
+
+nonisolated struct TranscriptionBatchResult: Sendable {
+    let tracks: [TranscriptTrack]
+    let failures: [TranscriptionTrackFailure]
+
+    var failureMessage: String {
+        guard failures.count > 1 else {
+            return failures.first?.message
+                ?? TranscriptionEngineError.noSpeechRecognized.localizedDescription
+        }
+        let names = failures.map(\.name).joined(separator: " and ")
+        return "Reccy couldn’t transcribe \(names). \(failures[0].message)"
+    }
+}
+
+/// Runs each independently recorded source as an independent transcription
+/// attempt. Silence or a provider error on one lane must never discard usable
+/// speech from another lane in the same recording.
+nonisolated enum TranscriptionBatchProcessor {
+    static func transcribe(
+        _ requests: [TranscriptionTrackRequest],
+        with engine: any TranscriptionEngine,
+        progress: @escaping @Sendable (TranscriptionProgressUpdate) -> Void
+    ) async throws -> TranscriptionBatchResult {
+        var tracks: [TranscriptTrack] = []
+        var failures: [TranscriptionTrackFailure] = []
+        for request in requests {
+            try Task.checkCancellation()
+            do {
+                tracks.append(try await engine.transcribe(request, progress: progress))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                failures.append(TranscriptionTrackFailure(
+                    role: request.role,
+                    name: request.name,
+                    message: error.localizedDescription
+                ))
+            }
+        }
+        return TranscriptionBatchResult(tracks: tracks, failures: failures)
+    }
 }
 
 nonisolated enum TranscriptionEngineError: LocalizedError {

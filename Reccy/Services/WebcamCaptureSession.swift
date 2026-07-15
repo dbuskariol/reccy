@@ -2,6 +2,7 @@
 import CoreMedia
 import CoreVideo
 import Foundation
+import OSLog
 
 nonisolated struct WebcamCaptureFormat: Equatable, Sendable {
     let deviceID: String
@@ -34,8 +35,9 @@ nonisolated enum WebcamCaptureError: LocalizedError {
 }
 
 /// Owns one native camera session for the complete screen-recording lifecycle.
-/// Its sample delegate runs on the recorder's serial media queue, so camera,
-/// screen, and audio timestamps enter the writer in one deterministic order.
+/// Camera callbacks stay on a dedicated lightweight queue and are handed to the
+/// recorder's serial delivery queue, so framework shutdown never waits behind
+/// screen/audio writer work while all writer mutations remain deterministic.
 nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
     typealias SampleHandler = @Sendable (CMSampleBuffer) -> Void
 
@@ -45,15 +47,21 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
         label: "com.reccy.capture.webcam.session",
         qos: .userInitiated
     )
-    private let sampleQueue: DispatchQueue
+    private let captureQueue = DispatchQueue(
+        label: "com.reccy.capture.webcam.samples",
+        qos: .userInteractive
+    )
+    private let deliveryQueue: DispatchQueue
     private let sampleHandler: SampleHandler
+    private let logger = Logger(subsystem: "com.reccy.mac", category: "Camera")
     private let sampleStateLock = NSLock()
     private var isConfigured = false
     private var format: WebcamCaptureFormat?
     private var hasDeliveredSample = false
+    private var acceptsSamples = true
 
-    init(sampleQueue: DispatchQueue, sampleHandler: @escaping SampleHandler) {
-        self.sampleQueue = sampleQueue
+    init(deliveryQueue: DispatchQueue, sampleHandler: @escaping SampleHandler) {
+        self.deliveryQueue = deliveryQueue
         self.sampleHandler = sampleHandler
         super.init()
     }
@@ -96,16 +104,41 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Ends the recorder-facing half of capture without making asset writer
+    /// finalization depend on AVCaptureSession's synchronous hardware teardown.
+    ///
+    /// Setting the output delegate to nil prevents new callbacks. Draining the
+    /// callback queue and then the recorder queue guarantees every sample that
+    /// was already in flight has finished before this method returns. The
+    /// session remains retained by its serial queue until stopRunning returns.
     func stop() async {
+        logger.info("Stopping camera sample delivery")
         await withCheckedContinuation { continuation in
             sessionQueue.async { [self] in
+                withSampleStateLock { acceptsSamples = false }
                 output.setSampleBufferDelegate(nil, queue: nil)
+
+                // The capture queue is serial by AVFoundation contract. Once
+                // it drains, all accepted callbacks have enqueued their writer
+                // work, so the nested delivery barrier is a safe cutoff.
+                captureQueue.async {
+                    self.deliveryQueue.async {
+                        continuation.resume()
+                    }
+                }
+
+                let hardwareStopStart = ContinuousClock.now
+                logger.info("Stopping native camera session")
                 if session.isRunning {
                     session.stopRunning()
                 }
-                continuation.resume()
+                let elapsed = hardwareStopStart.duration(to: .now)
+                logger.info(
+                    "Stopped native camera session in \(String(describing: elapsed), privacy: .public)"
+                )
             }
         }
+        logger.info("Camera samples drained from recorder")
     }
 
     private func configure(deviceID: String?, fileType: AVFileType) throws -> WebcamCaptureFormat {
@@ -138,7 +171,7 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
         ]
         guard session.canAddOutput(output) else { throw WebcamCaptureError.cannotAddOutput }
         session.addOutput(output)
-        output.setSampleBufferDelegate(self, queue: sampleQueue)
+        output.setSampleBufferDelegate(self, queue: captureQueue)
 
         guard let recommended = output.recommendedVideoSettingsForAssetWriter(writingTo: fileType),
               let width = Self.integer(recommended[AVVideoWidthKey]),
@@ -226,11 +259,23 @@ nonisolated extension WebcamCaptureSession: AVCaptureVideoDataOutputSampleBuffer
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard sampleBuffer.isValid,
+        guard withSampleStateLock({ acceptsSamples }),
+              sampleBuffer.isValid,
               CMSampleBufferDataIsReady(sampleBuffer),
               let converted = sampleInHostTime(sampleBuffer)
         else { return }
         withSampleStateLock { hasDeliveredSample = true }
-        sampleHandler(converted)
+        let retained = WebcamRetainedSampleBuffer(converted)
+        deliveryQueue.async { [sampleHandler] in
+            sampleHandler(retained.value)
+        }
+    }
+}
+
+private nonisolated final class WebcamRetainedSampleBuffer: @unchecked Sendable {
+    let value: CMSampleBuffer
+
+    init(_ value: CMSampleBuffer) {
+        self.value = value
     }
 }
