@@ -1,12 +1,10 @@
-# Reccy 0.2.0
+# Reccy 0.2.1
 
-This release adds native, private transcription and a fully editable webcam workflow to Reccy's capture and editing foundation:
+This patch fixes camera access in signed builds and makes the recording setup easier to scan:
 
-- On-device Apple Speech and WhisperKit transcription engines with live and post-recording workflows, source-aware transcript tracks, model management, and editor integration.
-- Optional built-in, external, Continuity, or Desk View camera recording as a separate, synchronized video track.
-- A low-latency webcam preview on the Monitor page using the same native sample buffers written to the recording.
-- A dedicated camera timeline lane with direct positioning and resizing in the editor; the same composition is used for preview and export.
-- App-wide camera selection, privacy controls, recording metadata, storage preflight, interruption recovery, and two-track capture validation.
-- More robust native source-picker cancellation, reset, and stale-callback handling across the main recording and menu-bar controls.
+- Restores camera access in Developer ID–signed releases by including the required camera entitlement alongside Reccy's existing privacy declaration.
+- Adds fail-closed release checks for camera and microphone usage descriptions and signed capture entitlements.
+- Gives the optional camera overlay its own capture card and source picker instead of combining it with audio.
+- Separates transcription from the core Audio, Pointer, and Start controls for a cleaner recording setup.
 
 Requires macOS 26 or later. Download the notarized DMG for a standard drag-to-Applications install, or the signed ZIP for Sparkle-compatible deployment. `SHA256SUMS` and `release.json` provide independent artifact integrity and provenance metadata.
