@@ -5,39 +5,18 @@ struct RootView: View {
     @EnvironmentObject private var editor: TimelineEditorController
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var preferences: AppPreferences
-    @State private var isSidebarVisible = true
-
-    private let sidebarWidth: CGFloat = 218
 
     var body: some View {
-        NavigationStack {
-            HStack(spacing: 0) {
-                if isSidebarVisible {
-                    AppSidebar(
-                        selection: $navigation.section,
-                        captureState: coordinator.state
-                    )
-                        .frame(width: sidebarWidth)
-                        .zIndex(1)
-
-                    Divider()
-                }
-
-                detail
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigation) {
-                    Button {
-                        isSidebarVisible.toggle()
-                    } label: {
-                        Image(systemName: "sidebar.left")
-                    }
-                    .accessibilityLabel(isSidebarVisible ? "Hide Sidebar" : "Show Sidebar")
-                    .reccyTooltip(isSidebarVisible ? "Hide sidebar" : "Show sidebar")
-                }
-            }
+        NavigationSplitView {
+            AppSidebar(
+                selection: $navigation.section,
+                captureState: coordinator.state
+            )
+            .navigationSplitViewColumnWidth(min: 200, ideal: 218, max: 260)
+        } detail: {
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
         }
         .onChange(of: coordinator.state) { oldState, newState in
             if newState.isRecording, !oldState.isRecording {
@@ -115,10 +94,6 @@ private struct AppSidebar: View {
                 .padding(.vertical, 9)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            Color(nsColor: .windowBackgroundColor)
-            Color.primary.opacity(0.025)
-        }
     }
 
     private func sidebarButton(_ section: AppSection) -> some View {

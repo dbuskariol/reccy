@@ -273,6 +273,49 @@ struct ReccyTests {
         #expect(projected[0].role == TranscriptTrackRole.microphone)
     }
 
+    @Test func transcriptProjectionPrefersAUserCorrectionOverRecognizedWords() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Corrected Transcript.mov")
+        let track = TranscriptTrack(
+            sourceTrackID: 7,
+            role: .microphone,
+            name: "Microphone",
+            provider: .appleSpeech,
+            localeIdentifier: "en-AU",
+            modelIdentifier: "test",
+            segments: [TranscriptSegment(
+                text: "Recognized wording",
+                correctedText: "Corrected wording",
+                sourceStart: 0,
+                duration: 1,
+                words: [TranscriptWord(
+                    text: " Recognized wording",
+                    sourceStart: 0,
+                    duration: 1
+                )]
+            )]
+        )
+        let clip = TimelineClip(
+            sourceURL: mediaURL,
+            sourceTrackID: 7,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: 1,
+            name: "Microphone"
+        )
+        let project = TimelineProject(
+            name: "Correction Projection",
+            lanes: [TimelineLane(kind: .microphone, name: "Microphone", clips: [clip])]
+        )
+        let document = TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: [track])
+
+        let projected = TranscriptProjection.project(
+            project: project,
+            documentsByMediaURL: [mediaURL: document]
+        )
+
+        #expect(projected.map(\.text) == ["Corrected wording"])
+    }
+
     @Test func transcriptProjectionKeepsDuplicateClipsAsSeparateCues() {
         let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Duplicate Transcript.mov")
         let segment = TranscriptSegment(
@@ -325,6 +368,8 @@ struct ReccyTests {
             sourceSegmentID: UUID(),
             clipID: UUID(),
             laneID: UUID(),
+            mediaURL: URL(fileURLWithPath: "/tmp/Reccy Transcript Export.mov"),
+            sourceTrackID: 1,
             role: .systemAudio,
             text: "Hello world",
             timelineStart: 65.25,
@@ -337,6 +382,117 @@ struct ReccyTests {
         #expect(srt.contains("00:01:05,250 --> 00:01:07,750"))
         #expect(vtt.contains("00:01:05.250 --> 00:01:07.750"))
         #expect(vtt.hasPrefix("WEBVTT"))
+    }
+
+    @Test func captionCueGeneratorBuildsReadableSentenceBoundedCues() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Caption Source.mov")
+        let segments = [
+            projectedTranscriptSegment("Hello", start: 0, duration: 0.45, mediaURL: mediaURL),
+            projectedTranscriptSegment("world.", start: 0.5, duration: 0.4, mediaURL: mediaURL),
+            projectedTranscriptSegment("A second sentence", start: 1.2, duration: 1.1, mediaURL: mediaURL),
+        ]
+
+        let cues = TimelineCaptionCueGenerator.cues(from: segments, projectDuration: 5)
+
+        #expect(cues.count == 2)
+        #expect(cues[0].text == "Hello world.")
+        #expect(cues[0].duration >= TimelineCaptionCueGenerator.minimumReadableDuration)
+        #expect(cues[1].text == "A second sentence")
+        #expect(cues.allSatisfy { $0.origin == .transcript })
+    }
+
+    @Test func captionCueGeneratorDoesNotMergeIndependentSpeakers() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Caption Speakers.mov")
+        let system = projectedTranscriptSegment(
+            "System audio",
+            start: 0,
+            duration: 1,
+            mediaURL: mediaURL,
+            role: .systemAudio
+        )
+        let microphone = projectedTranscriptSegment(
+            "Microphone reply",
+            start: 1.05,
+            duration: 1,
+            mediaURL: mediaURL,
+            role: .microphone
+        )
+
+        let cues = TimelineCaptionCueGenerator.cues(
+            from: [system, microphone],
+            projectDuration: 3
+        )
+
+        #expect(cues.map(\.text) == ["System audio", "Microphone reply"])
+        #expect(cues[0].timelineEnd <= cues[1].timelineStart)
+    }
+
+    @Test func captionCueGeneratorRemovesCrossTrackAcousticEchoes() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Caption Echo.mov")
+        let system = projectedTranscriptSegment(
+            "Apple speech keeps every transcript private",
+            start: 10,
+            duration: 3,
+            mediaURL: mediaURL,
+            role: .systemAudio
+        )
+        let microphone = projectedTranscriptSegment(
+            "Apple speech keeps every transcript private.",
+            start: 10.1,
+            duration: 3.1,
+            mediaURL: mediaURL,
+            role: .microphone
+        )
+
+        let cues = TimelineCaptionCueGenerator.cues(
+            from: [system, microphone],
+            projectDuration: 15
+        )
+
+        #expect(cues.count == 1)
+        #expect(!cues[0].text.contains("\n"))
+    }
+
+    @Test func captionCueGeneratorCombinesTrulyConcurrentSpeakersWithoutOverlaidLayers() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Caption Overlap.mov")
+        let system = projectedTranscriptSegment(
+            "Remote speaker",
+            start: 2,
+            duration: 1.5,
+            mediaURL: mediaURL,
+            role: .systemAudio
+        )
+        let microphone = projectedTranscriptSegment(
+            "Local reply",
+            start: 2.1,
+            duration: 1.2,
+            mediaURL: mediaURL,
+            role: .microphone
+        )
+
+        let cues = TimelineCaptionCueGenerator.cues(
+            from: [system, microphone],
+            projectDuration: 5
+        )
+
+        #expect(cues.count == 1)
+        #expect(cues[0].text == "– Remote speaker\n– Local reply")
+    }
+
+    @Test func legacyTimelineProjectDecodesWithoutCaptionTrack() throws {
+        let project = makeProject()
+        let encoder = JSONEncoder()
+        var object = try #require(
+            JSONSerialization.jsonObject(with: encoder.encode(project)) as? [String: Any]
+        )
+        object["formatVersion"] = 3
+        object.removeValue(forKey: "captionTrack")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(TimelineProject.self, from: legacyData)
+
+        #expect(decoded.formatVersion == 3)
+        #expect(decoded.captionTrack == nil)
     }
 
     @Test func transcriptStoreRoundTripsAnAtomicSidecar() async throws {
@@ -376,6 +532,81 @@ struct ReccyTests {
 
         #expect(restored == document)
         #expect(FileManager.default.fileExists(atPath: TranscriptStore.sidecarURL(for: mediaURL).path))
+    }
+
+    @Test @MainActor func transcriptCorrectionsPersistAndRemainReversible() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Transcript Correction \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mediaURL = directory.appendingPathComponent("Recording.mov")
+        let segmentID = UUID()
+        let document = TranscriptDocument(
+            mediaFileName: mediaURL.lastPathComponent,
+            tracks: [TranscriptTrack(
+                sourceTrackID: 3,
+                role: .microphone,
+                name: "Microphone",
+                provider: .appleSpeech,
+                localeIdentifier: "en-AU",
+                modelIdentifier: "test",
+                segments: [TranscriptSegment(
+                    id: segmentID,
+                    text: "Original wording",
+                    sourceStart: 0,
+                    duration: 1,
+                    words: []
+                )]
+            )]
+        )
+        let store = TranscriptStore()
+        try await store.save(document, for: mediaURL)
+        let suiteName = "ReccyTests.TranscriptCorrection.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let modelDirectory = directory.appendingPathComponent("Models", isDirectory: true)
+        let controller = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory)
+        )
+
+        controller.loadDocument(for: mediaURL)
+        for _ in 0..<100 where controller.document(for: mediaURL) == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        controller.correctSegment(
+            mediaURL: mediaURL,
+            sourceTrackID: 3,
+            role: .microphone,
+            segmentID: segmentID,
+            text: "Corrected wording"
+        )
+        for _ in 0..<100
+            where controller.document(for: mediaURL)?.tracks.first?.segments.first?.displayText
+                != "Corrected wording"
+        {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let corrected = try #require(try await store.load(for: mediaURL))
+        #expect(corrected.tracks[0].segments[0].correctedText == "Corrected wording")
+
+        controller.correctSegment(
+            mediaURL: mediaURL,
+            sourceTrackID: 3,
+            role: .microphone,
+            segmentID: segmentID,
+            text: "Original wording"
+        )
+        for _ in 0..<100
+            where controller.document(for: mediaURL)?.tracks.first?.segments.first?.correctedText != nil
+        {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let restored = try #require(try await store.load(for: mediaURL))
+        #expect(restored.tracks[0].segments[0].correctedText == nil)
+        #expect(restored.tracks[0].segments[0].displayText == "Original wording")
     }
 
     @Test func portionCaptureBypassesTheWholeDisplayPicker() {
@@ -1888,6 +2119,177 @@ struct ReccyTests {
         #expect(abs(output.height - 540) < 0.001)
     }
 
+    @Test @MainActor func captionRendererAddsApplesOfflineAnimationTool() async throws {
+        let sourceURL = try await makeColorTestVideo(
+            frameCount: 30,
+            solidColor: RGBAColor(red: 25, green: 35, blue: 45)
+        )
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let asset = AVURLAsset(url: sourceURL)
+        let sourceTrack = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let project = TimelineProject(
+            name: "Caption Render",
+            lanes: [TimelineLane(
+                kind: .video,
+                name: "Screen",
+                clips: [TimelineClip(
+                    sourceURL: sourceURL,
+                    sourceTrackID: sourceTrack.trackID,
+                    sourceStart: 0,
+                    timelineStart: 0,
+                    duration: 1,
+                    name: "Screen"
+                )]
+            )]
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        let captionTrack = TimelineCaptionTrack(cues: [TimelineCaptionCue(
+            text: "Native captions",
+            timelineStart: 0.1,
+            duration: 0.8,
+            origin: .manual
+        )])
+
+        let result = TimelineCaptionVideoRenderer.applying(
+            captionTrack,
+            to: build.videoComposition,
+            projectDuration: project.duration
+        )
+
+        let composition = try #require(result)
+        #expect(composition.animationTool != nil)
+        #expect(composition.renderSize == build.videoComposition?.renderSize)
+        #expect(composition.instructions.count == build.videoComposition?.instructions.count)
+    }
+
+    @Test @MainActor func captionRendererBurnsTimedTextIntoExportedVideo() async throws {
+        let background = RGBAColor(red: 70, green: 120, blue: 180)
+        let sourceURL = try await makeColorTestVideo(
+            frameCount: 60,
+            solidColor: background,
+            size: CGSize(width: 640, height: 360)
+        )
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Caption Export \(UUID().uuidString)")
+            .appendingPathExtension("mov")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: destination)
+        }
+        let asset = AVURLAsset(url: sourceURL)
+        let sourceTrack = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let project = TimelineProject(
+            name: "Caption Burn-In",
+            lanes: [TimelineLane(
+                kind: .video,
+                name: "Screen",
+                clips: [TimelineClip(
+                    sourceURL: sourceURL,
+                    sourceTrackID: sourceTrack.trackID,
+                    sourceStart: 0,
+                    timelineStart: 0,
+                    duration: 2,
+                    name: "Screen"
+                )]
+            )]
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        let renderedComposition = try #require(TimelineCaptionVideoRenderer.applying(
+            TimelineCaptionTrack(cues: [TimelineCaptionCue(
+                text: "Native captions",
+                timelineStart: 0.2,
+                duration: 1.2,
+                origin: .manual
+            )]),
+            to: build.videoComposition,
+            projectDuration: project.duration
+        ))
+        let exporter = try #require(AVAssetExportSession(
+            asset: build.composition,
+            presetName: AVAssetExportPresetHighestQuality
+        ))
+        exporter.videoComposition = renderedComposition
+        try await exporter.export(to: destination, as: .mov)
+
+        let exportedAsset = AVURLAsset(url: destination)
+        let duringCaption = try await renderedColor(
+            at: 0.75,
+            composition: exportedAsset,
+            videoComposition: nil,
+            normalizedPoint: CGPoint(x: 0.5, y: 0.14)
+        )
+        let duringBackground = try await renderedColor(
+            at: 0.75,
+            composition: exportedAsset,
+            videoComposition: nil,
+            normalizedPoint: CGPoint(x: 0.5, y: 0.5)
+        )
+        let afterCaption = try await renderedColor(
+            at: 1.75,
+            composition: exportedAsset,
+            videoComposition: nil,
+            normalizedPoint: CGPoint(x: 0.5, y: 0.14)
+        )
+        let afterBackground = try await renderedColor(
+            at: 1.75,
+            composition: exportedAsset,
+            videoComposition: nil,
+            normalizedPoint: CGPoint(x: 0.5, y: 0.5)
+        )
+
+        #expect(
+            !duringCaption.isClose(to: duringBackground, tolerance: 18),
+            "Caption region \(duringCaption) should differ from its encoded frame background \(duringBackground)"
+        )
+        #expect(
+            afterCaption.isClose(to: afterBackground, tolerance: 18),
+            "Expired caption region \(afterCaption) should match its encoded frame background \(afterBackground)"
+        )
+    }
+
+    @Test @MainActor func composedPreviewKeepsVideoInstructionsBoundToTheCanonicalAsset() async throws {
+        let mediaURL = try await makeCameraRecordingFixture()
+        defer { try? FileManager.default.removeItem(at: mediaURL) }
+        var manifest = makeRecoveryManifest()
+        manifest.width = 64
+        manifest.height = 64
+        manifest.includesSystemAudio = false
+        manifest.camera = RecordingCameraDescriptor(
+            uniqueID: "camera-test",
+            name: "Studio Camera",
+            width: 64,
+            height: 64
+        )
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 1,
+            duration: 1,
+            manifest: manifest,
+            pixelWidth: 64,
+            pixelHeight: 64,
+            frameRate: 30
+        )
+        let project = try await RecordingTimelineProjectLoader.initialProject(for: item)
+        let build = try await TimelineCompositionBuilder.build(project)
+        let videoComposition = try #require(build.videoComposition)
+        let assetTrackIDs = Set(build.composition.tracks(withMediaType: .video).map(\.trackID))
+        let instructionTrackIDs = Set(videoComposition.instructions.flatMap { instruction in
+            (instruction as? AVVideoCompositionInstruction)?.layerInstructions.map(\.trackID) ?? []
+        })
+        let playerItem = build.makePlayerItem()
+        let playerInstructionTrackIDs = Set(
+            try #require(playerItem.videoComposition).instructions.flatMap { instruction in
+                (instruction as? AVVideoCompositionInstruction)?.layerInstructions.map(\.trackID) ?? []
+            }
+        )
+
+        #expect(instructionTrackIDs == assetTrackIDs)
+        #expect(playerItem.asset === build.composition)
+        #expect(playerInstructionTrackIDs == assetTrackIDs)
+        #expect(playerItem.videoComposition?.renderSize == build.videoComposition?.renderSize)
+    }
+
     @Test func compositionBuilderRendersCameraAsASeparateFrontVideoLayer() async throws {
         let screenURL = try await makeColorTestVideo(
             frameCount: 30,
@@ -2075,6 +2477,27 @@ struct ReccyTests {
         }
     }
 
+    private func projectedTranscriptSegment(
+        _ text: String,
+        start: TimeInterval,
+        duration: TimeInterval,
+        mediaURL: URL,
+        role: TranscriptTrackRole = .systemAudio
+    ) -> ProjectedTranscriptSegment {
+        ProjectedTranscriptSegment(
+            id: UUID().uuidString,
+            sourceSegmentID: UUID(),
+            clipID: UUID(),
+            laneID: UUID(),
+            mediaURL: mediaURL,
+            sourceTrackID: role == .microphone ? 2 : 1,
+            role: role,
+            text: text,
+            timelineStart: start,
+            duration: duration
+        )
+    }
+
     private func makeProject() -> TimelineProject {
         let url = URL(fileURLWithPath: "/tmp/source.mov")
         let groupID = UUID()
@@ -2135,7 +2558,8 @@ struct ReccyTests {
 
     private func makeColorTestVideo(
         frameCount: Int = 90,
-        solidColor: RGBAColor? = nil
+        solidColor: RGBAColor? = nil,
+        size: CGSize = CGSize(width: 64, height: 64)
     ) async throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Gap Test \(UUID().uuidString)")
@@ -2145,8 +2569,8 @@ struct ReccyTests {
             mediaType: .video,
             outputSettings: [
                 AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: 64,
-                AVVideoHeightKey: 64,
+                AVVideoWidthKey: Int(size.width),
+                AVVideoHeightKey: Int(size.height),
             ]
         )
         input.expectsMediaDataInRealTime = false
@@ -2154,8 +2578,8 @@ struct ReccyTests {
             assetWriterInput: input,
             sourcePixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: 64,
-                kCVPixelBufferHeightKey as String: 64,
+                kCVPixelBufferWidthKey as String: Int(size.width),
+                kCVPixelBufferHeightKey as String: Int(size.height),
             ]
         )
         guard writer.canAdd(input) else { throw TestMediaError.cannotAddVideoInput }
@@ -2177,7 +2601,7 @@ struct ReccyTests {
             } else {
                 color = RGBAColor(red: 0, green: 0, blue: 255)
             }
-            let pixelBuffer = try makePixelBuffer(color: color)
+            let pixelBuffer = try makePixelBuffer(color: color, size: size)
             guard adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)) else {
                 throw writer.error ?? TestMediaError.writerFailed
             }
@@ -2376,12 +2800,15 @@ struct ReccyTests {
         return values.reduce(0, +) / Float(values.count)
     }
 
-    private func makePixelBuffer(color: RGBAColor) throws -> CVPixelBuffer {
+    private func makePixelBuffer(
+        color: RGBAColor,
+        size: CGSize = CGSize(width: 64, height: 64)
+    ) throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
-            64,
-            64,
+            Int(size.width),
+            Int(size.height),
             kCVPixelFormatType_32BGRA,
             [
                 kCVPixelBufferCGImageCompatibilityKey: true,
@@ -2399,9 +2826,9 @@ struct ReccyTests {
             throw TestMediaError.cannotCreatePixelBuffer
         }
         let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        for y in 0..<64 {
+        for y in 0..<Int(size.height) {
             let row = baseAddress.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt8.self)
-            for x in 0..<64 {
+            for x in 0..<Int(size.width) {
                 row[x * 4] = color.blue
                 row[x * 4 + 1] = color.green
                 row[x * 4 + 2] = color.red
@@ -2413,7 +2840,7 @@ struct ReccyTests {
 
     private func renderedColor(
         at seconds: TimeInterval,
-        composition: AVComposition,
+        composition: AVAsset,
         videoComposition: AVVideoComposition?,
         normalizedPoint: CGPoint = CGPoint(x: 0.5, y: 0.5)
     ) async throws -> RGBAColor {

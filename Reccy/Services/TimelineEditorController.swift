@@ -34,6 +34,7 @@ final class TimelineEditorController: ObservableObject {
     @Published private(set) var previewRenderSize: CGSize = .zero
     @Published var selectedClipID: UUID?
     @Published var selectedGapID: UUID?
+    @Published var selectedCaptionID: UUID?
     @Published var playhead: TimeInterval = 0
     @Published var pixelsPerSecond: Double = 72
     @Published var errorMessage: String?
@@ -178,6 +179,7 @@ final class TimelineEditorController: ObservableObject {
             sourceDurations: sourceDurations,
             selectedClipID: selectedClipID,
             selectedGapID: selectedGapID,
+            selectedCaptionID: selectedCaptionID,
             playhead: playhead
         )
 
@@ -187,6 +189,7 @@ final class TimelineEditorController: ObservableObject {
         playhead = 0
         selectedClipID = loaded.project.lanes.flatMap(\.clips).first?.id
         selectedGapID = nil
+        selectedCaptionID = nil
 
         do {
             try await rebuildComposition()
@@ -199,6 +202,7 @@ final class TimelineEditorController: ObservableObject {
             sourceDurations = previous.sourceDurations
             selectedClipID = previous.selectedClipID
             selectedGapID = previous.selectedGapID
+            selectedCaptionID = previous.selectedCaptionID
             playhead = previous.playhead
 
             if previous.project != nil {
@@ -257,12 +261,14 @@ final class TimelineEditorController: ObservableObject {
     func select(_ clip: TimelineClip, at time: TimeInterval? = nil) {
         selectedClipID = clip.id
         selectedGapID = nil
+        selectedCaptionID = nil
         seek(to: time ?? clip.timelineStart)
     }
 
     func select(_ gap: TimelineGapSegment, at time: TimeInterval? = nil) {
         selectedClipID = nil
         selectedGapID = gap.id
+        selectedCaptionID = nil
         seek(to: time ?? gap.timelineStart)
     }
 
@@ -403,6 +409,101 @@ final class TimelineEditorController: ObservableObject {
         rebuildAndSave()
     }
 
+    func replaceCaptions(with cues: [TimelineCaptionCue]) {
+        updateProjectWithoutRebuild { project in
+            let existingTrack = project.captionTrack
+            project.captionTrack = TimelineCaptionTrack(
+                isVisible: existingTrack?.isVisible ?? true,
+                style: existingTrack?.style ?? TimelineCaptionStyle(),
+                cues: cues
+            )
+            selectedCaptionID = cues.first?.id
+        }
+    }
+
+    @discardableResult
+    func addCaption(at time: TimeInterval) -> UUID? {
+        guard let project else { return nil }
+        let existingCues = project.captionTrack?.cues.sorted { $0.timelineStart < $1.timelineStart } ?? []
+        var start = min(max(time, 0), max(0, project.duration - project.frameDuration))
+        for cue in existingCues where cue.timelineEnd > start + 0.000_1
+            && cue.timelineStart <= start + project.frameDuration
+        {
+            start = cue.timelineEnd
+        }
+        let nextStart = existingCues.first(where: { $0.timelineStart > start + 0.000_1 })?
+            .timelineStart ?? project.duration
+        let duration = min(2, nextStart - start, project.duration - start)
+        guard duration >= project.frameDuration else {
+            errorMessage = "There isn’t an open caption gap at or after the playhead. Edit the nearby caption text or seek to an open gap."
+            return nil
+        }
+        let cue = TimelineCaptionCue(
+            text: "New caption",
+            timelineStart: start,
+            duration: duration,
+            origin: .manual
+        )
+        updateProjectWithoutRebuild { project in
+            var track = project.captionTrack ?? TimelineCaptionTrack(cues: [])
+            track.cues.append(cue)
+            track.cues.sort { $0.timelineStart < $1.timelineStart }
+            project.captionTrack = track
+            selectedCaptionID = cue.id
+        }
+        return cue.id
+    }
+
+    func updateCaptionText(_ text: String, cueID: UUID) {
+        updateProjectWithoutRebuild { project in
+            guard var track = project.captionTrack,
+                  let index = track.cues.firstIndex(where: { $0.id == cueID })
+            else { return }
+            track.cues[index].text = text
+            project.captionTrack = track
+        }
+    }
+
+    func deleteCaption(_ cueID: UUID) {
+        updateProjectWithoutRebuild { project in
+            guard var track = project.captionTrack else { return }
+            track.cues.removeAll { $0.id == cueID }
+            project.captionTrack = track.cues.isEmpty ? nil : track
+            if selectedCaptionID == cueID { selectedCaptionID = nil }
+        }
+    }
+
+    func setCaptionsVisible(_ isVisible: Bool) {
+        updateProjectWithoutRebuild { project in
+            guard var track = project.captionTrack else { return }
+            track.isVisible = isVisible
+            project.captionTrack = track
+        }
+    }
+
+    func setCaptionPlacement(_ placement: TimelineCaptionPlacement) {
+        updateProjectWithoutRebuild { project in
+            guard var track = project.captionTrack else { return }
+            track.style.placement = placement
+            project.captionTrack = track
+        }
+    }
+
+    func setCaptionSize(_ size: TimelineCaptionSize) {
+        updateProjectWithoutRebuild { project in
+            guard var track = project.captionTrack else { return }
+            track.style.size = size
+            project.captionTrack = track
+        }
+    }
+
+    func selectCaption(_ cue: TimelineCaptionCue) {
+        selectedCaptionID = cue.id
+        selectedClipID = nil
+        selectedGapID = nil
+        seek(to: cue.timelineStart)
+    }
+
     func resetVideoLayout(clipID: UUID) {
         guard let clip = project?.clip(id: clipID) else { return }
         let current = (clip.videoLayout ?? .defaultCamera).clamped()
@@ -476,15 +577,30 @@ final class TimelineEditorController: ObservableObject {
 
     func makeExportSource() throws -> ExportSource {
         guard let project, let composition else { throw TimelineEditorError.noProject }
-        guard let snapshot = composition.copy() as? AVComposition else {
-            throw TimelineEditorError.noProject
-        }
         return ExportSource(
             name: project.name,
-            asset: snapshot,
-            videoComposition: compositionVideoComposition,
+            asset: composition,
+            videoComposition: TimelineCaptionVideoRenderer.applying(
+                project.captionTrack,
+                to: compositionVideoComposition,
+                projectDuration: project.duration
+            ),
             audioMix: compositionAudioMix
         )
+    }
+
+    private func updateProjectWithoutRebuild(_ update: (inout TimelineProject) -> Void) {
+        guard var project else { return }
+        let original = project
+        update(&project)
+        guard project != original else { return }
+        project.modifiedAt = Date()
+        self.project = project
+        do {
+            try save()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func rebuildAndSave() {
@@ -511,10 +627,7 @@ final class TimelineEditorController: ObservableObject {
         }
 
         let build = try await TimelineCompositionBuilder.build(project)
-        let snapshot = (build.composition.copy() as? AVComposition) ?? build.composition
-        let item = AVPlayerItem(asset: snapshot)
-        item.videoComposition = build.videoComposition
-        item.audioMix = build.audioMix
+        let item = build.makePlayerItem()
 
         // A prior edit may still be assembling while the user makes a newer
         // one. Never let the older composition overwrite the current project.
@@ -524,7 +637,6 @@ final class TimelineEditorController: ObservableObject {
         compositionVideoComposition = build.videoComposition
         compositionAudioMix = build.audioMix
         previewRenderSize = build.renderSize ?? .zero
-        item.seekingWaitsForVideoCompositionRendering = true
         player.replaceCurrentItem(with: item)
         let target = min(playhead, project.duration)
         playhead = target
@@ -735,6 +847,7 @@ private struct EditorProjectSnapshot {
     let sourceDurations: [URL: TimeInterval]
     let selectedClipID: UUID?
     let selectedGapID: UUID?
+    let selectedCaptionID: UUID?
     let playhead: TimeInterval
 }
 
