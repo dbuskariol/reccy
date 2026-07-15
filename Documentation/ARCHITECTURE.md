@@ -26,7 +26,8 @@ AVCaptureSession ── camera CMSampleBuffer ► HEVC/H.264 “Camera” input
                               ├── camera lane + normalized overlay layout
                               ├── system-audio lane
                               ├── microphone lane
-                              └── voiceover lane(s)
+                              ├── voiceover lane(s)
+                              └── editable timed caption track
                                                 │
                                                 ▼
                                       AVAssetExportSession
@@ -58,6 +59,10 @@ On macOS 26, `SCScreenshotConfiguration` captures the already-approved content f
 
 `TimelineEditorController` materializes that model as an `AVMutableComposition` for AVPlayer preview and export. Screen video, camera video, system audio, microphone, and voiceover remain independent lanes. Camera placement is stored as a normalized, canvas-relative rectangle on the camera clip, so it survives source-resolution and export changes. The player exposes direct move and resize interaction; `AVVideoComposition` applies the same aspect-preserving transform and front-to-back layer order for preview and export. A user can split only the selected clip or split every lane at the playhead, delete one clip, or ripple-delete a range across the project. Lane mute and volume are represented by `AVAudioMix` parameters.
 
+The project also owns a non-destructive timed caption track. Transcript projection creates sentence-bounded cues, removes strongly matching cross-track acoustic echoes, and serializes genuinely concurrent speakers so two caption layers never draw over one another. Caption text, manual cues, visibility, placement, and size are editable without rebuilding the media composition. Playback uses one shared native SwiftUI overlay in Editor and Library; exports use `AVVideoCompositionCoreAnimationTool` with `CATextLayer` because Apple defines that tool as an offline render path. The export pass reuses the base composition instructions and color metadata, so captions do not flatten or alter the source tracks.
+
+`TimelineCompositionBuild` creates AVPlayer items from its canonical composition. The layer instructions and player asset therefore always reference the same composition tracks; independently copying the asset after instructions are built can make layered screen and camera previews resolve against different track instances. Library sizes its player surface from the actual render aspect rather than assuming 16:9, preserving window, application, portrait, and portion geometry.
+
 Voiceover uses an explicitly configured `AVCaptureSession` and `AVCaptureAudioFileOutput` so the user can choose a real input device instead of being limited to the current system default. The session commits its configuration before capture starts and writes mono 48 kHz AAC into the project's `Media` directory. Each take becomes an independent audio clip at the current playhead, so it can be moved, trimmed, split, muted, deleted, or replaced without altering the screen recording.
 
 Project packages use this shape:
@@ -77,7 +82,7 @@ Transcription is source-track data, not a flattened presentation artifact. `Mult
 
 `WhisperKitTranscriptionEngine` uses Argmax Open-Source SDK 1.0's WhisperKit product and local Core ML model folders on Apple silicon. `WhisperModelManager` owns an indexed model library in Application Support, explicit background downloads, byte counts, and removal. Inference is configured with downloads disabled, so selecting WhisperKit without an installed model produces an actionable state instead of making an implicit request. Post-processing calls WhisperKit's array transcription API over bounded, overlapping five-minute source-track windows. Live microphone inference delegates decode cadence, voice activity detection, and confirmed/unconfirmed segment state to WhisperKit's `AudioStreamTranscriber`; a narrow `AudioProcessing` adapter supplies Reccy's already-authorized and pause-retimed PCM so WhisperKit does not open a competing microphone capture. WhisperKit's public stream API always requests microphone authorization, so system-audio-only live transcription uses the same decoder through Reccy's bounded external-source session instead of creating an unrelated microphone permission dependency.
 
-Both engines emit the same word/segment model. `TranscriptStore` atomically persists one `.reccytranscript` sidecar beside the media, retaining engine, locale, model, role, source track ID, source times, confidence, and alternatives. `TranscriptProjection` maps source times through `TimelineProject` clips, so independent trims, moves, splits, duplicates, gaps, and deletions produce deterministic timeline cues without rewriting source transcripts. TXT, SRT, and WebVTT exports use that same projection. Library search and seeking, Monitor captions, and Editor captions therefore consume one canonical document rather than view-specific copies.
+Both engines emit the same word/segment model. `TranscriptStore` atomically persists one `.reccytranscript` sidecar beside the media, retaining engine, locale, model, role, source track ID, source times, confidence, alternatives, and explicit user corrections. `TranscriptProjection` maps source times through `TimelineProject` clips, so independent trims, moves, splits, duplicates, gaps, and deletions produce deterministic timeline cues without rewriting source timing. TXT, SRT, WebVTT, and the editable project caption generator use that same projection. A correction updates the canonical transcript sidecar; regenerating captions applies it while preserving caption style. Library search and seeking, Monitor captions, and Editor captions therefore consume one canonical document rather than view-specific copies.
 
 ## Export
 
@@ -87,7 +92,7 @@ The service writes into a private, same-volume staging directory and reserves ca
 
 ## UI
 
-The application uses SwiftUI scenes, an app-owned fixed-width workspace sidebar, native toolbars, AppKit file panels, AVKit rendering surfaces, a menu-bar extra, standard materials, semantic colors, SF Symbols, and system content sharing. Owning the root split geometry keeps every section aligned even when detail toolbars change, while the controls and window chrome still inherit the native macOS treatment.
+The application uses SwiftUI scenes, a native `NavigationSplitView`, native toolbars, AppKit file panels, AVKit rendering surfaces, a menu-bar extra, standard materials, semantic colors, SF Symbols, and system content sharing. The system owns sidebar presentation, resizing, and the toolbar toggle. Editor actions use native toolbar items and menus instead of a second in-content control strip, keeping macOS sizing, materials, customization, and accessibility behavior consistent across every workspace.
 
 Icon controls use one shared semantic-label and tooltip primitive so the visible interface, hover help, and assistive descriptions cannot drift. The timeline exposes each clip and gap as one adjustable accessibility object instead of leaking decorative handles. Frame-accurate move, trim, and gap-fill operations are available through VoiceOver custom actions and matching Editor-menu keyboard commands.
 

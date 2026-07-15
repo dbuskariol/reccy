@@ -84,6 +84,75 @@ struct TimelineVideoLayout: Codable, Hashable, Sendable {
     }
 }
 
+enum TimelineCaptionPlacement: String, Codable, CaseIterable, Identifiable, Sendable {
+    case bottom
+    case top
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .bottom: "Bottom"
+        case .top: "Top"
+        }
+    }
+}
+
+enum TimelineCaptionSize: String, Codable, CaseIterable, Identifiable, Sendable {
+    case standard
+    case large
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .standard: "Standard"
+        case .large: "Large"
+        }
+    }
+
+    var renderScale: Double {
+        switch self {
+        case .standard: 0.046
+        case .large: 0.058
+        }
+    }
+}
+
+struct TimelineCaptionStyle: Codable, Hashable, Sendable {
+    var placement: TimelineCaptionPlacement = .bottom
+    var size: TimelineCaptionSize = .standard
+}
+
+enum TimelineCaptionOrigin: String, Codable, Sendable {
+    case transcript
+    case manual
+}
+
+struct TimelineCaptionCue: Identifiable, Codable, Hashable, Sendable {
+    var id = UUID()
+    var text: String
+    var timelineStart: TimeInterval
+    var duration: TimeInterval
+    var origin: TimelineCaptionOrigin = .manual
+
+    nonisolated var timelineEnd: TimeInterval { timelineStart + duration }
+
+    nonisolated func contains(_ time: TimeInterval) -> Bool {
+        timelineStart <= time && time < timelineEnd
+    }
+}
+
+struct TimelineCaptionTrack: Codable, Hashable, Sendable {
+    var isVisible = true
+    var style = TimelineCaptionStyle()
+    var cues: [TimelineCaptionCue]
+
+    func activeCue(at time: TimeInterval) -> TimelineCaptionCue? {
+        cues.last { $0.contains(time) }
+    }
+}
+
 struct TimelineClip: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var sourceURL: URL
@@ -171,7 +240,7 @@ struct TimelineLane: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
-    static let currentFormatVersion = 3
+    static let currentFormatVersion = 4
 
     var formatVersion = currentFormatVersion
     var id = UUID()
@@ -181,17 +250,20 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
     var frameRate: Double
     var lanes: [TimelineLane]
     var videoGaps: [TimelineGapSegment]
+    var captionTrack: TimelineCaptionTrack?
 
     init(
         name: String,
         frameRate: Double = 30,
         lanes: [TimelineLane],
-        videoGaps: [TimelineGapSegment] = []
+        videoGaps: [TimelineGapSegment] = [],
+        captionTrack: TimelineCaptionTrack? = nil
     ) {
         self.name = name
         self.frameRate = max(frameRate, 1)
         self.lanes = lanes
         self.videoGaps = videoGaps
+        self.captionTrack = captionTrack
         reconcileVideoGaps()
     }
 

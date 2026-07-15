@@ -31,10 +31,12 @@ enum RecordingTimelineProjectLoader {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let header = try decoder.decode(TimelineProjectHeader.self, from: data)
-            guard header.formatVersion == TimelineProject.currentFormatVersion else {
+            guard (3...TimelineProject.currentFormatVersion).contains(header.formatVersion) else {
                 throw TimelineEditorError.projectFormatUnsupported
             }
-            let savedProject = try decoder.decode(TimelineProject.self, from: data)
+            var savedProject = try decoder.decode(TimelineProject.self, from: data)
+            let needsMigrationSave = savedProject.formatVersion != TimelineProject.currentFormatVersion
+            savedProject.formatVersion = TimelineProject.currentFormatVersion
             var durations: [URL: TimeInterval] = [:]
             for url in Set(savedProject.lanes.flatMap(\.clips).map(\.sourceURL)) {
                 durations[url] = try await AVURLAsset(url: url).load(.duration).seconds
@@ -42,7 +44,7 @@ enum RecordingTimelineProjectLoader {
             return LoadedTimelineProject(
                 project: savedProject,
                 sourceDurations: durations,
-                needsInitialSave: false
+                needsInitialSave: needsMigrationSave
             )
         }
 

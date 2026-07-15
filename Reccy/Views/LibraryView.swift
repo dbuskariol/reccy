@@ -18,6 +18,8 @@ struct LibraryView: View {
     @State private var isPreviewLoading = false
     @State private var previewLoadTask: Task<Void, Never>?
     @State private var playbackTime: TimeInterval = 0
+    @State private var previewCaptionTrack: TimelineCaptionTrack?
+    @State private var previewRenderSize = CGSize.zero
     @State private var searchText = ""
 
     private let playbackTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
@@ -391,6 +393,19 @@ struct LibraryView: View {
         ZStack {
             NativeLibraryVideoPlayer(player: player)
 
+            if let previewCaptionTrack,
+               previewCaptionTrack.isVisible,
+               previewRenderSize.width > 0,
+               previewRenderSize.height > 0
+            {
+                TimelineCaptionOverlay(
+                    track: previewCaptionTrack,
+                    time: playbackTime,
+                    renderSize: previewRenderSize
+                )
+                .allowsHitTesting(false)
+            }
+
             if isPreviewLoading {
                 ProgressView(item.manifest.camera == nil ? "Preparing preview…" : "Preparing camera preview…")
                     .padding(.horizontal, 14)
@@ -398,8 +413,8 @@ struct LibraryView: View {
                     .background(.regularMaterial, in: Capsule())
             }
         }
+            .aspectRatio(previewAspectRatio(for: item), contentMode: .fit)
             .frame(maxWidth: 560)
-            .aspectRatio(16 / 9, contentMode: .fit)
             .background(.black)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
@@ -737,6 +752,11 @@ struct LibraryView: View {
         isPreviewPlaying = false
         isPreviewLoading = true
         playbackTime = 0
+        previewCaptionTrack = nil
+        previewRenderSize = CGSize(
+            width: CGFloat(item.manifest.width),
+            height: CGFloat(item.manifest.height)
+        )
         player.pause()
         player.replaceCurrentItem(with: nil)
         previewLoadTask?.cancel()
@@ -747,12 +767,10 @@ struct LibraryView: View {
                 try Task.checkCancellation()
                 guard selectedID == item.id else { return }
 
-                let snapshot = (build.composition.copy() as? AVComposition) ?? build.composition
-                let playerItem = AVPlayerItem(asset: snapshot)
-                playerItem.videoComposition = build.videoComposition
-                playerItem.audioMix = build.audioMix
-                playerItem.seekingWaitsForVideoCompositionRendering = true
+                let playerItem = build.makePlayerItem()
                 player.replaceCurrentItem(with: playerItem)
+                previewCaptionTrack = loadedProject.project.captionTrack
+                previewRenderSize = build.renderSize ?? previewRenderSize
                 isPreviewLoading = false
                 logger.info(
                     "Prepared composed preview videoTracks=\(build.composition.tracks(withMediaType: .video).count) file=\(item.url.lastPathComponent, privacy: .public)"
@@ -766,6 +784,7 @@ struct LibraryView: View {
                     "Falling back to source preview file=\(item.url.lastPathComponent, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
                 )
                 player.replaceCurrentItem(with: AVPlayerItem(url: item.url))
+                previewCaptionTrack = nil
                 isPreviewLoading = false
                 if autoplay { player.play() }
             }
@@ -832,6 +851,8 @@ struct LibraryView: View {
                     sourceSegmentID: segment.id,
                     clipID: track.id,
                     laneID: track.id,
+                    mediaURL: item.url,
+                    sourceTrackID: track.sourceTrackID,
                     role: track.role,
                     text: segment.displayText,
                     timelineStart: segment.sourceStart,
@@ -881,6 +902,14 @@ struct LibraryView: View {
     private func playbackTimecode(_ seconds: TimeInterval) -> String {
         let value = max(0, Int(seconds.rounded(.down)))
         return String(format: "%02d:%02d", value / 60, value % 60)
+    }
+
+    private func previewAspectRatio(for item: RecordingItem) -> CGFloat {
+        let size = previewRenderSize.width > 0 && previewRenderSize.height > 0
+            ? previewRenderSize
+            : CGSize(width: item.manifest.width, height: item.manifest.height)
+        guard size.width > 0, size.height > 0 else { return 16 / 9 }
+        return size.width / size.height
     }
 }
 

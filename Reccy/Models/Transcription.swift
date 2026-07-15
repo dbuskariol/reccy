@@ -159,6 +159,8 @@ nonisolated struct ProjectedTranscriptSegment: Identifiable, Hashable, Sendable 
     let sourceSegmentID: UUID
     let clipID: UUID
     let laneID: UUID
+    let mediaURL: URL
+    let sourceTrackID: Int32
     let role: TranscriptTrackRole
     let text: String
     let timelineStart: TimeInterval
@@ -193,9 +195,15 @@ nonisolated enum TranscriptProjection {
                         $0.sourceEnd > clip.sourceStart + 0.001
                             && $0.sourceStart < clipSourceEnd - 0.001
                     }
-                    let text = words.isEmpty
-                        ? segment.displayText
-                        : words.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                    let correction = segment.correctedText?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let text = if let correction, !correction.isEmpty {
+                        correction
+                    } else if words.isEmpty {
+                        segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    } else {
+                        words.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
                     guard !text.isEmpty else { continue }
 
                     let timelineStart = clip.timelineStart + (intersectionStart - clip.sourceStart)
@@ -204,6 +212,8 @@ nonisolated enum TranscriptProjection {
                         sourceSegmentID: segment.id,
                         clipID: clip.id,
                         laneID: lane.id,
+                        mediaURL: clip.sourceURL,
+                        sourceTrackID: clip.sourceTrackID,
                         role: role,
                         text: text,
                         timelineStart: timelineStart,
