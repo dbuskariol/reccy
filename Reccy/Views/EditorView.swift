@@ -96,20 +96,27 @@ struct EditorView: View {
     private func editorWorkspace(_ project: TimelineProject) -> some View {
         Group {
             if showsTranscript {
-                HSplitView {
-                    editorCore(project)
-                        .frame(minWidth: 460, idealWidth: 720)
-
-                    Group {
-                        switch inspectorMode {
-                        case .transcript:
-                            transcriptPanel(project)
-                        case .captions:
-                            captionPanel(project)
+                ReccySplitView(
+                    axis: .horizontal,
+                    autosaveName: "editor.workspace-inspector",
+                    initialFraction: 0.72,
+                    firstMinimum: 460,
+                    secondMinimum: 280,
+                    secondMaximum: 520,
+                    firstPaneName: "editor workspace",
+                    secondPaneName: "transcript inspector",
+                    first: { editorCore(project) },
+                    second: {
+                        Group {
+                            switch inspectorMode {
+                            case .transcript:
+                                transcriptPanel(project)
+                            case .captions:
+                                captionPanel(project)
+                            }
                         }
                     }
-                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 520)
-                }
+                )
             } else {
                 editorCore(project)
             }
@@ -118,13 +125,17 @@ struct EditorView: View {
     }
 
     private func editorCore(_ project: TimelineProject) -> some View {
-        VSplitView {
-            previewPane(project)
-                .frame(minHeight: 250, idealHeight: 390)
-
-            timelinePane(project)
-                .frame(minHeight: 285, idealHeight: 360)
-        }
+        ReccySplitView(
+            axis: .vertical,
+            autosaveName: "editor.preview-timeline",
+            initialFraction: 0.56,
+            firstMinimum: 250,
+            secondMinimum: 285,
+            firstPaneName: "video preview",
+            secondPaneName: "timeline",
+            first: { previewPane(project) },
+            second: { timelinePane(project) }
+        )
     }
 
     private func previewPane(_ project: TimelineProject) -> some View {

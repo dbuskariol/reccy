@@ -48,23 +48,31 @@ struct MonitorView: View {
 
             Divider()
 
-            VSplitView {
-                monitoringOverview
-                    .padding(20)
-                    .frame(minHeight: 260, idealHeight: 390)
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        audioSection
-                        if transcription.isLiveCaptureEnabled {
-                            liveTranscriptSection
+            ReccySplitView(
+                axis: .vertical,
+                autosaveName: "monitor.overview-details",
+                initialFraction: 0.54,
+                firstMinimum: 260,
+                secondMinimum: 220,
+                firstPaneName: "recording overview",
+                secondPaneName: "recording details",
+                first: {
+                    monitoringOverview
+                        .padding(20)
+                },
+                second: {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            audioSection
+                            if transcription.isLiveCaptureEnabled {
+                                liveTranscriptSection
+                            }
                         }
+                        .padding(28)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
-                    .padding(28)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .frame(minHeight: 220, idealHeight: 320)
-            }
+            )
         }
     }
 
@@ -90,12 +98,18 @@ struct MonitorView: View {
     }
 
     private var monitoringOverview: some View {
-        HSplitView {
-            livePreview
-                .frame(minWidth: 360, idealWidth: 680, maxWidth: .infinity)
-            recordingStatusCard
-                .frame(minWidth: 240, idealWidth: 280, maxWidth: 380)
-        }
+        ReccySplitView(
+            axis: .horizontal,
+            autosaveName: "monitor.preview-status",
+            initialFraction: 0.72,
+            firstMinimum: 360,
+            secondMinimum: 240,
+            secondMaximum: 380,
+            firstPaneName: "live preview",
+            secondPaneName: "recording status",
+            first: { livePreview },
+            second: { recordingStatusCard }
+        )
     }
 
     private var livePreview: some View {
@@ -240,27 +254,36 @@ struct MonitorView: View {
                 subtitle: "Live levels verify that each enabled source is reaching the recording."
             )
 
-            HSplitView {
-                audioMeterCard(
-                    title: "System Audio",
-                    systemImage: "speaker.wave.2.fill",
-                    isEnabled: coordinator.settings.includeSystemAudio,
-                    level: coordinator.systemAudioLevel,
-                    history: coordinator.systemAudioHistory,
-                    color: .teal
-                )
-                .frame(minWidth: 240, idealWidth: 420)
-
-                audioMeterCard(
-                    title: "Microphone",
-                    systemImage: "mic.fill",
-                    isEnabled: coordinator.settings.includeMicrophone,
-                    level: coordinator.microphoneAudioLevel,
-                    history: coordinator.microphoneAudioHistory,
-                    color: .orange
-                )
-                .frame(minWidth: 240, idealWidth: 420)
-            }
+            ReccySplitView(
+                axis: .horizontal,
+                autosaveName: "monitor.audio-sources",
+                initialFraction: 0.5,
+                firstMinimum: 240,
+                secondMinimum: 240,
+                firstPaneName: "system audio meter",
+                secondPaneName: "microphone meter",
+                first: {
+                    audioMeterCard(
+                        title: "System Audio",
+                        systemImage: "speaker.wave.2.fill",
+                        isEnabled: coordinator.settings.includeSystemAudio,
+                        level: coordinator.systemAudioLevel,
+                        history: coordinator.systemAudioHistory,
+                        color: .teal
+                    )
+                },
+                second: {
+                    audioMeterCard(
+                        title: "Microphone",
+                        systemImage: "mic.fill",
+                        isEnabled: coordinator.settings.includeMicrophone,
+                        level: coordinator.microphoneAudioLevel,
+                        history: coordinator.microphoneAudioHistory,
+                        color: .orange
+                    )
+                }
+            )
+            .frame(height: 220)
         }
     }
 
@@ -318,12 +341,18 @@ struct MonitorView: View {
                 }
             } else {
                 if showsSystemTranscript && showsMicrophoneTranscript {
-                    HSplitView {
-                        liveTranscriptCard(role: .systemAudio, color: .teal)
-                            .frame(minWidth: 240, idealWidth: 420)
-                        liveTranscriptCard(role: .microphone, color: .orange)
-                            .frame(minWidth: 240, idealWidth: 420)
-                    }
+                    ReccySplitView(
+                        axis: .horizontal,
+                        autosaveName: "monitor.live-transcripts",
+                        initialFraction: 0.5,
+                        firstMinimum: 240,
+                        secondMinimum: 240,
+                        firstPaneName: "system audio transcript",
+                        secondPaneName: "microphone transcript",
+                        first: { liveTranscriptCard(role: .systemAudio, color: .teal) },
+                        second: { liveTranscriptCard(role: .microphone, color: .orange) }
+                    )
+                    .frame(height: 180)
                 } else if showsSystemTranscript {
                     liveTranscriptCard(role: .systemAudio, color: .teal)
                         .frame(maxWidth: .infinity)

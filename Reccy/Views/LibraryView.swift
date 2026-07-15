@@ -39,17 +39,18 @@ struct LibraryView: View {
                         description: "Your completed recordings will appear here."
                     )
                 } else {
-                    HSplitView {
-                        recordingBrowser
-                            .frame(minWidth: 340, idealWidth: 380, maxWidth: 520)
-
-                        previewPane
-                            .frame(
-                                minWidth: 360,
-                                maxWidth: .infinity,
-                                maxHeight: .infinity
-                            )
-                    }
+                    ReccySplitView(
+                        axis: .horizontal,
+                        autosaveName: "library.browser-preview",
+                        initialFraction: 0.28,
+                        firstMinimum: 340,
+                        firstMaximum: 520,
+                        secondMinimum: 360,
+                        firstPaneName: "recording browser",
+                        secondPaneName: "recording preview",
+                        first: { recordingBrowser },
+                        second: { previewPane }
+                    )
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
