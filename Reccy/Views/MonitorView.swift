@@ -295,48 +295,11 @@ struct MonitorView: View {
     }
 
     private func liveTranscriptCard(role: TranscriptTrackRole, color: Color) -> some View {
-        let update = transcription.liveUpdates[role]
-        let finalized = update?.finalizedSegments.suffix(5) ?? []
-        let volatile = update?.volatileSegments.suffix(2) ?? []
-        return CardContainer {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Label(role.title, systemImage: role.systemImage)
-                        .font(.headline)
-                    Spacer()
-                    Circle()
-                        .fill(color)
-                        .frame(width: 7, height: 7)
-                    Text(update == nil ? "LISTENING" : "LIVE")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
-                }
-
-                if finalized.isEmpty && volatile.isEmpty {
-                    Text("Waiting for speech…")
-                        .font(.body)
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, minHeight: 72, alignment: .topLeading)
-                } else {
-                    VStack(alignment: .leading, spacing: 7) {
-                        ForEach(Array(finalized)) { segment in
-                            Text(segment.displayText)
-                                .font(.body)
-                                .textSelection(.enabled)
-                        }
-                        ForEach(Array(volatile)) { segment in
-                            Text(segment.displayText)
-                                .font(.body)
-                                .foregroundStyle(.secondary)
-                                .italic()
-                        }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 72, alignment: .bottomLeading)
-                }
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Live \(role.title) transcript")
+        LiveTranscriptCard(
+            role: role,
+            color: color,
+            update: transcription.liveUpdates[role]
+        )
     }
 
     private func metadataPill(_ text: String, systemImage: String) -> some View {
@@ -378,5 +341,75 @@ struct MonitorView: View {
         case (false, true): "Microphone is recording on its own track."
         case (false, false): "This recording has no audio tracks."
         }
+    }
+}
+
+private struct LiveTranscriptCard: View {
+    private static let bottomAnchor = "live-transcript-bottom"
+
+    let role: TranscriptTrackRole
+    let color: Color
+    let update: LiveTranscriptUpdate?
+
+    private var finalized: [TranscriptSegment] {
+        Array(update?.finalizedSegments.suffix(20) ?? [])
+    }
+
+    private var volatile: [TranscriptSegment] {
+        Array(update?.volatileSegments.suffix(4) ?? [])
+    }
+
+    var body: some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label(role.title, systemImage: role.systemImage)
+                        .font(.headline)
+                    Spacer()
+                    Circle()
+                        .fill(color)
+                        .frame(width: 7, height: 7)
+                    Text(update == nil ? "LISTENING" : "LIVE")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
+
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            if finalized.isEmpty && volatile.isEmpty {
+                                Text("Waiting for speech…")
+                                    .foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                            } else {
+                                ForEach(finalized) { segment in
+                                    Text(segment.displayText)
+                                        .textSelection(.enabled)
+                                }
+                                ForEach(volatile) { segment in
+                                    Text(segment.displayText)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Color.clear
+                                .frame(height: 1)
+                                .id(Self.bottomAnchor)
+                        }
+                        .font(.body)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .scrollIndicators(.hidden)
+                    .defaultScrollAnchor(.bottom)
+                    .onChange(of: update) {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                        }
+                    }
+                }
+                .frame(height: 104)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Live \(role.title) transcript")
     }
 }

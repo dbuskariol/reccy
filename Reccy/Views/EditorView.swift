@@ -74,10 +74,11 @@ struct EditorView: View {
     private func editorWorkspace(_ project: TimelineProject) -> some View {
         Group {
             if showsTranscript {
-                HSplitView {
+                HStack(spacing: 0) {
                     editorCore(project)
+                    Divider()
                     transcriptPanel(project)
-                        .frame(minWidth: 280, idealWidth: 330, maxWidth: 440)
+                        .frame(width: 320)
                 }
             } else {
                 editorCore(project)
@@ -676,7 +677,7 @@ struct EditorView: View {
                                     .padding(.vertical, 7)
                                     .background(
                                         segment.timelineStart <= editor.playhead && editor.playhead < segment.timelineEnd
-                                            ? Color.accentColor.opacity(0.13)
+                                            ? Color.accentColor.opacity(0.08)
                                             : Color.clear,
                                         in: RoundedRectangle(cornerRadius: 7)
                                     )
