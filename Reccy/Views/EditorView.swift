@@ -279,6 +279,10 @@ struct EditorView: View {
                 Divider()
             }
 
+            captionLaneHeader(project.captionTrack)
+                .frame(height: laneHeight)
+            Divider()
+
             Spacer(minLength: 0)
         }
         .background(.bar.opacity(0.72))
@@ -322,11 +326,49 @@ struct EditorView: View {
         .padding(.horizontal, 12)
     }
 
+    private func captionLaneHeader(_ track: TimelineCaptionTrack?) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Image(systemName: "captions.bubble.fill")
+                    .foregroundStyle(.indigo)
+                    .accessibilityHidden(true)
+                Text("Captions")
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                if let track {
+                    Button {
+                        editor.setCaptionsVisible(!track.isVisible)
+                    } label: {
+                        Image(systemName: track.isVisible ? "eye.fill" : "eye.slash.fill")
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.borderless)
+                    .reccyAccessibleControl(track.isVisible ? "Hide Captions" : "Show Captions")
+                }
+
+                Button {
+                    addCaptionAtPlayhead()
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.borderless)
+                .reccyAccessibleControl("Add Caption at Playhead")
+
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 12)
+    }
+
     private func timelineCanvas(_ project: TimelineProject) -> some View {
         let paddingDuration = max(4, 480 / max(editor.pixelsPerSecond, 1))
         let canvasDuration = max(project.duration + paddingDuration, 12)
         let trackWidth = canvasDuration * editor.pixelsPerSecond
-        let canvasHeight = rulerHeight + CGFloat(project.lanes.count) * (laneHeight + 1)
+        let canvasHeight = rulerHeight + CGFloat(project.lanes.count + 1) * (laneHeight + 1)
 
         return ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
@@ -342,6 +384,15 @@ struct EditorView: View {
                         .frame(height: laneHeight)
                     Divider()
                 }
+
+                captionLaneRow(
+                    project.captionTrack,
+                    projectDuration: project.duration,
+                    frameRate: project.frameRate,
+                    trackWidth: trackWidth
+                )
+                .frame(height: laneHeight)
+                Divider()
             }
 
             TimelinePlayhead()
@@ -352,6 +403,56 @@ struct EditorView: View {
         }
         .frame(width: trackWidth, height: canvasHeight, alignment: .topLeading)
         .coordinateSpace(name: "timelineCanvas")
+    }
+
+    private func captionLaneRow(
+        _ track: TimelineCaptionTrack?,
+        projectDuration: TimeInterval,
+        frameRate: Double,
+        trackWidth: Double
+    ) -> some View {
+        let cues = track?.presentationCues(through: projectDuration) ?? []
+
+        return ZStack(alignment: .leading) {
+            Rectangle()
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
+                        .onChanged { value in
+                            editor.seek(to: value.location.x / editor.pixelsPerSecond)
+                        }
+                )
+
+            if cues.isEmpty {
+                Text("Add a caption at the playhead")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 12)
+                    .allowsHitTesting(false)
+            }
+
+            ForEach(cues) { cue in
+                TimelineCaptionCueView(
+                    cue: cue,
+                    pixelsPerSecond: editor.pixelsPerSecond,
+                    frameRate: frameRate,
+                    isSelected: editor.selectedCaptionID == cue.id,
+                    isVisible: track?.isVisible == true,
+                    onSelect: {
+                        editor.selectCaption(cue)
+                        inspectorMode = .captions
+                        showsTranscript = true
+                    },
+                    onMove: { start in editor.moveCaption(cue.id, to: start) },
+                    onNudge: { frames in editor.nudgeCaption(cue.id, byFrames: frames) },
+                    onDelete: { editor.deleteCaption(cue.id) }
+                )
+                .frame(width: max(cue.duration * editor.pixelsPerSecond, 18), height: laneHeight - 12)
+                .offset(x: cue.timelineStart * editor.pixelsPerSecond)
+            }
+        }
+        .frame(width: trackWidth, alignment: .leading)
     }
 
     private func ruler(width: Double, duration: TimeInterval) -> some View {
@@ -804,7 +905,7 @@ struct EditorView: View {
 
                 HStack(spacing: 8) {
                     Button("Add", systemImage: "plus") {
-                        _ = editor.addCaption(at: editor.playhead)
+                        addCaptionAtPlayhead()
                     }
                     .buttonStyle(.borderedProminent)
 
@@ -857,7 +958,7 @@ struct EditorView: View {
                     }
 
                     Button("Add Manually", systemImage: "plus") {
-                        _ = editor.addCaption(at: editor.playhead)
+                        addCaptionAtPlayhead()
                     }
                 }
                 .padding(28)
@@ -1058,6 +1159,12 @@ struct EditorView: View {
             projectDuration: project.duration
         )
         editor.replaceCaptions(with: cues)
+    }
+
+    private func addCaptionAtPlayhead() {
+        guard editor.addCaption(at: editor.playhead) != nil else { return }
+        inspectorMode = .captions
+        showsTranscript = true
     }
 
     private func laneColor(_ kind: TimelineLaneKind) -> Color {
