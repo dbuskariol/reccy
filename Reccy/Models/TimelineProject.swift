@@ -1,8 +1,10 @@
 import AVFoundation
+import CoreGraphics
 import Foundation
 
 enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
     case video
+    case camera
     case systemAudio
     case microphone
     case voiceover
@@ -10,6 +12,7 @@ enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
     var title: String {
         switch self {
         case .video: "Screen"
+        case .camera: "Camera"
         case .systemAudio: "System Audio"
         case .microphone: "Microphone"
         case .voiceover: "Voiceover"
@@ -19,6 +22,7 @@ enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
     var systemImage: String {
         switch self {
         case .video: "film"
+        case .camera: "web.camera"
         case .systemAudio: "speaker.wave.2"
         case .microphone: "mic"
         case .voiceover: "waveform.badge.mic"
@@ -26,7 +30,57 @@ enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
     }
 
     var mediaType: AVMediaType {
-        self == .video ? .video : .audio
+        isVideo ? .video : .audio
+    }
+
+    nonisolated var isVideo: Bool { self == .video || self == .camera }
+    nonisolated var isAudio: Bool { !isVideo }
+}
+
+/// A render-canvas-relative box for a secondary video clip. Coordinates are
+/// normalized so camera placement survives source-resolution and export changes.
+struct TimelineVideoLayout: Codable, Hashable, Sendable {
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
+
+    static let defaultCamera = TimelineVideoLayout(x: 0.69, y: 0.69, width: 0.28, height: 0.28)
+
+    static func defaultCamera(canvasSize: CGSize, sourceSize: CGSize) -> TimelineVideoLayout {
+        guard canvasSize.width > 0,
+              canvasSize.height > 0,
+              sourceSize.width > 0,
+              sourceSize.height > 0
+        else { return defaultCamera }
+        let width = 0.28
+        let sourceAspect = sourceSize.width / sourceSize.height
+        let height = min(
+            0.5,
+            width * Double(canvasSize.width / canvasSize.height) / Double(sourceAspect)
+        )
+        let margin = 0.03
+        return TimelineVideoLayout(
+            x: 1 - width - margin,
+            y: 1 - height - margin,
+            width: width,
+            height: height
+        ).clamped()
+    }
+
+    var cgRect: CGRect {
+        CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    func clamped(minimumSize: Double = 0.08) -> TimelineVideoLayout {
+        let width = min(max(self.width, minimumSize), 1)
+        let height = min(max(self.height, minimumSize), 1)
+        return TimelineVideoLayout(
+            x: min(max(x, 0), 1 - width),
+            y: min(max(y, 0), 1 - height),
+            width: width,
+            height: height
+        )
     }
 }
 
@@ -39,6 +93,7 @@ struct TimelineClip: Identifiable, Codable, Hashable, Sendable {
     var duration: TimeInterval
     var name: String
     var linkedGroupID: UUID?
+    var videoLayout: TimelineVideoLayout? = nil
 
     var timelineEnd: TimeInterval { timelineStart + duration }
 

@@ -158,6 +158,7 @@ struct RecordView: View {
     private var needsPermissionAttention: Bool {
         needsDirectCaptureAccess
             || (coordinator.settings.includeMicrophone && coordinator.microphonePermission != .authorized)
+            || (coordinator.settings.includeCamera && coordinator.cameraPermission != .authorized)
     }
 
     private var needsDirectCaptureAccess: Bool {
@@ -197,6 +198,9 @@ struct RecordView: View {
                 ? "Quit and reopen Reccy once to finish enabling direct Portion capture."
                 : "Portion uses Reccy’s resizable overlay and needs the one-time Direct Screen & System Audio Access approval."
         }
+        if coordinator.settings.includeCamera && coordinator.cameraPermission != .authorized {
+            return "Camera access is required because a separate camera video track is enabled."
+        }
         return "Microphone access is required because microphone recording is enabled."
     }
 
@@ -205,7 +209,27 @@ struct RecordView: View {
             VStack(alignment: .leading, spacing: 17) {
                 SectionHeading("Capture options")
                 LazyVGrid(columns: threeColumnLayout, alignment: .leading, spacing: 18) {
-                    optionColumn(title: "Audio", systemImage: "waveform") {
+                    optionColumn(title: "Camera & audio", systemImage: "video") {
+                        optionToggleRow("Camera", isOn: $coordinator.settings.includeCamera)
+                        if coordinator.settings.includeCamera {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Camera source")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Picker("Camera", selection: $coordinator.settings.selectedCameraID) {
+                                    Text("System Default").tag(String?.none)
+                                    ForEach(coordinator.cameraInputDevices) { device in
+                                        Text(device.name).tag(Optional(device.id))
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            Label("Separate editable video track", systemImage: "rectangle.on.rectangle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         optionToggleRow("System audio", isOn: $coordinator.settings.includeSystemAudio)
                         optionToggleRow("Microphone", isOn: $coordinator.settings.includeMicrophone)
                         if coordinator.settings.includeSystemAudio && coordinator.settings.includeMicrophone {
@@ -643,6 +667,11 @@ struct RecordView: View {
                             .font(.headline)
                         Text(source.detail)
                             .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    if coordinator.settings.includeCamera {
+                        Label(coordinator.selectedCameraName, systemImage: "video.fill")
+                            .font(.callout.weight(.medium))
                             .foregroundStyle(.secondary)
                     }
                     Text(coordinator.formattedDuration)

@@ -114,6 +114,7 @@ nonisolated struct RecordingStoragePolicy: Sendable {
         var bitsPerSecond = Int64(options.targetVideoBitRate)
         if options.includesSystemAudio { bitsPerSecond += 192_000 }
         if options.includesMicrophone { bitsPerSecond += 128_000 }
+        if options.includesCamera { bitsPerSecond += Int64(options.targetCameraBitRate) }
         return max(1, (bitsPerSecond + 7) / 8)
     }
 
@@ -200,6 +201,18 @@ nonisolated struct RecordingRecoveryJournal: Codable, Equatable, Sendable {
         }
         try data.write(to: journalURL, options: [.atomic])
         return journalURL
+    }
+
+    static func update(manifest: RecordingManifest, mediaURL: URL) throws {
+        let directory = mediaURL.deletingLastPathComponent()
+        guard var journal = try load(from: directory),
+              journal.mediaFileName == mediaURL.lastPathComponent
+        else { throw RecordingRecoveryError.invalidJournal }
+        journal.manifest = manifest
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(journal).write(to: url(in: directory), options: [.atomic])
     }
 
     static func load(from directory: URL) throws -> RecordingRecoveryJournal? {

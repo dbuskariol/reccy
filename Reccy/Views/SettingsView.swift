@@ -233,6 +233,33 @@ struct SettingsView: View {
                 )
             }
 
+            SettingsCard(title: "Camera") {
+                SettingsToggleRow(
+                    title: "Record camera",
+                    detail: "Keep camera video as a separate track for positioning and resizing in the editor.",
+                    systemImage: "video",
+                    isOn: $coordinator.settings.includeCamera
+                )
+                if coordinator.settings.includeCamera {
+                    SettingsDivider()
+                    SettingsValueRow(
+                        title: "Camera source",
+                        detail: "Choose a built-in, external, Desk View, or Continuity Camera.",
+                        systemImage: "web.camera"
+                    ) {
+                        Picker("Camera", selection: $coordinator.settings.selectedCameraID) {
+                            Text("System Default").tag(String?.none)
+                            ForEach(coordinator.cameraInputDevices) { device in
+                                Text(device.name).tag(Optional(device.id))
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 190)
+                    }
+                }
+            }
+
             SettingsCard(title: "Audio") {
                 SettingsToggleRow(
                     title: "Record system audio",
@@ -540,6 +567,15 @@ struct SettingsView: View {
                 ) {
                     microphonePermissionActions
                 }
+                SettingsDivider()
+                SettingsPermissionRow(
+                    title: "Camera",
+                    detail: "Only required when a separate camera video track is enabled.",
+                    systemImage: "video.fill",
+                    status: cameraPermissionPresentation
+                ) {
+                    cameraPermissionActions
+                }
             }
 
             if let outputFolderPath = coordinator.settings.outputFolderPath {
@@ -729,6 +765,15 @@ struct SettingsView: View {
         }
     }
 
+    private var cameraPermissionPresentation: PermissionPresentation {
+        switch coordinator.cameraPermission {
+        case .authorized: .ready
+        case .notDetermined: .notRequested
+        case .denied, .restricted: .notAllowed
+        @unknown default: .notAllowed
+        }
+    }
+
     private func recordingFolderPermissionDetail(for path: String) -> String {
         let name = URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
         return "macOS manages access to your chosen “\(name)” folder and may ask once if it’s protected."
@@ -758,6 +803,21 @@ struct SettingsView: View {
                 .buttonStyle(.borderedProminent)
         case .denied, .restricted:
             Button("System Settings") { coordinator.openMicrophonePrivacySettings() }
+        @unknown default:
+            Button("Check Again") { coordinator.refreshPermissionStatus() }
+        }
+    }
+
+    @ViewBuilder
+    private var cameraPermissionActions: some View {
+        switch coordinator.cameraPermission {
+        case .authorized:
+            EmptyView()
+        case .notDetermined:
+            Button("Allow…") { coordinator.requestCameraPermission() }
+                .buttonStyle(.borderedProminent)
+        case .denied, .restricted:
+            Button("System Settings") { coordinator.openCameraPrivacySettings() }
         @unknown default:
             Button("Check Again") { coordinator.refreshPermissionStatus() }
         }

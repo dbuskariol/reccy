@@ -87,11 +87,13 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var recordedDuration: TimeInterval = 0
     @Published private(set) var recordedFileSize: Int64 = 0
     @Published private(set) var audioInputDevices: [AudioInputDevice] = []
+    @Published private(set) var cameraInputDevices: [VideoInputDevice] = []
     @Published private(set) var lastRecordingURL: URL?
     @Published private(set) var lastScreenshotURL: URL?
     @Published private(set) var isCapturingScreenshot = false
     @Published private(set) var directCapturePermission: CapturePermissionStatus = .notGranted
     @Published private(set) var microphonePermission: AVAuthorizationStatus = .notDetermined
+    @Published private(set) var cameraPermission: AVAuthorizationStatus = .notDetermined
     @Published private(set) var isSelectingSource = false
     @Published private(set) var sourceSelectionMessage: String?
     @Published private(set) var selectedSource: CaptureSourceDescriptor?
@@ -103,6 +105,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     let library: RecordingLibrary
     let previewPipeline = CapturePreviewPipeline()
+    let cameraPreviewPipeline = CapturePreviewPipeline()
     let transcription: TranscriptionController
 
     private let logger = Logger(subsystem: "com.reccy.mac", category: "Capture")
@@ -142,6 +145,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         picker.maximumStreamCount = CaptureSourcePickerPolicy.maximumConcurrentStreams
         picker.isActive = false
         refreshAudioInputDevices()
+        refreshCameraInputDevices()
         refreshPermissionStatus()
         registerGlobalShortcuts()
         activationCancellable = NotificationCenter.default
@@ -150,6 +154,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 Task { @MainActor in
                     self?.refreshPermissionStatus()
                     self?.refreshAudioInputDevices()
+                    self?.refreshCameraInputDevices()
                 }
             }
     }
@@ -171,6 +176,19 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     var selectedMicrophoneName: String {
         guard let id = settings.selectedMicrophoneID else { return "System Default" }
         return audioInputDevices.first(where: { $0.id == id })?.name ?? "System Default"
+    }
+
+    var selectedCameraName: String {
+        if let id = settings.selectedCameraID,
+           let camera = cameraInputDevices.first(where: { $0.id == id })
+        {
+            return camera.name
+        }
+        return AVCaptureDevice.default(for: .video)?.localizedName ?? "System Default"
+    }
+
+    private var selectedCameraUniqueID: String {
+        settings.selectedCameraID ?? AVCaptureDevice.default(for: .video)?.uniqueID ?? ""
     }
 
     /// Applies the HDR/codec invariant as one user action. Views never mutate
@@ -328,6 +346,14 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
+    func requestCameraPermission() {
+        Task {
+            _ = await AVCaptureDevice.requestAccess(for: .video)
+            refreshPermissionStatus()
+            refreshCameraInputDevices()
+        }
+    }
+
     func openScreenCapturePrivacySettings() {
         guard let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
@@ -338,6 +364,13 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     func openMicrophonePrivacySettings() {
         guard let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func openCameraPrivacySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
         ) else { return }
         NSWorkspace.shared.open(url)
     }
@@ -363,6 +396,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             directCapturePermission = CGPreflightScreenCaptureAccess() ? .granted : .notGranted
         }
         microphonePermission = AVCaptureDevice.authorizationStatus(for: .audio)
+        cameraPermission = AVCaptureDevice.authorizationStatus(for: .video)
     }
 
     func startRecording() {
@@ -452,6 +486,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         if isSimulatingRecordingForQA {
             isSimulatingRecordingForQA = false
             previewPipeline.clear()
+            cameraPreviewPipeline.clear()
             clearSourceSelection()
             resetSessionTelemetry()
             state = .idle
@@ -538,6 +573,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         audioInputDevices = AudioInputDevice.discoverAvailable()
     }
 
+    func refreshCameraInputDevices() {
+        cameraInputDevices = VideoInputDevice.discoverAvailable()
+    }
+
     func chooseOutputFolder() {
         let panel = NSOpenPanel()
         panel.title = "Choose Recording Folder"
@@ -574,6 +613,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             handleFailure(CaptureError.microphonePermissionDenied)
             return
         }
+        guard await requestCameraPermissionIfNeeded() else {
+            guard isCurrentSession(generation) else { return }
+            recordingStartTask = nil
+            handleFailure(CaptureError.cameraPermissionDenied)
+            return
+        }
         guard isCurrentSession(generation), !Task.isCancelled else { return }
 
         do {
@@ -584,6 +629,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             systemAudioHistory.removeAll(keepingCapacity: true)
             microphoneAudioHistory.removeAll(keepingCapacity: true)
             previewPipeline.clear()
+            cameraPreviewPipeline.clear()
 
             let streamConfiguration = makeStreamConfiguration(for: filter)
             let options = MultitrackRecordingOptions(
@@ -593,7 +639,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 preset: settings.recordingPreset,
                 includesSystemAudio: settings.includeSystemAudio,
                 includesMicrophone: settings.includeMicrophone,
-                isHDR: settings.useHDR
+                isHDR: settings.useHDR,
+                includesCamera: settings.includeCamera,
+                cameraDeviceID: settings.selectedCameraID
             )
             let encodingPlan = options.encodingPlan
             let outputURL = try makeOutputURL(fileExtension: encodingPlan.fileExtension)
@@ -620,6 +668,14 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 includesSystemAudio: settings.includeSystemAudio,
                 includesMicrophone: settings.includeMicrophone,
                 microphoneName: settings.includeMicrophone ? selectedMicrophoneName : nil,
+                camera: settings.includeCamera
+                    ? RecordingCameraDescriptor(
+                        uniqueID: selectedCameraUniqueID,
+                        name: selectedCameraName,
+                        width: 1280,
+                        height: 720
+                    )
+                    : nil,
                 showsCursor: settings.showCursor,
                 highlightsClicks: settings.showMouseClicks && !settings.useHDR
             )
@@ -658,6 +714,31 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             }
             recorder.onVideoFrame = { [previewPipeline] sampleBuffer in
                 previewPipeline.enqueue(sampleBuffer)
+            }
+            recorder.onCameraFrame = { [cameraPreviewPipeline] sampleBuffer in
+                cameraPreviewPipeline.enqueue(sampleBuffer)
+            }
+            recorder.onCameraPrepared = { [weak self] format in
+                Task { @MainActor in
+                    guard let self,
+                          self.isCurrentSession(generation),
+                          self.settings.includeCamera
+                    else {
+                        return
+                    }
+                    let descriptor = RecordingCameraDescriptor(
+                        uniqueID: format.deviceID,
+                        name: format.deviceName,
+                        width: format.width,
+                        height: format.height
+                    )
+                    self.activeRecordingManifest?.camera = descriptor
+                    if let manifest = self.activeRecordingManifest,
+                       let mediaURL = self.activeOutputURL
+                    {
+                        try? RecordingRecoveryJournal.update(manifest: manifest, mediaURL: mediaURL)
+                    }
+                }
             }
             recorder.onAudioPacket = { role, packet in
                 Task { await liveRouter.ingest(packet, role: role) }
@@ -729,6 +810,20 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             return true
         case .notDetermined:
             return await AVCaptureDevice.requestAccess(for: .audio)
+        case .denied, .restricted:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
+    private func requestCameraPermissionIfNeeded() async -> Bool {
+        guard settings.includeCamera else { return true }
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await AVCaptureDevice.requestAccess(for: .video)
         case .denied, .restricted:
             return false
         @unknown default:
@@ -836,6 +931,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         meterTask = nil
         multitrackRecorder = nil
         previewPipeline.clear()
+        cameraPreviewPipeline.clear()
 
         let completedURL = activeOutputURL
         var indexingError: Error?
@@ -920,6 +1016,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         pendingCompletionNotice = nil
         recordingLease = nil
         previewPipeline.clear()
+        cameraPreviewPipeline.clear()
         clearSourceSelection()
         resetSessionTelemetry()
         state = .idle
@@ -1001,6 +1098,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         clearSourceSelection()
         resetSessionTelemetry()
         previewPipeline.clear()
+        cameraPreviewPipeline.clear()
         pendingCompletionNotice = nil
         state = .failed(error.localizedDescription)
     }
@@ -1326,6 +1424,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
 
 enum CaptureError: LocalizedError {
     case microphonePermissionDenied
+    case cameraPermissionDenied
     case sourcePickerFailed(String)
     case sourceUnavailable
 
@@ -1333,6 +1432,8 @@ enum CaptureError: LocalizedError {
         switch self {
         case .microphonePermissionDenied:
             "Microphone access is off. Enable it for Reccy in System Settings → Privacy & Security → Microphone."
+        case .cameraPermissionDenied:
+            "Camera access is off. Enable it for Reccy in System Settings → Privacy & Security → Camera."
         case let .sourcePickerFailed(message):
             "The macOS source picker failed: \(message)"
         case .sourceUnavailable:

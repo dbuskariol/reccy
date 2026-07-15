@@ -5,6 +5,7 @@ import CoreImage
 import CoreVideo
 import Foundation
 import IOSurface
+import Speech
 import Testing
 import VideoToolbox
 @testable import Reccy
@@ -63,11 +64,14 @@ struct ReccyTests {
         await router.cancel()
     }
 
-    @Test func appleSpeechAdvertisesTheCurrentLocaleWithoutCloudAuthorization() async {
+    @Test func appleSpeechAdvertisesAPlatformSupportedLocaleWhenAvailable() async {
+        guard SpeechTranscriber.isAvailable else { return }
+        let supportedLocales = await SpeechTranscriber.supportedLocales
+        guard let locale = supportedLocales.first else { return }
         let engine = AppleSpeechTranscriptionEngine()
-        let availability = await engine.availability(localeIdentifier: Locale.current.identifier)
+        let availability = await engine.availability(localeIdentifier: locale.identifier)
         if case .unavailable(let reason) = availability {
-            Issue.record("Apple Speech should support the current macOS locale: \(reason)")
+            Issue.record("Apple Speech rejected its own supported locale \(locale.identifier): \(reason)")
         }
     }
 
@@ -986,6 +990,58 @@ struct ReccyTests {
         #expect(RecordingPreset.available(isHDR: true) == [.efficient, .hevcMaster])
     }
 
+    @Test func captureSettingsDecodeExistingPreferencesWithoutCameraFields() throws {
+        var settings = CaptureSettings()
+        settings.includeMicrophone = true
+        settings.includeCamera = true
+        settings.selectedCameraID = "legacy-camera"
+        let encoded = try JSONEncoder().encode(settings)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        object.removeValue(forKey: "includeCamera")
+        object.removeValue(forKey: "selectedCameraID")
+
+        let decoded = try JSONDecoder().decode(
+            CaptureSettings.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(decoded.includeMicrophone)
+        #expect(!decoded.includeCamera)
+        #expect(decoded.selectedCameraID == nil)
+    }
+
+    @Test func cameraWriterSettingsUseTheNativeFormatAndRealTimeHardwareEncoding() throws {
+        let options = MultitrackRecordingOptions(
+            width: 2560,
+            height: 1440,
+            frameRate: 60,
+            preset: .efficient,
+            includesSystemAudio: true,
+            includesMicrophone: true,
+            isHDR: false,
+            includesCamera: true,
+            cameraDeviceID: "camera-id"
+        )
+        let format = WebcamCaptureFormat(
+            deviceID: "camera-id",
+            deviceName: "Studio Camera",
+            width: 1280,
+            height: 720
+        )
+        let settings = MultitrackRecorder.cameraVideoSettings(format: format, options: options)
+        let compression = try #require(
+            settings[AVVideoCompressionPropertiesKey] as? [String: Any]
+        )
+
+        #expect(settings[AVVideoWidthKey] as? Int == 1280)
+        #expect(settings[AVVideoHeightKey] as? Int == 720)
+        #expect(settings[AVVideoCodecKey] as? AVVideoCodecType == .hevc)
+        #expect(compression[AVVideoExpectedSourceFrameRateKey] as? Int == 30)
+        #expect(compression[kVTCompressionPropertyKey_RealTime as String] as? Bool == true)
+    }
+
     @Test func exportCompatibilityIsDeterminedFromTheActualAsset() async throws {
         let videoURL = try await makeColorTestVideo()
         defer { try? FileManager.default.removeItem(at: videoURL) }
@@ -1224,6 +1280,25 @@ struct ReccyTests {
             > RecordingStoragePolicy.runtimeReserveBytes)
     }
 
+    @Test func storagePreflightIncludesTheOptionalCameraTrackBitrate() {
+        let withoutCamera = MultitrackRecordingOptions(
+            width: 1920,
+            height: 1080,
+            frameRate: 30,
+            preset: .efficient,
+            includesSystemAudio: true,
+            includesMicrophone: true,
+            isHDR: false
+        )
+        var withCamera = withoutCamera
+        withCamera.includesCamera = true
+
+        #expect(
+            RecordingStoragePolicy.requiredPreflightBytes(for: withCamera)
+                > RecordingStoragePolicy.requiredPreflightBytes(for: withoutCamera)
+        )
+    }
+
     @Test func storagePreflightFailsBeforeTheRuntimeReserveIsAtRisk() {
         let options = MultitrackRecordingOptions(
             width: 2560,
@@ -1268,6 +1343,16 @@ struct ReccyTests {
         #expect(journalURL == RecordingRecoveryJournal.url(in: directory))
         #expect(restored.mediaFileName == mediaURL.lastPathComponent)
         #expect(restored.manifest == manifest)
+        var updatedManifest = manifest
+        updatedManifest.camera = RecordingCameraDescriptor(
+            uniqueID: "camera-id",
+            name: "Studio Camera",
+            width: 1280,
+            height: 720
+        )
+        try RecordingRecoveryJournal.update(manifest: updatedManifest, mediaURL: mediaURL)
+        let updated = try #require(try RecordingRecoveryJournal.load(from: directory))
+        #expect(updated.manifest.camera?.name == "Studio Camera")
         #expect(throws: RecordingRecoveryError.self) {
             _ = try RecordingRecoveryJournal.write(
                 mediaURL: directory.appendingPathComponent("New Recording.mp4"),
@@ -1467,14 +1552,31 @@ struct ReccyTests {
             includesSystemAudio: true,
             includesMicrophone: true,
             microphoneName: "Studio Mic",
+            camera: RecordingCameraDescriptor(
+                uniqueID: "camera-42",
+                name: "Studio Camera",
+                width: 1920,
+                height: 1080
+            ),
             showsCursor: true,
             highlightsClicks: false
         )
 
         let encoded = try JSONEncoder().encode(manifest)
         let decoded = try JSONDecoder().decode(RecordingManifest.self, from: encoded)
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "camera")
+        let legacyDecoded = try JSONDecoder().decode(
+            RecordingManifest.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject)
+        )
 
         #expect(decoded == manifest)
+        #expect(legacyDecoded.camera == nil)
+        #expect(decoded.camera?.uniqueID == "camera-42")
+        #expect(decoded.camera?.width == 1920)
         #expect(decoded.source.region?.cgRect == CGRect(x: 100, y: 80, width: 1280, height: 720))
         #expect(decoded.source.detail.contains("1280 × 720"))
     }
@@ -1697,6 +1799,109 @@ struct ReccyTests {
         #expect(project.videoGaps.map(\.fillMode) == [.holdPrevious, .holdNext])
     }
 
+    @Test func cameraLayoutPreservesAspectAndStaysInsideTheRenderCanvas() {
+        let layout = TimelineVideoLayout.defaultCamera(
+            canvasSize: CGSize(width: 1920, height: 1080),
+            sourceSize: CGSize(width: 1280, height: 720)
+        )
+        let clamped = TimelineVideoLayout(
+            x: 0.95,
+            y: -0.2,
+            width: 0.3,
+            height: 0.01
+        ).clamped()
+
+        #expect(abs(layout.width - layout.height) < 0.000_1)
+        #expect(abs(layout.x + layout.width - 0.97) < 0.000_1)
+        #expect(abs(layout.y + layout.height - 0.97) < 0.000_1)
+        #expect(clamped.x == 0.7)
+        #expect(clamped.y == 0)
+        #expect(clamped.width == 0.3)
+        #expect(clamped.height == 0.08)
+    }
+
+    @Test func cameraVideoTransformMapsNormalizedLayoutIntoTheScreenCanvas() {
+        let transform = TimelineCompositionBuilder.videoTransform(
+            naturalSize: CGSize(width: 1280, height: 720),
+            preferredTransform: .identity,
+            renderSize: CGSize(width: 1920, height: 1080),
+            layout: TimelineVideoLayout(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+        )
+        let output = CGRect(x: 0, y: 0, width: 1280, height: 720)
+            .applying(transform)
+            .standardized
+
+        #expect(abs(output.minX - 480) < 0.001)
+        #expect(abs(output.minY - 270) < 0.001)
+        #expect(abs(output.width - 960) < 0.001)
+        #expect(abs(output.height - 540) < 0.001)
+    }
+
+    @Test func compositionBuilderRendersCameraAsASeparateFrontVideoLayer() async throws {
+        let screenURL = try await makeColorTestVideo(
+            frameCount: 30,
+            solidColor: RGBAColor(red: 255, green: 0, blue: 0)
+        )
+        let cameraURL = try await makeColorTestVideo(
+            frameCount: 30,
+            solidColor: RGBAColor(red: 0, green: 255, blue: 0)
+        )
+        defer {
+            try? FileManager.default.removeItem(at: screenURL)
+            try? FileManager.default.removeItem(at: cameraURL)
+        }
+        let screenAsset = AVURLAsset(url: screenURL)
+        let cameraAsset = AVURLAsset(url: cameraURL)
+        let screenTrack = try #require(
+            try await screenAsset.loadTracks(withMediaType: .video).first
+        )
+        let cameraTrack = try #require(
+            try await cameraAsset.loadTracks(withMediaType: .video).first
+        )
+        let screen = TimelineClip(
+            sourceURL: screenURL,
+            sourceTrackID: screenTrack.trackID,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: 1,
+            name: "Screen"
+        )
+        let camera = TimelineClip(
+            sourceURL: cameraURL,
+            sourceTrackID: cameraTrack.trackID,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: 1,
+            name: "Camera",
+            videoLayout: TimelineVideoLayout(x: 0, y: 0, width: 1, height: 1)
+        )
+        let project = TimelineProject(
+            name: "Camera Overlay",
+            lanes: [
+                TimelineLane(kind: .video, name: "Screen", clips: [screen]),
+                TimelineLane(kind: .camera, name: "Camera", clips: [camera]),
+            ]
+        )
+
+        let build = try await TimelineCompositionBuilder.build(project)
+        let videoTracks = build.composition.tracks(withMediaType: .video)
+        let overlay = try await renderedColor(
+            at: 0.5,
+            composition: build.composition,
+            videoComposition: build.videoComposition
+        )
+        let instruction = try #require(
+            build.videoComposition?.instructions.first as? AVVideoCompositionInstruction
+        )
+        let topLayer = try #require(instruction.layerInstructions.first)
+
+        #expect(videoTracks.count == 2)
+        #expect(topLayer.trackID == videoTracks[1].trackID)
+        #expect(overlay.green > 180)
+        #expect(Int(overlay.green) > Int(overlay.red) + 100)
+        #expect(Int(overlay.green) > Int(overlay.blue) + 100)
+    }
+
     @Test func compositionBuilderRendersEveryGapModeFromOneCanonicalSourceAsset() async throws {
         let sourceURL = try await makeColorTestVideo()
         defer { try? FileManager.default.removeItem(at: sourceURL) }
@@ -1805,7 +2010,10 @@ struct ReccyTests {
         )
     }
 
-    private func makeColorTestVideo(frameCount: Int = 90) async throws -> URL {
+    private func makeColorTestVideo(
+        frameCount: Int = 90,
+        solidColor: RGBAColor? = nil
+    ) async throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Gap Test \(UUID().uuidString)")
             .appendingPathExtension("mov")
@@ -1837,7 +2045,9 @@ struct ReccyTests {
                 try await Task.sleep(for: .milliseconds(1))
             }
             let color: RGBAColor
-            if frame < 30 {
+            if let solidColor {
+                color = solidColor
+            } else if frame < 30 {
                 color = RGBAColor(red: 255, green: 0, blue: 0)
             } else if frame < 60 {
                 color = RGBAColor(red: 0, green: 255, blue: 0)
@@ -2044,7 +2254,8 @@ struct ReccyTests {
     private func renderedColor(
         at seconds: TimeInterval,
         composition: AVComposition,
-        videoComposition: AVVideoComposition?
+        videoComposition: AVVideoComposition?,
+        normalizedPoint: CGPoint = CGPoint(x: 0.5, y: 0.5)
     ) async throws -> RGBAColor {
         let generator = AVAssetImageGenerator(asset: composition)
         generator.videoComposition = videoComposition
@@ -2063,11 +2274,13 @@ struct ReccyTests {
         }
         let context = CIContext(options: [.cacheIntermediates: false])
         var pixel = [UInt8](repeating: 0, count: 4)
+        let x = min(max(normalizedPoint.x, 0), 1) * CGFloat(max(image.width - 1, 0))
+        let y = min(max(normalizedPoint.y, 0), 1) * CGFloat(max(image.height - 1, 0))
         context.render(
             CIImage(cgImage: image),
             toBitmap: &pixel,
             rowBytes: 4,
-            bounds: CGRect(x: 32, y: 32, width: 1, height: 1),
+            bounds: CGRect(x: x.rounded(.down), y: y.rounded(.down), width: 1, height: 1),
             format: .RGBA8,
             colorSpace: CGColorSpaceCreateDeviceRGB()
         )

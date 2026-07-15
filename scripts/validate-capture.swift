@@ -16,6 +16,7 @@ private struct CaptureValidationReport: Encodable {
     let dynamicRange: String
     let videoTrackCount: Int
     let audioTrackCount: Int
+    let camera: String?
     let maximumTrackEndDriftSeconds: Double
 }
 
@@ -107,6 +108,8 @@ private func validateCapture(at mediaURL: URL) async throws -> CaptureValidation
     let expectsHDR: Bool = try manifestValue("isHDR", in: manifest)
     let includesSystemAudio: Bool = try manifestValue("includesSystemAudio", in: manifest)
     let includesMicrophone: Bool = try manifestValue("includesMicrophone", in: manifest)
+    let camera = manifest["camera"] as? [String: Any]
+    let expectedVideoTracks = camera == nil ? 1 : 2
     let expectedAudioTracks = (includesSystemAudio ? 1 : 0) + (includesMicrophone ? 1 : 0)
 
     try require(manifestVersion == 2, "Unsupported capture manifest version \(manifestVersion).")
@@ -129,7 +132,10 @@ private func validateCapture(at mediaURL: URL) async throws -> CaptureValidation
     let audioTracks = try await loadedAudioTracks
     try require(isPlayable, "Capture is not playable according to AVFoundation.")
     try require(duration > 0.05, "Capture duration is too short to contain usable media.")
-    try require(videoTracks.count == 1, "Expected one video track; found \(videoTracks.count).")
+    try require(
+        videoTracks.count == expectedVideoTracks,
+        "Expected \(expectedVideoTracks) independent video track(s); found \(videoTracks.count)."
+    )
     try require(
         audioTracks.count == expectedAudioTracks,
         "Expected \(expectedAudioTracks) independent audio track(s); found \(audioTracks.count)."
@@ -176,6 +182,37 @@ private func validateCapture(at mediaURL: URL) async throws -> CaptureValidation
     }
 
     var trackEndTimes = [try finiteSeconds(CMTimeRangeGetEnd(videoRange), label: "Video track")]
+    var cameraName: String?
+    if let camera {
+        let expectedCameraName: String = try manifestValue("name", in: camera)
+        let expectedCameraWidth: Int = try manifestValue("width", in: camera)
+        let expectedCameraHeight: Int = try manifestValue("height", in: camera)
+        try require(
+            expectedCameraWidth > 0 && expectedCameraHeight > 0,
+            "Manifest camera dimensions are invalid."
+        )
+        let cameraTrack = videoTracks[1]
+        async let loadedCameraSize = cameraTrack.load(.naturalSize)
+        async let loadedCameraTransform = cameraTrack.load(.preferredTransform)
+        async let loadedCameraRange = cameraTrack.load(.timeRange)
+        let cameraSize = try await displaySize(
+            naturalSize: loadedCameraSize,
+            preferredTransform: loadedCameraTransform
+        )
+        try require(
+            abs(cameraSize.width - Double(expectedCameraWidth)) <= 1,
+            "Camera width does not match the manifest."
+        )
+        try require(
+            abs(cameraSize.height - Double(expectedCameraHeight)) <= 1,
+            "Camera height does not match the manifest."
+        )
+        let cameraRange = try await loadedCameraRange
+        trackEndTimes.append(
+            try finiteSeconds(CMTimeRangeGetEnd(cameraRange), label: "Camera track")
+        )
+        cameraName = expectedCameraName
+    }
     for (index, track) in audioTracks.enumerated() {
         let range = try await track.load(.timeRange)
         trackEndTimes.append(
@@ -207,16 +244,17 @@ private func validateCapture(at mediaURL: URL) async throws -> CaptureValidation
         dynamicRange: expectsHDR ? "HDR10" : "SDR",
         videoTrackCount: videoTracks.count,
         audioTrackCount: audioTracks.count,
+        camera: cameraName,
         maximumTrackEndDriftSeconds: drift
     )
 }
 
-private func makeSelfTestPixelBuffer() throws -> CVPixelBuffer {
+private func makeSelfTestPixelBuffer(width: Int = 64, height: Int = 64) throws -> CVPixelBuffer {
     var pixelBuffer: CVPixelBuffer?
     let status = CVPixelBufferCreate(
         kCFAllocatorDefault,
-        64,
-        64,
+        width,
+        height,
         kCVPixelFormatType_32BGRA,
         [
             kCVPixelBufferCGImageCompatibilityKey: true,
@@ -261,23 +299,46 @@ private func makeSelfTestCapture() async throws -> (media: URL, manifest: URL) {
             kCVPixelBufferHeightKey as String: 64,
         ]
     )
+    let cameraInput = AVAssetWriterInput(
+        mediaType: .video,
+        outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 32,
+            AVVideoHeightKey: 32,
+        ]
+    )
+    let cameraAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+        assetWriterInput: cameraInput,
+        sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: 32,
+            kCVPixelBufferHeightKey as String: 32,
+        ]
+    )
     guard writer.canAdd(input) else { throw SelfTestFailure.cannotAddVideoInput }
     writer.add(input)
+    guard writer.canAdd(cameraInput) else { throw SelfTestFailure.cannotAddVideoInput }
+    writer.add(cameraInput)
     guard writer.startWriting() else { throw writer.error ?? SelfTestFailure.writerFailed }
     writer.startSession(atSourceTime: .zero)
 
     for frame in 0..<15 {
-        while !input.isReadyForMoreMediaData {
+        while !input.isReadyForMoreMediaData || !cameraInput.isReadyForMoreMediaData {
             try await Task.sleep(for: .milliseconds(1))
         }
+        let presentationTime = CMTime(value: Int64(frame), timescale: 30)
         guard adaptor.append(
             try makeSelfTestPixelBuffer(),
-            withPresentationTime: CMTime(value: Int64(frame), timescale: 30)
+            withPresentationTime: presentationTime
+        ), cameraAdaptor.append(
+            try makeSelfTestPixelBuffer(width: 32, height: 32),
+            withPresentationTime: presentationTime
         ) else {
             throw writer.error ?? SelfTestFailure.writerFailed
         }
     }
     input.markAsFinished()
+    cameraInput.markAsFinished()
     await withCheckedContinuation { continuation in
         writer.finishWriting { continuation.resume() }
     }
@@ -294,6 +355,12 @@ private func makeSelfTestCapture() async throws -> (media: URL, manifest: URL) {
         "isHDR": false,
         "includesSystemAudio": false,
         "includesMicrophone": false,
+        "camera": [
+            "uniqueID": "self-test-camera",
+            "name": "Self-Test Camera",
+            "width": 32,
+            "height": 32,
+        ],
     ]
     try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         .write(to: manifestURL, options: .atomic)
