@@ -139,4 +139,4 @@ Capture, editing, projects, thumbnails, transcription inference, transcript text
 
 ## Status
 
-Reccy is in active development at version 0.1.0. The core capture, monitoring, transcription, library, editing, export, settings, menu-bar, update, storage-reserve, accessibility-navigation, and interrupted-recovery architectures are implemented. External release acceptance still requires the signed hardware capture matrix, long-duration A/V drift tests, HDR validation, a complete spoken VoiceOver acceptance pass, and Intel plus Apple-silicon export coverage.
+Reccy is in active development at version 0.2.0. The core capture, monitoring, transcription, library, editing, export, settings, menu-bar, update, storage-reserve, accessibility-navigation, and interrupted-recovery architectures are implemented. External release acceptance still requires the signed hardware capture matrix, long-duration A/V drift tests, HDR validation, a complete spoken VoiceOver acceptance pass, and Intel plus Apple-silicon export coverage.
