@@ -64,6 +64,40 @@ struct ReccyTests {
         await router.cancel()
     }
 
+    @Test func transcriptionBatchKeepsSpokenTrackWhenAnotherSourceHasNoSpeech() async throws {
+        let engine = SelectiveTranscriptionEngine(failingRoles: [.systemAudio])
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Independent Transcription.mp4")
+        let requests = [
+            TranscriptionTrackRequest(
+                mediaURL: mediaURL,
+                sourceTrackID: 1,
+                role: .systemAudio,
+                name: "System Audio",
+                localeIdentifier: "en-AU"
+            ),
+            TranscriptionTrackRequest(
+                mediaURL: mediaURL,
+                sourceTrackID: 2,
+                role: .microphone,
+                name: "Microphone",
+                localeIdentifier: "en-AU"
+            ),
+        ]
+
+        let result = try await TranscriptionBatchProcessor.transcribe(
+            requests,
+            with: engine
+        ) { _ in }
+
+        #expect(result.tracks.map(\.role) == [.microphone])
+        #expect(result.failures == [TranscriptionTrackFailure(
+            role: .systemAudio,
+            name: "System Audio",
+            message: TranscriptionEngineError.noSpeechRecognized.localizedDescription
+        )])
+        #expect(await engine.attemptedRoles == [.systemAudio, .microphone])
+    }
+
     @Test func appleSpeechAdvertisesAPlatformSupportedLocaleWhenAvailable() async {
         guard SpeechTranscriber.isAvailable else { return }
         let supportedLocales = await SpeechTranscriber.supportedLocales
@@ -137,6 +171,23 @@ struct ReccyTests {
         #expect(restored.whisperModelIdentifier == WhisperModelManager.compactModel)
         #expect(restored.showLiveTranscript == false)
         #expect(restored.isEnabledForCapture == false)
+    }
+
+    @Test @MainActor func newTranscriptionPreferencesUseWhisperKitsFastestModel() {
+        let suiteName = "ReccyTests.TranscriptionDefault.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let modelDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Default Model Test \(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: modelDirectory) }
+
+        let controller = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory)
+        )
+
+        #expect(WhisperModelManager.defaultModel.contains("tiny"))
+        #expect(controller.whisperModelIdentifier == WhisperModelManager.defaultModel)
     }
 
     @Test @MainActor func captureTranscriptionConfigurationIsAnImmutableSessionSnapshot() {
@@ -1902,6 +1953,78 @@ struct ReccyTests {
         #expect(Int(overlay.green) > Int(overlay.blue) + 100)
     }
 
+    @Test @MainActor func recordingPreviewProjectUsesTheEditorsCanonicalCameraOverlay() async throws {
+        let mediaURL = try await makeCameraRecordingFixture()
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+        }
+        var manifest = makeRecoveryManifest()
+        manifest.width = 64
+        manifest.height = 64
+        manifest.includesSystemAudio = false
+        manifest.camera = RecordingCameraDescriptor(
+            uniqueID: "camera-test",
+            name: "Studio Camera",
+            width: 64,
+            height: 64
+        )
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 1,
+            duration: 1,
+            manifest: manifest,
+            pixelWidth: 64,
+            pixelHeight: 64,
+            frameRate: 30
+        )
+
+        let project = try await RecordingTimelineProjectLoader.initialProject(for: item)
+        let cameraLane = try #require(project.lanes.first(where: { $0.kind == .camera }))
+        let cameraClip = try #require(cameraLane.clips.first)
+        let expectedLayout = TimelineVideoLayout.defaultCamera(
+            canvasSize: CGSize(width: 64, height: 64),
+            sourceSize: CGSize(width: 64, height: 64)
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        let previewColor = try await renderedColor(
+            at: 0.5,
+            composition: build.composition,
+            videoComposition: build.videoComposition,
+            normalizedPoint: CGPoint(
+                x: expectedLayout.x + expectedLayout.width / 2,
+                // Timeline layouts use AVFoundation's top-origin video space;
+                // Core Image bitmap sampling uses a bottom-origin coordinate.
+                y: 1 - (expectedLayout.y + expectedLayout.height / 2)
+            )
+        )
+
+        #expect(project.lanes.filter { $0.kind.isVideo }.map(\.kind) == [.video, .camera])
+        #expect(cameraClip.videoLayout == expectedLayout)
+        #expect(build.composition.tracks(withMediaType: .video).count == 2)
+        #expect(Int(previewColor.green) > Int(previewColor.red) + 100)
+
+        let editedLayout = TimelineVideoLayout(x: 0.05, y: 0.05, width: 0.35, height: 0.35)
+        var editedProject = project
+        let cameraLaneIndex = try #require(
+            editedProject.lanes.firstIndex(where: { $0.kind == .camera })
+        )
+        editedProject.lanes[cameraLaneIndex].clips[0].videoLayout = editedLayout
+        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(editedProject).write(
+            to: packageURL.appendingPathComponent("project.json"),
+            options: .atomic
+        )
+
+        let reloadedProject = try await RecordingTimelineProjectLoader.load(for: item)
+        #expect(reloadedProject.project.lanes[cameraLaneIndex].clips[0].videoLayout == editedLayout)
+        #expect(!reloadedProject.needsInitialSave)
+    }
+
     @Test func compositionBuilderRendersEveryGapModeFromOneCanonicalSourceAsset() async throws {
         let sourceURL = try await makeColorTestVideo()
         defer { try? FileManager.default.removeItem(at: sourceURL) }
@@ -2111,6 +2234,43 @@ struct ReccyTests {
             try? FileManager.default.removeItem(at: destination)
             throw error
         }
+    }
+
+    private func makeCameraRecordingFixture() async throws -> URL {
+        let screenURL = try await makeColorTestVideo(
+            frameCount: 30,
+            solidColor: RGBAColor(red: 255, green: 0, blue: 0)
+        )
+        let cameraURL = try await makeColorTestVideo(
+            frameCount: 30,
+            solidColor: RGBAColor(red: 0, green: 255, blue: 0)
+        )
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Camera Recording \(UUID().uuidString)")
+            .appendingPathExtension("mov")
+        defer {
+            try? FileManager.default.removeItem(at: screenURL)
+            try? FileManager.default.removeItem(at: cameraURL)
+        }
+
+        let composition = AVMutableComposition()
+        for sourceURL in [screenURL, cameraURL] {
+            let asset = AVURLAsset(url: sourceURL)
+            let sourceTrack = try #require(try await asset.loadTracks(withMediaType: .video).first)
+            let sourceRange = try await sourceTrack.load(.timeRange)
+            let destinationTrack = try #require(composition.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ))
+            try destinationTrack.insertTimeRange(sourceRange, of: sourceTrack, at: .zero)
+        }
+
+        let exporter = try #require(AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetPassthrough
+        ))
+        try await exporter.export(to: destination, as: .mov)
+        return destination
     }
 
     private func makeWaveformTestAudio(
@@ -2327,6 +2487,58 @@ private actor CountingLiveTranscriptionSession: LiveTranscriptionSession {
     }
 
     func cancel() {}
+}
+
+private actor SelectiveTranscriptionEngine: TranscriptionEngine {
+    nonisolated let provider = TranscriptionProvider.appleSpeech
+    private let failingRoles: Set<TranscriptTrackRole>
+    private(set) var attemptedRoles: [TranscriptTrackRole] = []
+
+    init(failingRoles: Set<TranscriptTrackRole>) {
+        self.failingRoles = failingRoles
+    }
+
+    func availability(localeIdentifier: String) -> TranscriptionEngineAvailability { .ready }
+
+    func prepare(
+        localeIdentifier: String,
+        progress: @escaping @Sendable (TranscriptionProgressUpdate) -> Void
+    ) {}
+
+    func transcribe(
+        _ request: TranscriptionTrackRequest,
+        progress: @escaping @Sendable (TranscriptionProgressUpdate) -> Void
+    ) throws -> TranscriptTrack {
+        attemptedRoles.append(request.role)
+        if failingRoles.contains(request.role) {
+            throw TranscriptionEngineError.noSpeechRecognized
+        }
+        return TranscriptTrack(
+            sourceTrackID: request.sourceTrackID,
+            role: request.role,
+            name: request.name,
+            provider: provider,
+            localeIdentifier: request.localeIdentifier,
+            modelIdentifier: "test",
+            segments: [
+                TranscriptSegment(
+                    text: "This source contains speech.",
+                    sourceStart: 0,
+                    duration: 1,
+                    words: []
+                ),
+            ]
+        )
+    }
+
+    func makeLiveSession(
+        role: TranscriptTrackRole,
+        name: String,
+        localeIdentifier: String,
+        update: @escaping @Sendable (LiveTranscriptUpdate) -> Void
+    ) throws -> any LiveTranscriptionSession {
+        throw TranscriptionEngineError.providerUnavailable("Not used by this test.")
+    }
 }
 
 private enum TestMediaError: Error {

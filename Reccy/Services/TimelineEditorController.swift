@@ -162,136 +162,9 @@ final class TimelineEditorController: ObservableObject {
         for item: RecordingItem,
         packageURL: URL
     ) async throws -> LoadedTimelineProject {
-        let savedProjectURL = packageURL.appendingPathComponent("project.json")
-        if FileManager.default.fileExists(atPath: savedProjectURL.path) {
-            let data = try Data(contentsOf: savedProjectURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            let header = try decoder.decode(TimelineProjectHeader.self, from: data)
-            guard header.formatVersion == TimelineProject.currentFormatVersion else {
-                throw TimelineEditorError.projectFormatUnsupported
-            }
-            let savedProject = try decoder.decode(TimelineProject.self, from: data)
-            var durations: [URL: TimeInterval] = [:]
-            for url in Set(savedProject.lanes.flatMap(\.clips).map(\.sourceURL)) {
-                let sourceAsset = AVURLAsset(url: url)
-                durations[url] = try await sourceAsset.load(.duration).seconds
-            }
-            return LoadedTimelineProject(
-                project: savedProject,
-                sourceDurations: durations,
-                needsInitialSave: false
-            )
-        }
-
-        let asset = AVURLAsset(url: item.url)
-        let duration = try await asset.load(.duration).seconds
-        let videoTracks = try await asset.loadTracks(withMediaType: .video)
-        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-        guard !videoTracks.isEmpty || !audioTracks.isEmpty else {
-            throw TimelineEditorError.noMedia
-        }
-
-        let linkedGroupID = UUID()
-        var lanes: [TimelineLane] = []
-        if let videoTrack = videoTracks.first {
-            lanes.append(
-                TimelineLane(
-                    kind: .video,
-                    name: "Screen",
-                    clips: [
-                        TimelineClip(
-                            sourceURL: item.url,
-                            sourceTrackID: videoTrack.trackID,
-                            sourceStart: 0,
-                            timelineStart: 0,
-                            duration: duration,
-                            name: item.name,
-                            linkedGroupID: linkedGroupID
-                        ),
-                    ]
-                )
-            )
-        }
-
-        if let camera = item.manifest.camera,
-           videoTracks.indices.contains(1)
-        {
-            let cameraTrack = videoTracks[1]
-            let cameraTimeRange = try await cameraTrack.load(.timeRange)
-            let sourceStart = max(0, cameraTimeRange.start.seconds)
-            let cameraDuration = min(duration, max(0, cameraTimeRange.duration.seconds))
-            if cameraDuration > 0 {
-                let layout = TimelineVideoLayout.defaultCamera(
-                    canvasSize: CGSize(
-                        width: CGFloat(item.manifest.width),
-                        height: CGFloat(item.manifest.height)
-                    ),
-                    sourceSize: CGSize(
-                        width: CGFloat(camera.width),
-                        height: CGFloat(camera.height)
-                    )
-                )
-                lanes.append(
-                    TimelineLane(
-                        kind: .camera,
-                        name: camera.name,
-                        clips: [
-                            TimelineClip(
-                                sourceURL: item.url,
-                                sourceTrackID: cameraTrack.trackID,
-                                sourceStart: sourceStart,
-                                timelineStart: sourceStart,
-                                duration: cameraDuration,
-                                name: camera.name,
-                                linkedGroupID: linkedGroupID,
-                                videoLayout: layout
-                            ),
-                        ]
-                    )
-                )
-            }
-        }
-
-        var audioLaneDescriptions: [(kind: TimelineLaneKind, name: String)] = []
-        if item.manifest.includesSystemAudio {
-            audioLaneDescriptions.append((.systemAudio, "System Audio"))
-        }
-        if item.manifest.includesMicrophone {
-            audioLaneDescriptions.append((
-                .microphone,
-                item.manifest.microphoneName ?? "Microphone"
-            ))
-        }
-
-        for (track, description) in zip(audioTracks, audioLaneDescriptions) {
-            lanes.append(
-                TimelineLane(
-                    kind: description.kind,
-                    name: description.name,
-                    clips: [
-                        TimelineClip(
-                            sourceURL: item.url,
-                            sourceTrackID: track.trackID,
-                            sourceStart: 0,
-                            timelineStart: 0,
-                            duration: duration,
-                            name: description.name,
-                            linkedGroupID: linkedGroupID
-                        ),
-                    ]
-                )
-            )
-        }
-
-        return LoadedTimelineProject(
-            project: TimelineProject(
-                name: item.name,
-                frameRate: Double(item.manifest.frameRate),
-                lanes: lanes
-            ),
-            sourceDurations: [item.url: duration],
-            needsInitialSave: true
+        try await RecordingTimelineProjectLoader.load(
+            for: item,
+            packageURL: packageURL
         )
     }
 
@@ -854,16 +727,6 @@ final class TimelineEditorController: ObservableObject {
             })?
             .id
     }
-}
-
-private struct TimelineProjectHeader: Decodable {
-    let formatVersion: Int
-}
-
-private struct LoadedTimelineProject {
-    let project: TimelineProject
-    let sourceDurations: [URL: TimeInterval]
-    let needsInitialSave: Bool
 }
 
 private struct EditorProjectSnapshot {

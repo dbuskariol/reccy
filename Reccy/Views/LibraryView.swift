@@ -1,9 +1,11 @@
 import AppKit
 import AVKit
 import Combine
+import OSLog
 import SwiftUI
 
 struct LibraryView: View {
+    private let logger = Logger(subsystem: "com.reccy.mac", category: "LibraryPreview")
     @EnvironmentObject private var transcription: TranscriptionController
     @ObservedObject var library: RecordingLibrary
     let onEdit: (RecordingItem) -> Void
@@ -13,6 +15,8 @@ struct LibraryView: View {
     @State private var pendingDelete: RecordingItem?
     @State private var player = AVPlayer()
     @State private var isPreviewPlaying = false
+    @State private var isPreviewLoading = false
+    @State private var previewLoadTask: Task<Void, Never>?
     @State private var playbackTime: TimeInterval = 0
     @State private var searchText = ""
 
@@ -116,8 +120,11 @@ struct LibraryView: View {
             }
         }
         .onDisappear {
+            previewLoadTask?.cancel()
+            previewLoadTask = nil
             player.pause()
             isPreviewPlaying = false
+            isPreviewLoading = false
         }
     }
 
@@ -371,6 +378,9 @@ struct LibraryView: View {
 
             HStack(spacing: 7) {
                 compactBadge(item.sourceKindTitle, systemImage: item.manifest.source.kind.systemImage)
+                if let camera = item.cameraSummary {
+                    compactBadge(camera, systemImage: "video.fill")
+                }
                 compactBadge(item.audioDetail, systemImage: "waveform")
                 compactBadge(item.manifest.isHDR ? "HDR10" : "SDR", systemImage: "circle.lefthalf.filled")
             }
@@ -378,7 +388,16 @@ struct LibraryView: View {
     }
 
     private func compactPreview(_ item: RecordingItem) -> some View {
-        NativeLibraryVideoPlayer(player: player)
+        ZStack {
+            NativeLibraryVideoPlayer(player: player)
+
+            if isPreviewLoading {
+                ProgressView(item.manifest.camera == nil ? "Preparing preview…" : "Preparing camera preview…")
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+            }
+        }
             .frame(maxWidth: 560)
             .aspectRatio(16 / 9, contentMode: .fit)
             .background(.black)
@@ -398,7 +417,7 @@ struct LibraryView: View {
                 HStack {
                     SectionHeading(
                         "Transcript",
-                        subtitle: "On-device, source-aligned, and searchable."
+                        subtitle: transcriptSubtitle(for: item)
                     )
                     Spacer()
                     transcriptActions(item)
@@ -509,6 +528,15 @@ struct LibraryView: View {
                 }
             }
             if let fraction { ProgressView(value: fraction) } else { ProgressView() }
+        }
+    }
+
+    private func transcriptSubtitle(for item: RecordingItem) -> String {
+        switch transcription.jobState(for: item.url) {
+        case .queued, .working:
+            "Recording saved. On-device transcription continues here in the background."
+        case .idle, .ready, .failed:
+            "On-device, source-aligned, and searchable."
         }
     }
 
@@ -707,10 +735,42 @@ struct LibraryView: View {
     private func load(_ item: RecordingItem, autoplay: Bool) {
         selectedID = item.id
         isPreviewPlaying = false
+        isPreviewLoading = true
         playbackTime = 0
-        player.replaceCurrentItem(with: AVPlayerItem(url: item.url))
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        previewLoadTask?.cancel()
+        previewLoadTask = Task { @MainActor in
+            do {
+                let loadedProject = try await RecordingTimelineProjectLoader.load(for: item)
+                let build = try await TimelineCompositionBuilder.build(loadedProject.project)
+                try Task.checkCancellation()
+                guard selectedID == item.id else { return }
+
+                let snapshot = (build.composition.copy() as? AVComposition) ?? build.composition
+                let playerItem = AVPlayerItem(asset: snapshot)
+                playerItem.videoComposition = build.videoComposition
+                playerItem.audioMix = build.audioMix
+                playerItem.seekingWaitsForVideoCompositionRendering = true
+                player.replaceCurrentItem(with: playerItem)
+                isPreviewLoading = false
+                logger.info(
+                    "Prepared composed preview videoTracks=\(build.composition.tracks(withMediaType: .video).count) file=\(item.url.lastPathComponent, privacy: .public)"
+                )
+                if autoplay { player.play() }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard selectedID == item.id else { return }
+                logger.error(
+                    "Falling back to source preview file=\(item.url.lastPathComponent, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+                )
+                player.replaceCurrentItem(with: AVPlayerItem(url: item.url))
+                isPreviewLoading = false
+                if autoplay { player.play() }
+            }
+        }
         transcription.loadDocument(for: item.url)
-        if autoplay { player.play() }
     }
 
     private func loadTranscriptDocuments() {
@@ -722,11 +782,15 @@ struct LibraryView: View {
     @ViewBuilder
     private func transcriptStatusBadge(_ item: RecordingItem) -> some View {
         switch transcription.jobState(for: item.url) {
-        case .queued, .working:
-            Image(systemName: "captions.bubble.fill")
-                .font(.caption2)
+        case .queued:
+            compactBadge("Transcript queued", systemImage: "clock.badge")
                 .foregroundStyle(.tint)
-                .accessibilityLabel("Transcribing")
+        case .working(let update):
+            compactBadge(
+                update.phase == .preparing ? "Loading model" : "Transcribing",
+                systemImage: "captions.bubble.fill"
+            )
+            .foregroundStyle(.tint)
         case .ready:
             Image(systemName: "captions.bubble.fill")
                 .font(.caption2)

@@ -6,6 +6,7 @@ import os
 
 actor WhisperKitTranscriptionEngine: TranscriptionEngine {
     nonisolated let provider = TranscriptionProvider.whisperKit
+    private let logger = Logger(subsystem: "com.reccy.mac", category: "WhisperKit")
     private let modelManager: WhisperModelManager
     private let modelIdentifier: String
     private var whisperKit: WhisperKit?
@@ -48,6 +49,8 @@ actor WhisperKitTranscriptionEngine: TranscriptionEngine {
             return
         }
         isPreparing = true
+        let preparationStart = ContinuousClock.now
+        logger.info("Loading model \(self.modelIdentifier, privacy: .public)")
         progress(.init(phase: .preparing, fractionCompleted: nil, detail: "Loading \(Self.displayName(modelIdentifier))"))
         do {
             try await modelManager.load()
@@ -60,16 +63,26 @@ actor WhisperKitTranscriptionEngine: TranscriptionEngine {
                 modelFolder: folder.path,
                 verbose: false,
                 logLevel: .none,
-                prewarm: true,
+                // WhisperKit's prewarm pass intentionally doubles cold-start
+                // time. Loading directly keeps the model reusable while making
+                // first-run live and post-recording transcription responsive.
+                prewarm: false,
                 load: true,
                 download: false,
                 useBackgroundDownloadSession: true
             )
             whisperKit = try await WhisperKit(config)
             completePreparation()
+            let elapsed = preparationStart.duration(to: .now)
+            logger.info(
+                "Loaded model \(self.modelIdentifier, privacy: .public) in \(String(describing: elapsed), privacy: .public)"
+            )
             progress(.init(phase: .preparing, fractionCompleted: 1, detail: "WhisperKit is ready"))
         } catch {
             completePreparation(throwing: error)
+            logger.error(
+                "Model load failed model=\(self.modelIdentifier, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+            )
             throw error
         }
 #else
