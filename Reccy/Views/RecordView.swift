@@ -31,7 +31,9 @@ struct RecordView: View {
                             permissionWarning
                         }
                         sourceCard
+                        cameraCard
                         optionsCard
+                        transcriptionCard
                         outputCard
                         nativeMediaCard
                     }
@@ -209,27 +211,7 @@ struct RecordView: View {
             VStack(alignment: .leading, spacing: 17) {
                 SectionHeading("Capture options")
                 LazyVGrid(columns: threeColumnLayout, alignment: .leading, spacing: 18) {
-                    optionColumn(title: "Camera & audio", systemImage: "video") {
-                        optionToggleRow("Camera", isOn: $coordinator.settings.includeCamera)
-                        if coordinator.settings.includeCamera {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("Camera source")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Picker("Camera", selection: $coordinator.settings.selectedCameraID) {
-                                    Text("System Default").tag(String?.none)
-                                    ForEach(coordinator.cameraInputDevices) { device in
-                                        Text(device.name).tag(Optional(device.id))
-                                    }
-                                }
-                                .labelsHidden()
-                                .pickerStyle(.menu)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            Label("Separate editable video track", systemImage: "rectangle.on.rectangle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                    optionColumn(title: "Audio", systemImage: "waveform") {
                         optionToggleRow("System audio", isOn: $coordinator.settings.includeSystemAudio)
                         optionToggleRow("Microphone", isOn: $coordinator.settings.includeMicrophone)
                         if coordinator.settings.includeSystemAudio && coordinator.settings.includeMicrophone {
@@ -284,26 +266,73 @@ struct RecordView: View {
                     }
 
                 }
+            }
+        }
+    }
 
-                Divider()
+    private var cameraCard: some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 17) {
+                HStack(alignment: .top, spacing: 16) {
+                    Image(systemName: "video.fill")
+                        .font(.title2)
+                        .foregroundStyle(.tint)
+                        .frame(width: 32, height: 32)
+                        .accessibilityHidden(true)
+                    SectionHeading(
+                        "Camera overlay",
+                        subtitle: "Record your camera as a separate video track you can move and resize in the editor."
+                    )
+                    Spacer(minLength: 20)
+                    Toggle("Record camera", isOn: $coordinator.settings.includeCamera)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .fixedSize()
+                }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("Transcription", systemImage: "captions.bubble")
-                        .font(.headline)
-
-                    LazyVGrid(columns: threeColumnLayout, alignment: .leading, spacing: 18) {
-                        transcriptionToggle
-
-                        if transcription.isEnabledForCapture {
-                            settingPicker("Engine", selection: $transcription.provider) {
-                                ForEach(TranscriptionProvider.allCases) { provider in
-                                    Text(provider.title).tag(provider)
-                                }
+                if coordinator.settings.includeCamera {
+                    Divider()
+                    HStack(alignment: .center, spacing: 24) {
+                        settingPicker(
+                            "Camera source",
+                            selection: $coordinator.settings.selectedCameraID
+                        ) {
+                            Text("System Default").tag(String?.none)
+                            ForEach(coordinator.cameraInputDevices) { device in
+                                Text(device.name).tag(Optional(device.id))
                             }
+                        }
+                        .frame(maxWidth: 380)
 
-                            if transcription.provider == .whisperKit {
-                                whisperModelControl
+                        Label("Separate editable video track", systemImage: "rectangle.on.rectangle")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private var transcriptionCard: some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 17) {
+                SectionHeading(
+                    "Transcription",
+                    subtitle: "Create a private, searchable transcript from the audio tracks you record."
+                )
+                LazyVGrid(columns: threeColumnLayout, alignment: .leading, spacing: 18) {
+                    transcriptionToggle
+
+                    if transcription.isEnabledForCapture {
+                        settingPicker("Engine", selection: $transcription.provider) {
+                            ForEach(TranscriptionProvider.allCases) { provider in
+                                Text(provider.title).tag(provider)
                             }
+                        }
+
+                        if transcription.provider == .whisperKit {
+                            whisperModelControl
                         }
                     }
                 }
