@@ -28,6 +28,12 @@ final class RegionSelectionController {
         return await selectRegion(across: availableDisplays)
     }
 
+    /// Cancels an active region interaction and resumes its awaiting caller.
+    /// It is safe to call when no overlay is being presented.
+    func cancel() {
+        finish(with: nil)
+    }
+
 #if DEBUG
     func selectRegionForVisualQA() async -> RegionSelection? {
         let displays = NSScreen.screens.compactMap { screen -> RegionSelectionDisplay? in

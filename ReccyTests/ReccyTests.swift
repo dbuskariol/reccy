@@ -11,7 +11,320 @@ import VideoToolbox
 
 @Suite("Reccy")
 struct ReccyTests {
+    @Test func audioReaderProducesExactTrackPCMForTranscription() async throws {
+        let url = try makeWaveformTestAudio(duration: 1) { frame, sampleRate in
+            Float(sin(2 * Double.pi * 440 * Double(frame) / sampleRate) * 0.25)
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+        let asset = AVURLAsset(url: url)
+        let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let stream = try await TranscriptionAudioReader.stream(
+            mediaURL: url,
+            sourceTrackID: track.trackID,
+            outputFormat: format
+        )
+        var sampleCount = 0
+        var firstStart: TimeInterval?
+        for try await packet in stream {
+            firstStart = firstStart ?? packet.startTime.seconds
+            let samples = try TranscriptionAudioReader.monoFloatSamples(from: packet)
+            sampleCount += samples.count
+        }
+
+        #expect(abs((firstStart ?? -1)) < 0.001)
+        #expect(abs(sampleCount - 16_000) < 128)
+    }
+
+    @Test func liveTranscriptionRouterBoundsPacketsBeforeEngineStartupWithoutOverlappingAccess() async throws {
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1))
+        buffer.frameLength = 1
+        let packet = TimedAudioBuffer(buffer: buffer, startTime: .zero)
+        let router = LiveTranscriptionRouter()
+
+        for _ in 0...1_500 {
+            await router.ingest(packet, role: .microphone)
+        }
+
+        let session = CountingLiveTranscriptionSession(role: .microphone)
+        await router.install([.microphone: session])
+        #expect(await session.ingestedPacketCount == 1_500)
+        await router.cancel()
+    }
+
+    @Test func appleSpeechAdvertisesTheCurrentLocaleWithoutCloudAuthorization() async {
+        let engine = AppleSpeechTranscriptionEngine()
+        let availability = await engine.availability(localeIdentifier: Locale.current.identifier)
+        if case .unavailable(let reason) = availability {
+            Issue.record("Apple Speech should support the current macOS locale: \(reason)")
+        }
+    }
+
+    @Test func appleSpeechTranscribesSynthesizedSpeechPostRecordingAndLiveWhenModelIsInstalled() async throws {
+        let engine = AppleSpeechTranscriptionEngine()
+        guard await engine.availability(localeIdentifier: "en_AU") == .ready else { return }
+        let fixture = try makeSpeechTestAudio()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        try await exerciseTranscriptionEngine(
+            engine,
+            mediaURL: fixture,
+            localeIdentifier: "en_AU"
+        )
+    }
+
+    @Test func whisperKitTranscribesSynthesizedSpeechPostRecordingAndLiveWhenModelIsInstalled() async throws {
+#if arch(arm64)
+        let fixture = try makeSpeechTestAudio()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let manager = WhisperModelManager()
+        try await manager.load()
+        guard await manager.installedModelURL(for: WhisperModelManager.recommendedModel) != nil else { return }
+        let engine = WhisperKitTranscriptionEngine(
+            modelManager: manager,
+            modelIdentifier: WhisperModelManager.recommendedModel
+        )
+        async let firstPreparation: Void = engine.prepare(localeIdentifier: "en_AU") { _ in }
+        async let secondPreparation: Void = engine.prepare(localeIdentifier: "en_AU") { _ in }
+        _ = try await (firstPreparation, secondPreparation)
+
+        try await exerciseTranscriptionEngine(
+            engine,
+            mediaURL: fixture,
+            localeIdentifier: "en_AU",
+            liveRole: .systemAudio
+        )
+#endif
+    }
+
+    @Test @MainActor func transcriptionPreferencesPersistTheSelectedOnDeviceEngine() {
+        let suiteName = "ReccyTests.Transcription.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let modelDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Model Test \(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: modelDirectory) }
+        var controller: TranscriptionController? = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory)
+        )
+        controller?.provider = .whisperKit
+        controller?.whisperModelIdentifier = WhisperModelManager.compactModel
+        controller?.showLiveTranscript = false
+        controller?.isEnabledForCapture = false
+        controller = nil
+
+        let restored = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory)
+        )
+        #expect(restored.provider == .whisperKit)
+        #expect(restored.whisperModelIdentifier == WhisperModelManager.compactModel)
+        #expect(restored.showLiveTranscript == false)
+        #expect(restored.isEnabledForCapture == false)
+    }
+
+    @Test @MainActor func captureTranscriptionConfigurationIsAnImmutableSessionSnapshot() {
+        let suiteName = "ReccyTests.TranscriptionSnapshot.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let modelDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Model Snapshot Test \(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: modelDirectory) }
+        let controller = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory)
+        )
+        controller.isEnabledForCapture = true
+        controller.provider = .whisperKit
+        controller.localeIdentifier = "en_AU"
+        controller.whisperModelIdentifier = WhisperModelManager.compactModel
+        controller.automaticallyTranscribe = true
+        controller.showLiveTranscript = true
+        controller.transcribeSystemAudio = true
+        controller.transcribeMicrophone = false
+
+        let configuration = controller.makeCaptureConfiguration(
+            systemAudio: true,
+            microphone: true
+        )
+        controller.provider = .appleSpeech
+        controller.isEnabledForCapture = false
+
+        #expect(configuration.isEnabled)
+        #expect(configuration.provider == .whisperKit)
+        #expect(configuration.localeIdentifier == "en_AU")
+        #expect(configuration.whisperModelIdentifier == WhisperModelManager.compactModel)
+        #expect(configuration.createsLiveTranscript)
+        #expect(configuration.automaticallyTranscribes)
+        #expect(configuration.includesSystemAudio)
+        #expect(!configuration.includesMicrophone)
+    }
+
+    @Test func transcriptProjectionFollowsIndependentTimelineEdits() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Transcript.mov")
+        let track = TranscriptTrack(
+            sourceTrackID: 7,
+            role: .microphone,
+            name: "Microphone",
+            provider: .appleSpeech,
+            localeIdentifier: "en-AU",
+            modelIdentifier: "com.apple.SpeechTranscriber",
+            segments: [
+                TranscriptSegment(
+                    text: " one two three",
+                    sourceStart: 1,
+                    duration: 3,
+                    words: [
+                        TranscriptWord(text: " one", sourceStart: 1, duration: 1),
+                        TranscriptWord(text: " two", sourceStart: 2, duration: 1),
+                        TranscriptWord(text: " three", sourceStart: 3, duration: 1),
+                    ]
+                ),
+            ]
+        )
+        let document = TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: [track])
+        let clip = TimelineClip(
+            sourceURL: mediaURL,
+            sourceTrackID: 7,
+            sourceStart: 2,
+            timelineStart: 10,
+            duration: 2,
+            name: "Microphone"
+        )
+        let lane = TimelineLane(kind: .microphone, name: "Microphone", clips: [clip])
+        let project = TimelineProject(name: "Transcript Projection", lanes: [lane])
+
+        let projected = TranscriptProjection.project(
+            project: project,
+            documentsByMediaURL: [mediaURL: document]
+        )
+
+        #expect(projected.count == 1)
+        #expect(projected[0].text == "two three")
+        #expect(projected[0].timelineStart == 10)
+        #expect(projected[0].duration == 2)
+        #expect(projected[0].role == TranscriptTrackRole.microphone)
+    }
+
+    @Test func transcriptProjectionKeepsDuplicateClipsAsSeparateCues() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/Reccy Duplicate Transcript.mov")
+        let segment = TranscriptSegment(
+            text: "Hello",
+            sourceStart: 0,
+            duration: 1,
+            words: []
+        )
+        let document = TranscriptDocument(
+            mediaFileName: mediaURL.lastPathComponent,
+            tracks: [
+                TranscriptTrack(
+                    sourceTrackID: 2,
+                    role: .systemAudio,
+                    name: "System Audio",
+                    provider: .whisperKit,
+                    localeIdentifier: "en",
+                    modelIdentifier: "large-v3-v20240930_626MB",
+                    segments: [segment]
+                ),
+            ]
+        )
+        let clips = [0.0, 5.0].map {
+            TimelineClip(
+                sourceURL: mediaURL,
+                sourceTrackID: 2,
+                sourceStart: 0,
+                timelineStart: $0,
+                duration: 1,
+                name: "System Audio"
+            )
+        }
+        let project = TimelineProject(
+            name: "Duplicate Transcript",
+            lanes: [TimelineLane(kind: .systemAudio, name: "System Audio", clips: clips)]
+        )
+
+        let projected = TranscriptProjection.project(
+            project: project,
+            documentsByMediaURL: [mediaURL: document]
+        )
+
+        #expect(projected.map { $0.timelineStart } == [0, 5])
+        #expect(Set(projected.map { $0.id }).count == 2)
+    }
+
+    @Test func transcriptExportsUseTimelineTimecodes() {
+        let segment = ProjectedTranscriptSegment(
+            id: "cue",
+            sourceSegmentID: UUID(),
+            clipID: UUID(),
+            laneID: UUID(),
+            role: .systemAudio,
+            text: "Hello world",
+            timelineStart: 65.25,
+            duration: 2.5
+        )
+
+        let srt = TranscriptExportFormatter.string(segments: [segment], format: .srt)
+        let vtt = TranscriptExportFormatter.string(segments: [segment], format: .webVTT)
+
+        #expect(srt.contains("00:01:05,250 --> 00:01:07,750"))
+        #expect(vtt.contains("00:01:05.250 --> 00:01:07.750"))
+        #expect(vtt.hasPrefix("WEBVTT"))
+    }
+
+    @Test func transcriptStoreRoundTripsAnAtomicSidecar() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Transcript Store \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mediaURL = directory.appendingPathComponent("Recording.mov")
+        let generatedAt = Date(timeIntervalSince1970: 1_234_567.89)
+        let document = TranscriptDocument(
+            mediaFileName: mediaURL.lastPathComponent,
+            modifiedAt: generatedAt,
+            tracks: [
+                TranscriptTrack(
+                    sourceTrackID: 3,
+                    role: .microphone,
+                    name: "Studio Microphone",
+                    provider: .appleSpeech,
+                    localeIdentifier: "en-AU",
+                    modelIdentifier: "com.apple.SpeechTranscriber",
+                    generatedAt: generatedAt,
+                    segments: [
+                        TranscriptSegment(
+                            text: "Testing",
+                            sourceStart: 0.2,
+                            duration: 0.8,
+                            words: []
+                        ),
+                    ]
+                ),
+            ]
+        )
+        let store = TranscriptStore()
+
+        try await store.save(document, for: mediaURL)
+        let restored = try await store.load(for: mediaURL)
+
+        #expect(restored == document)
+        #expect(FileManager.default.fileExists(atPath: TranscriptStore.sidecarURL(for: mediaURL).path))
+    }
+
     @Test func portionCaptureBypassesTheWholeDisplayPicker() {
+        #expect(CaptureSourcePickerPolicy.maximumConcurrentStreams == nil)
         #expect(CaptureSourceKind.region.pickerMode == nil)
         #expect(CaptureSourceKind.region.contentStyle == nil)
         #expect(CaptureSourceKind.display.pickerMode == .singleDisplay)
@@ -303,9 +616,15 @@ struct ReccyTests {
             artifacts.projectPackageURL.path
                 == "/tmp/Projects/Reccy Ownership Test.reccyproject"
         )
+        #expect(artifacts.transcriptURL.path == "/tmp/Reccy Ownership Test.reccytranscript")
         #expect(
             artifacts.trashOrder
-                == [artifacts.projectPackageURL, artifacts.manifestURL, mediaURL]
+                == [
+                    artifacts.projectPackageURL,
+                    artifacts.transcriptURL,
+                    artifacts.manifestURL,
+                    mediaURL,
+                ]
         )
     }
 
@@ -1612,6 +1931,76 @@ struct ReccyTests {
         return url
     }
 
+    private func makeSpeechTestAudio() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Speech Test \(UUID().uuidString)")
+            .appendingPathExtension("aiff")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        process.arguments = [
+            "-v", "Karen",
+            "-r", "155",
+            "-o", url.path,
+            "Reccy keeps every transcript private and on this Mac. The editor keeps system audio and microphone words on separate tracks.",
+        ]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: url.path) else {
+            throw TestMediaError.speechSynthesisFailed(process.terminationStatus)
+        }
+        return url
+    }
+
+    private func exerciseTranscriptionEngine(
+        _ engine: any TranscriptionEngine,
+        mediaURL: URL,
+        localeIdentifier: String,
+        liveRole: TranscriptTrackRole = .microphone
+    ) async throws {
+        let asset = AVURLAsset(url: mediaURL)
+        let sourceTrack = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let request = TranscriptionTrackRequest(
+            mediaURL: mediaURL,
+            sourceTrackID: sourceTrack.trackID,
+            role: .microphone,
+            name: "Synthesized Speech",
+            localeIdentifier: localeIdentifier
+        )
+        let postRecordingTrack = try await engine.transcribe(request) { _ in }
+        assertSpeechTranscript(postRecordingTrack)
+
+        let liveSession = try await engine.makeLiveSession(
+            role: liveRole,
+            name: "Synthesized Speech",
+            localeIdentifier: localeIdentifier
+        ) { _ in }
+        let sourceFormat = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let packets = try await TranscriptionAudioReader.stream(
+            mediaURL: mediaURL,
+            sourceTrackID: sourceTrack.trackID,
+            outputFormat: sourceFormat
+        )
+        for try await packet in packets {
+            await liveSession.ingest(packet)
+        }
+        let liveTrack = try await liveSession.finish(sourceTrackID: sourceTrack.trackID)
+        assertSpeechTranscript(liveTrack)
+    }
+
+    private func assertSpeechTranscript(_ track: TranscriptTrack) {
+        let normalized = track.text.lowercased()
+        #expect(normalized.contains("transcript"))
+        #expect(normalized.contains("private"))
+        #expect(!normalized.contains("<|"))
+        #expect(!track.segments.isEmpty)
+        #expect(track.segments.allSatisfy { $0.duration >= 0 && $0.sourceStart >= 0 })
+    }
+
     private func mean(_ values: [Float]) -> Float {
         guard !values.isEmpty else { return 0 }
         return values.reduce(0, +) / Float(values.count)
@@ -1700,8 +2089,36 @@ private struct RGBAColor: CustomStringConvertible {
     }
 }
 
+private actor CountingLiveTranscriptionSession: LiveTranscriptionSession {
+    nonisolated let role: TranscriptTrackRole
+    private(set) var ingestedPacketCount = 0
+
+    init(role: TranscriptTrackRole) {
+        self.role = role
+    }
+
+    func ingest(_ packet: TimedAudioBuffer) {
+        ingestedPacketCount += 1
+    }
+
+    func finish(sourceTrackID: Int32) throws -> TranscriptTrack {
+        TranscriptTrack(
+            sourceTrackID: sourceTrackID,
+            role: role,
+            name: role.title,
+            provider: .appleSpeech,
+            localeIdentifier: "en-AU",
+            modelIdentifier: "test",
+            segments: []
+        )
+    }
+
+    func cancel() {}
+}
+
 private enum TestMediaError: Error {
     case cannotAddVideoInput
     case cannotCreatePixelBuffer
+    case speechSynthesisFailed(Int32)
     case writerFailed
 }

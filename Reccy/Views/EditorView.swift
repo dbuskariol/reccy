@@ -1,11 +1,15 @@
 import AVKit
 import Combine
+import AppKit
 import SwiftUI
 
 struct EditorView: View {
     @EnvironmentObject private var editor: TimelineEditorController
+    @EnvironmentObject private var transcription: TranscriptionController
     @State private var exportSource: ExportSource?
     @State private var exportError: String?
+    @State private var showsTranscript = false
+    @State private var transcriptSearch = ""
 
     private let playbackTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
     private let trackHeaderWidth: CGFloat = 176
@@ -33,7 +37,11 @@ struct EditorView: View {
         .sheet(item: $exportSource) { source in
             ExportSheet(source: source)
         }
-        .onAppear { editor.refreshVoiceoverInputDevices() }
+        .onAppear {
+            editor.refreshVoiceoverInputDevices()
+            loadProjectTranscripts()
+        }
+        .onChange(of: editor.project) { _, _ in loadProjectTranscripts() }
         .onReceive(playbackTimer) { _ in editor.syncPlayheadFromPlayer() }
         .alert("Export Failed", isPresented: Binding(
             get: { exportError != nil },
@@ -64,6 +72,22 @@ struct EditorView: View {
     }
 
     private func editorWorkspace(_ project: TimelineProject) -> some View {
+        Group {
+            if showsTranscript {
+                HStack(spacing: 0) {
+                    editorCore(project)
+                    Divider()
+                    transcriptPanel(project)
+                        .frame(width: 320)
+                }
+            } else {
+                editorCore(project)
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func editorCore(_ project: TimelineProject) -> some View {
         VSplitView {
             previewPane(project)
                 .frame(minHeight: 250, idealHeight: 390)
@@ -71,7 +95,6 @@ struct EditorView: View {
             timelinePane(project)
                 .frame(minHeight: 285, idealHeight: 360)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func previewPane(_ project: TimelineProject) -> some View {
@@ -532,6 +555,12 @@ struct EditorView: View {
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
         ToolbarItemGroup {
+            Button("Transcript", systemImage: "captions.bubble") {
+                showsTranscript.toggle()
+            }
+            .disabled(!editor.hasProject)
+            .tint(showsTranscript ? .accentColor : nil)
+
             Button("Save", systemImage: "square.and.arrow.down") {
                 do { try editor.save() } catch { exportError = error.localizedDescription }
             }
@@ -545,6 +574,170 @@ struct EditorView: View {
                 }
             }
             .disabled(!editor.hasProject || editor.isRebuilding)
+        }
+    }
+
+    private func transcriptPanel(_ project: TimelineProject) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Label("Transcript", systemImage: "captions.bubble.fill")
+                    .font(.headline)
+                Spacer()
+                Menu {
+                    ForEach(TranscriptExportFormat.allCases) { format in
+                        Button(format.title) { exportProjectTranscript(project, format: format) }
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .frame(width: 18, height: 18)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 28)
+                .disabled(projectedTranscriptSegments.isEmpty)
+                .reccyTooltip("Export transcript or captions")
+
+                Button {
+                    showsTranscript = false
+                } label: {
+                    Image(systemName: "sidebar.trailing")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .reccyAccessibleControl("Close Transcript")
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 46)
+            .background(.bar)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search transcript", text: $transcriptSearch)
+                    .textFieldStyle(.plain)
+                if !transcriptSearch.isEmpty {
+                    Button {
+                        transcriptSearch = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+
+            Divider()
+
+            if projectedTranscriptSegments.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "captions.bubble")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.tertiary)
+                    Text("No project transcript")
+                        .font(.headline)
+                    Text("Transcribe each source track without changing the timeline or media.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("Transcribe Sources") {
+                        transcription.transcribeMissingSources(in: project)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(28)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 3) {
+                            ForEach(filteredProjectedTranscript) { segment in
+                                Button {
+                                    editor.seek(to: segment.timelineStart)
+                                } label: {
+                                    HStack(alignment: .top, spacing: 9) {
+                                        Text(timecode(segment.timelineStart, includeHours: false))
+                                            .font(.caption2.monospacedDigit())
+                                            .foregroundStyle(.tertiary)
+                                            .frame(width: 40, alignment: .trailing)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(segment.role.title)
+                                                .font(.caption2.weight(.semibold))
+                                                .foregroundStyle(laneColor(segment.role.timelineLaneKind))
+                                            Text(segment.text)
+                                                .font(.callout)
+                                                .foregroundStyle(.primary)
+                                                .multilineTextAlignment(.leading)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .background(
+                                        segment.timelineStart <= editor.playhead && editor.playhead < segment.timelineEnd
+                                            ? Color.accentColor.opacity(0.08)
+                                            : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: 7)
+                                    )
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .id(segment.id)
+                                .accessibilityLabel("\(segment.role.title), \(segment.text), at \(timecode(segment.timelineStart))")
+                            }
+                        }
+                        .padding(8)
+                    }
+                    .onChange(of: activeTranscriptSegmentID) { _, id in
+                        guard let id else { return }
+                        withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(id, anchor: .center) }
+                    }
+                }
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var projectedTranscriptSegments: [ProjectedTranscriptSegment] {
+        guard let project = editor.project else { return [] }
+        let urls = Set(project.lanes.flatMap(\.clips).map(\.sourceURL))
+        let documents = Dictionary(uniqueKeysWithValues: urls.compactMap { url in
+            transcription.document(for: url).map { (url, $0) }
+        })
+        return TranscriptProjection.project(project: project, documentsByMediaURL: documents)
+    }
+
+    private var filteredProjectedTranscript: [ProjectedTranscriptSegment] {
+        let query = transcriptSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return projectedTranscriptSegments }
+        return projectedTranscriptSegments.filter { $0.text.localizedCaseInsensitiveContains(query) }
+    }
+
+    private var activeTranscriptSegmentID: String? {
+        projectedTranscriptSegments.first {
+            $0.timelineStart <= editor.playhead && editor.playhead < $0.timelineEnd
+        }?.id
+    }
+
+    private func loadProjectTranscripts() {
+        guard let project = editor.project else { return }
+        for url in Set(project.lanes.flatMap(\.clips).map(\.sourceURL)) {
+            transcription.loadDocument(for: url)
+        }
+    }
+
+    private func exportProjectTranscript(_ project: TimelineProject, format: TranscriptExportFormat) {
+        let panel = NSSavePanel()
+        panel.title = "Export Project Transcript"
+        panel.nameFieldStringValue = "\(project.name).\(format.fileExtension)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try TranscriptExportFormatter.string(segments: projectedTranscriptSegments, format: format)
+                .write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            exportError = error.localizedDescription
         }
     }
 

@@ -8,6 +8,7 @@ struct SettingsView: View {
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var softwareUpdates: SoftwareUpdateController
+    @EnvironmentObject private var transcription: TranscriptionController
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,11 +30,13 @@ struct SettingsView: View {
         .onAppear {
             coordinator.refreshPermissionStatus()
             preferences.refreshLaunchAtLoginStatus()
+            transcription.refreshCapabilities()
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             coordinator.refreshPermissionStatus()
             preferences.refreshLaunchAtLoginStatus()
+            transcription.refreshCapabilities()
         }
     }
 
@@ -79,6 +82,7 @@ struct SettingsView: View {
         switch navigation.settingsCategory {
         case .general: "Choose how Reccy behaves and where it keeps your recordings."
         case .recording: "Set sensible defaults for every new capture."
+        case .transcription: "Create private, searchable transcripts entirely on this Mac."
         case .permissions: "Review the macOS access required by the capture options you use."
         case .shortcuts: "Record global shortcuts without granting Accessibility access."
         case .updates: "Keep Reccy current through signed, verified updates."
@@ -92,6 +96,8 @@ struct SettingsView: View {
             generalSettings
         case .recording:
             recordingSettings
+        case .transcription:
+            transcriptionSettings
         case .permissions:
             permissionSettings
         case .shortcuts:
@@ -310,6 +316,208 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var transcriptionSettings: some View {
+        VStack(spacing: 16) {
+            SettingsCard(title: "Transcription Engine") {
+                SettingsValueRow(
+                    title: "Default engine",
+                    detail: transcription.provider.detail,
+                    systemImage: transcription.provider.systemImage
+                ) {
+                    Picker("Engine", selection: $transcription.provider) {
+                        ForEach(TranscriptionProvider.allCases) { provider in
+                            Text(provider.title).tag(provider)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 160)
+                }
+                SettingsDivider()
+                SettingsValueRow(
+                    title: "Spoken language",
+                    detail: "Used for both live and post-recording transcription.",
+                    systemImage: "globe"
+                ) {
+                    Picker("Language", selection: $transcription.localeIdentifier) {
+                        if !transcription.supportedLocales.contains(where: { $0.identifier == transcription.localeIdentifier }) {
+                            Text(transcription.localizedLocaleName(Locale(identifier: transcription.localeIdentifier)))
+                                .tag(transcription.localeIdentifier)
+                        }
+                        ForEach(transcription.supportedLocales, id: \.identifier) { locale in
+                            Text(transcription.localizedLocaleName(locale)).tag(locale.identifier)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 210)
+                }
+            }
+
+            SettingsCard(title: "Recording Workflow") {
+                SettingsToggleRow(
+                    title: "Enable transcription",
+                    detail: "Allow live and post-recording transcription during capture.",
+                    systemImage: "captions.bubble",
+                    isOn: $transcription.isEnabledForCapture
+                )
+                if transcription.isEnabledForCapture {
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "Create post-recording transcript",
+                        detail: "Create a source-aligned transcript automatically after every capture.",
+                        systemImage: "text.badge.checkmark",
+                        isOn: $transcription.automaticallyTranscribe
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "Show live transcript",
+                        detail: "Display finalized and in-progress words in Monitor without affecting capture performance.",
+                        systemImage: "captions.bubble",
+                        isOn: $transcription.showLiveTranscript
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "System audio",
+                        detail: "Transcribe remote speakers and app audio on its independent source track.",
+                        systemImage: "speaker.wave.2",
+                        isOn: $transcription.transcribeSystemAudio
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "Microphone & voiceover",
+                        detail: "Transcribe your microphone as a separate editable source track.",
+                        systemImage: "mic",
+                        isOn: $transcription.transcribeMicrophone
+                    )
+                }
+            }
+
+            SettingsCard(title: "Apple Speech") {
+                SettingsActionRow(
+                    title: appleSpeechStatusTitle,
+                    detail: "Apple manages the language model. Audio and transcripts remain on this Mac.",
+                    systemImage: "apple.intelligence"
+                ) {
+                    switch transcription.appleAvailability {
+                    case .ready:
+                        Label("Ready", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    case .requiresDownload:
+                        Button("Download") { transcription.prepareAppleSpeech() }
+                            .buttonStyle(.borderedProminent)
+                    case .unavailable:
+                        Button("Check Again") { transcription.refreshCapabilities() }
+                    }
+                }
+                if let progress = transcription.applePreparationProgress {
+                    SettingsDivider()
+                    modelProgressRow(progress.fractionCompleted, detail: progress.detail ?? "Preparing Apple Speech")
+                }
+                if let error = transcription.applePreparationError {
+                    SettingsDivider()
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            SettingsCard(title: "WhisperKit Models") {
+                SettingsValueRow(
+                    title: "Model",
+                    detail: whisperModelDetail,
+                    systemImage: "shippingbox"
+                ) {
+                    Picker("WhisperKit model", selection: $transcription.whisperModelIdentifier) {
+                        ForEach(transcription.availableWhisperModels, id: \.self) { identifier in
+                            Text(transcription.whisperModelDisplayName(identifier)).tag(identifier)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 240)
+                }
+                SettingsDivider()
+                SettingsActionRow(
+                    title: transcription.isWhisperModelInstalled(transcription.whisperModelIdentifier)
+                        ? "Model installed"
+                        : "Download selected model",
+                    detail: "WhisperKit 1.0 runs OpenAI Whisper locally through Core ML on Apple silicon.",
+                    systemImage: transcription.isWhisperModelInstalled(transcription.whisperModelIdentifier)
+                        ? "checkmark.circle.fill"
+                        : "arrow.down.circle"
+                ) {
+                    if transcription.isWhisperModelInstalled(transcription.whisperModelIdentifier) {
+                        Button("Remove", role: .destructive) {
+                            transcription.removeWhisperModel(transcription.whisperModelIdentifier)
+                        }
+                    } else {
+                        Button("Download") { transcription.downloadSelectedWhisperModel() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(transcription.whisperDownloadProgress != nil)
+                    }
+                }
+                if let progress = transcription.whisperDownloadProgress {
+                    SettingsDivider()
+                    modelProgressRow(progress, detail: "Downloading model")
+                }
+                if let error = transcription.whisperModelError {
+                    SettingsDivider()
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Label(
+                "Reccy never sends recordings, live audio, models, or transcript text to a cloud transcription service.",
+                systemImage: "lock.shield.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var appleSpeechStatusTitle: String {
+        switch transcription.appleAvailability {
+        case .ready: "Language model ready"
+        case .requiresDownload: "Language model required"
+        case .unavailable(let reason): reason
+        }
+    }
+
+    private var whisperModelDetail: String {
+        guard let record = transcription.installedWhisperModels.first(where: {
+            $0.id == transcription.whisperModelIdentifier
+        }) else {
+            return transcription.whisperModelIdentifier == WhisperModelManager.recommendedModel
+                ? "Recommended for maximum accuracy. Downloaded only when requested."
+                : "Downloaded only when requested."
+        }
+        return "Installed · \(ByteCountFormatter.string(fromByteCount: record.byteCount, countStyle: .file))"
+    }
+
+    private func modelProgressRow(_ fraction: Double?, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(detail)
+                    .font(.callout.weight(.medium))
+                Spacer()
+                if let fraction {
+                    Text(fraction, format: .percent.precision(.fractionLength(0)))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let fraction {
+                ProgressView(value: fraction)
+            } else {
+                ProgressView()
+            }
+        }
+        .padding(.leading, 42)
     }
 
     private var permissionSettings: some View {

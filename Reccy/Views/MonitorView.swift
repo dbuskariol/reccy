@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MonitorView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
+    @EnvironmentObject private var transcription: TranscriptionController
 
     private let meterColumns = [
         GridItem(.flexible(), spacing: 16),
@@ -16,6 +17,9 @@ struct MonitorView: View {
                         header
                         monitoringOverview
                         audioSection
+                        if transcription.isLiveCaptureEnabled {
+                            liveTranscriptSection
+                        }
                     }
                     .padding(28)
                     .frame(maxWidth: 980)
@@ -264,6 +268,40 @@ struct MonitorView: View {
         }
     }
 
+    private var liveTranscriptSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(
+                "Live transcript",
+                subtitle: "On-device words are aligned to their independent recording tracks."
+            )
+
+            if let notice = transcription.liveNotice {
+                CardContainer {
+                    Label(notice, systemImage: "captions.bubble")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                LazyVGrid(columns: meterColumns, alignment: .leading, spacing: 16) {
+                    if coordinator.settings.includeSystemAudio && transcription.transcribeSystemAudio {
+                        liveTranscriptCard(role: .systemAudio, color: .teal)
+                    }
+                    if coordinator.settings.includeMicrophone && transcription.transcribeMicrophone {
+                        liveTranscriptCard(role: .microphone, color: .orange)
+                    }
+                }
+            }
+        }
+    }
+
+    private func liveTranscriptCard(role: TranscriptTrackRole, color: Color) -> some View {
+        LiveTranscriptCard(
+            role: role,
+            color: color,
+            update: transcription.liveUpdates[role]
+        )
+    }
+
     private func metadataPill(_ text: String, systemImage: String) -> some View {
         Label(text, systemImage: systemImage)
             .font(.caption.weight(.medium))
@@ -303,5 +341,75 @@ struct MonitorView: View {
         case (false, true): "Microphone is recording on its own track."
         case (false, false): "This recording has no audio tracks."
         }
+    }
+}
+
+private struct LiveTranscriptCard: View {
+    private static let bottomAnchor = "live-transcript-bottom"
+
+    let role: TranscriptTrackRole
+    let color: Color
+    let update: LiveTranscriptUpdate?
+
+    private var finalized: [TranscriptSegment] {
+        Array(update?.finalizedSegments.suffix(20) ?? [])
+    }
+
+    private var volatile: [TranscriptSegment] {
+        Array(update?.volatileSegments.suffix(4) ?? [])
+    }
+
+    var body: some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label(role.title, systemImage: role.systemImage)
+                        .font(.headline)
+                    Spacer()
+                    Circle()
+                        .fill(color)
+                        .frame(width: 7, height: 7)
+                    Text(update == nil ? "LISTENING" : "LIVE")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
+
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            if finalized.isEmpty && volatile.isEmpty {
+                                Text("Waiting for speech…")
+                                    .foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                            } else {
+                                ForEach(finalized) { segment in
+                                    Text(segment.displayText)
+                                        .textSelection(.enabled)
+                                }
+                                ForEach(volatile) { segment in
+                                    Text(segment.displayText)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Color.clear
+                                .frame(height: 1)
+                                .id(Self.bottomAnchor)
+                        }
+                        .font(.body)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .scrollIndicators(.hidden)
+                    .defaultScrollAnchor(.bottom)
+                    .onChange(of: update) {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                        }
+                    }
+                }
+                .frame(height: 104)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Live \(role.title) transcript")
     }
 }

@@ -12,6 +12,7 @@
 		0A1000000000000000000061 /* KeyboardShortcuts in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000065 /* KeyboardShortcuts */; };
 		0A1000000000000000000069 /* DSWaveformImage in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000067 /* DSWaveformImage */; };
 		0A1000000000000000000070 /* DSWaveformImageViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000068 /* DSWaveformImageViews */; };
+		0A1000000000000000000071 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0A1000000000000000000073 /* WhisperKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -53,6 +54,7 @@
 				0A1000000000000000000061 /* KeyboardShortcuts in Frameworks */,
 				0A1000000000000000000069 /* DSWaveformImage in Frameworks */,
 				0A1000000000000000000070 /* DSWaveformImageViews in Frameworks */,
+				0A1000000000000000000071 /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -117,6 +119,7 @@
 				0A1000000000000000000065 /* KeyboardShortcuts */,
 				0A1000000000000000000067 /* DSWaveformImage */,
 				0A1000000000000000000068 /* DSWaveformImageViews */,
+				0A1000000000000000000073 /* WhisperKit */,
 			);
 			productName = Reccy;
 			productReference = 0A1000000000000000000008 /* Reccy.app */;
@@ -176,6 +179,7 @@
 				0A1000000000000000000062 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				0A1000000000000000000063 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
 				0A1000000000000000000066 /* XCRemoteSwiftPackageReference "DSWaveformImage" */,
+				0A1000000000000000000072 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */,
 			);
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
@@ -256,6 +260,14 @@
 				minimumVersion = 14.5.0;
 			};
 		};
+		0A1000000000000000000072 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/argmax-oss-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -278,6 +290,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 0A1000000000000000000066 /* XCRemoteSwiftPackageReference "DSWaveformImage" */;
 			productName = DSWaveformImageViews;
+		};
+		0A1000000000000000000073 /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0A1000000000000000000072 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */;
+			productName = WhisperKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 
