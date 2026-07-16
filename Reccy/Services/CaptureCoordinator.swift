@@ -27,6 +27,13 @@ enum CaptureState: Equatable, Sendable {
 
     var canChangeSettings: Bool { !isRecording }
 
+    var isPreparingCapture: Bool {
+        switch self {
+        case .countingDown, .starting: true
+        default: false
+        }
+    }
+
     var stopOperation: CaptureStopOperation {
         switch self {
         case .countingDown: .cancelCountdown
@@ -43,6 +50,10 @@ enum CaptureState: Equatable, Sendable {
         case .stopping: "Finishing…"
         default: "Stop Recording"
         }
+    }
+
+    var requiresStopConfirmation: Bool {
+        self == .recording || self == .paused
     }
 }
 
@@ -149,6 +160,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             if oldValue.outputFolderPath != settings.outputFolderPath {
                 library.setDirectory(Self.outputDirectory(for: settings))
             }
+            if state.canChangeSettings,
+               (oldValue.selectedCameraID != settings.selectedCameraID
+                    || oldValue.includeCamera != settings.includeCamera)
+            {
+                refreshSelectedCameraVideoEffects()
+            }
         }
     }
     @Published private(set) var state: CaptureState = .idle
@@ -175,6 +192,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var sessionCompletion: CaptureSessionCompletion?
     @Published private(set) var isMouseFollowZoomActive = false
     @Published private(set) var mouseFollowZoomPosition = CGPoint(x: 0.5, y: 0.5)
+    @Published private(set) var cameraVideoEffects = WebcamVideoEffectsState()
 
     let library: RecordingLibrary
     let previewPipeline = CapturePreviewPipeline()
@@ -193,7 +211,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var mouseFollowZoomCapture = MouseFollowZoomCaptureSession()
     private var mouseFollowZoomSourceMapper: MouseFollowZoomSourceMapper?
     private var pendingCompletionNotice: String?
-    private var countdownTask: Task<Void, Never>?
     private var recordingStartTask: Task<Void, Never>?
     private var recordingStopTask: Task<Void, Never>?
     private var meterTask: Task<Void, Never>?
@@ -201,6 +218,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var activationCancellable: AnyCancellable?
     private let regionSelectionController = RegionSelectionController()
     private let boundaryController = CaptureBoundaryController()
+    private var isPresentingStopRecordingConfirmation = false
 #if DEBUG
     private var suppressesPermissionRefreshForQA = false
     private var isSimulatingRecordingForQA = false
@@ -308,11 +326,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     var liveMouseFollowZoomScaleTitle: String {
-        liveMouseFollowZoomScale.formatted(
-            .number.precision(
-                .fractionLength(liveMouseFollowZoomScale == floor(liveMouseFollowZoomScale) ? 0 : 1)
-            )
-        ) + "×"
+        MouseFollowZoomScale.title(liveMouseFollowZoomScale)
     }
 
     private var selectedCameraUniqueID: String {
@@ -335,7 +349,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if self.state.isRecording {
-                    self.stopRecording()
+                    self.requestStopRecording()
                 } else {
                     self.startRecording()
                 }
@@ -502,6 +516,24 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    /// Portrait blur and Background Replacement are owned by macOS. Opening
+    /// Apple's Video Effects panel is the only authoritative enable/disable and
+    /// background-image selection surface; Reccy reflects its result live.
+    var canOpenCameraVideoEffects: Bool {
+        guard settings.includeCamera else { return false }
+        return switch state {
+        case .countingDown, .recording, .paused:
+            true
+        case .idle, .sourceSelected, .starting, .stopping, .failed:
+            false
+        }
+    }
+
+    func openCameraVideoEffects() {
+        guard canOpenCameraVideoEffects else { return }
+        AVCaptureDevice.showSystemUserInterface(.videoEffects)
+    }
+
     func openFilesAndFoldersPrivacySettings() {
         guard let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
@@ -545,40 +577,19 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             return
         }
 
-        countdownTask?.cancel()
         sessionCompletion = nil
-        let seconds = settings.countdown.rawValue
-        guard seconds > 0 else {
-            launchRecordingStart(with: filter)
-            return
-        }
-
-        countdownTask = Task { [weak self] in
-            guard let self else { return }
-            for remaining in stride(from: seconds, through: 1, by: -1) {
-                guard !Task.isCancelled else { return }
-                state = .countingDown(remaining)
-                do {
-                    try await Task.sleep(for: .seconds(1))
-                } catch {
-                    return
-                }
-            }
-            guard !Task.isCancelled else { return }
-            countdownTask = nil
-            launchRecordingStart(with: filter)
-        }
+        launchRecordingStart(
+            with: filter,
+            countdownSeconds: settings.countdown.rawValue
+        )
     }
 
     func cancelCountdown() {
-        countdownTask?.cancel()
-        countdownTask = nil
-        state = hasSelectedSource ? .sourceSelected : .idle
-        sessionCompletion = CaptureSessionCompletion(outcome: .cancelled)
+        cancelRecordingStartup()
     }
 
     private func cancelRecordingStartup() {
-        guard state == .starting else { return }
+        guard state.isPreparingCapture else { return }
 
         sessionGeneration &+= 1
         let startTask = recordingStartTask
@@ -618,6 +629,48 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 guard let self else { return }
                 self.handleFailure(error)
             }
+        }
+    }
+
+    /// Routes every user-initiated stop through one native confirmation. Capture
+    /// startup cancellation remains immediate, and automatic safety stops call
+    /// `stopRecording()` directly so low-space or failure recovery cannot wait
+    /// on modal UI while primary media is at risk.
+    func requestStopRecording() {
+        guard state.requiresStopConfirmation else {
+            stopRecording()
+            return
+        }
+        guard !isPresentingStopRecordingConfirmation else { return }
+        isPresentingStopRecordingConfirmation = true
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Stop Recording?"
+        alert.informativeText = "Reccy will finish writing the current recording and add it to your Library."
+
+        let cancelButton = alert.addButton(withTitle: "Cancel")
+        cancelButton.keyEquivalent = "\r"
+        let stopButton = alert.addButton(withTitle: "Stop Recording")
+        stopButton.hasDestructiveAction = true
+        stopButton.keyEquivalent = ""
+
+        let handleResponse: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            self.isPresentingStopRecordingConfirmation = false
+            guard response == .alertSecondButtonReturn,
+                  self.state.requiresStopConfirmation
+            else { return }
+            self.stopRecording()
+        }
+
+        if let window = NSApp.keyWindow,
+           window.isVisible,
+           window.styleMask.contains(.titled)
+        {
+            alert.beginSheetModal(for: window, completionHandler: handleResponse)
+        } else {
+            handleResponse(alert.runModal())
         }
     }
 
@@ -679,6 +732,22 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         )
         mouseFollowZoomPosition = mouseFollowZoomCapture.currentPosition ?? position
         isMouseFollowZoomActive = mouseFollowZoomCapture.isActive
+    }
+
+    func setMouseFollowZoomLevel(_ level: MouseFollowZoomLevel) {
+        guard settings.mouseFollowZoomLevel != level else { return }
+        settings.mouseFollowZoomLevel = level
+        guard isMouseFollowZoomActive,
+              state == .recording || state == .paused
+        else { return }
+        let time = multitrackRecorder?.metrics.duration ?? recordedDuration
+        let position = currentMouseFollowZoomPosition()
+        mouseFollowZoomCapture.changeScale(
+            at: time,
+            zoomScale: level.rawValue,
+            position: position
+        )
+        mouseFollowZoomPosition = mouseFollowZoomCapture.currentPosition ?? position
     }
 
     func captureScreenshot() {
@@ -762,6 +831,15 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     func refreshCameraInputDevices() {
         cameraInputDevices = VideoInputDevice.discoverAvailable()
+        refreshSelectedCameraVideoEffects()
+    }
+
+    private func refreshSelectedCameraVideoEffects() {
+        guard state.canChangeSettings, settings.includeCamera, let device = selectedCameraDevice else {
+            cameraVideoEffects = WebcamVideoEffectsState()
+            return
+        }
+        cameraVideoEffects = WebcamVideoEffectsState.snapshot(for: device)
     }
 
     func chooseOutputFolder() {
@@ -781,17 +859,25 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         settings.outputFolderPath = nil
     }
 
-    private func launchRecordingStart(with filter: SCContentFilter) {
+    private func launchRecordingStart(
+        with filter: SCContentFilter,
+        countdownSeconds: Int
+    ) {
         sessionGeneration &+= 1
         let generation = sessionGeneration
         state = .starting
         recordingStartTask = Task { [weak self] in
-            await self?.beginRecording(with: filter, generation: generation)
+            await self?.beginRecording(
+                with: filter,
+                countdownSeconds: countdownSeconds,
+                generation: generation
+            )
         }
     }
 
     private func beginRecording(
         with filter: SCContentFilter,
+        countdownSeconds: Int,
         generation: UInt
     ) async {
         guard await requestMicrophonePermissionIfNeeded() else {
@@ -837,9 +923,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             )
             let encodingPlan = options.encodingPlan
             let outputURL = try makeOutputURL(fileExtension: encodingPlan.fileExtension)
-            recordingLease = try RecordingSessionLease.acquire(
-                in: outputURL.deletingLastPathComponent()
-            )
             let availableBytes = try RecordingStoragePolicy.availableBytes(
                 at: outputURL.deletingLastPathComponent()
             )
@@ -871,19 +954,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 showsCursor: settings.showCursor,
                 highlightsClicks: settings.showMouseClicks && !settings.useHDR
             )
-            _ = try RecordingRecoveryJournal.write(
-                mediaURL: outputURL,
-                manifest: manifest
-            )
-
             let recorder = MultitrackRecorder()
             let transcriptionConfiguration = transcription.makeCaptureConfiguration(
                 systemAudio: settings.includeSystemAudio,
                 microphone: settings.includeMicrophone
-            )
-            transcription.beginLive(
-                configuration: transcriptionConfiguration,
-                microphoneName: selectedMicrophoneName
             )
             let liveRouter = transcription.liveRouter
             recorder.onStarted = { [weak self] in
@@ -896,7 +970,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                     self.state = .recording
                     self.boundaryController.setRecording(true)
                     self.beginMouseFollowZoomCapture()
-                    self.beginMetering()
                 }
             }
             recorder.onFailure = { [weak self] error in
@@ -933,24 +1006,81 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                     }
                 }
             }
-            recorder.onAudioPacket = { role, packet in
-                Task { await liveRouter.ingest(packet, role: role) }
+            recorder.onCameraEffectsChanged = { [weak self] effects in
+                Task { @MainActor in
+                    guard let self, self.isCurrentSession(generation) else { return }
+                    self.cameraVideoEffects = effects
+                }
             }
             multitrackRecorder = recorder
-            activeOutputURL = outputURL
             activeRecordingManifest = manifest
             activeTranscriptionConfiguration = transcriptionConfiguration
-            try await recorder.start(
+            try await recorder.prepare(
                 filter: filter,
                 configuration: streamConfiguration,
-                outputURL: outputURL,
                 options: options
             )
             guard isCurrentSession(generation), !Task.isCancelled else {
                 await recorder.cancel()
                 return
             }
-            recordingStartTask = nil
+
+            // Model setup and preview use the same already-authorized streams.
+            // No audio packets are routed until the writer is armed at zero.
+            let liveRoute = await transcription.beginLive(
+                configuration: transcriptionConfiguration,
+                microphoneName: selectedMicrophoneName
+            )
+            recorder.onAudioPacket = { role, packet in
+                guard let liveRoute else { return }
+                Task {
+                    await liveRouter.ingest(
+                        packet,
+                        role: role,
+                        route: liveRoute
+                    )
+                }
+            }
+            recorder.onAudioPacketFailure = { [weak self] role, message in
+                Task { @MainActor in
+                    guard let self, self.isCurrentSession(generation) else { return }
+                    self.transcription.reportLiveTransportFailure(role: role, message: message)
+                }
+            }
+            beginMetering()
+            for remaining in stride(from: countdownSeconds, through: 1, by: -1) {
+                guard isCurrentSession(generation), !Task.isCancelled else {
+                    await recorder.cancel()
+                    return
+                }
+                state = .countingDown(remaining)
+                try await Task.sleep(for: .seconds(1))
+            }
+            guard isCurrentSession(generation), !Task.isCancelled else {
+                await recorder.cancel()
+                return
+            }
+
+            state = .starting
+            recordingLease = try RecordingSessionLease.acquire(
+                in: outputURL.deletingLastPathComponent()
+            )
+            let finalAvailableBytes = try RecordingStoragePolicy.availableBytes(
+                at: outputURL.deletingLastPathComponent()
+            )
+            try RecordingStoragePolicy.validatePreflight(
+                availableBytes: finalAvailableBytes,
+                options: options
+            )
+            activeOutputURL = outputURL
+            guard let preparedManifest = activeRecordingManifest else {
+                throw CaptureError.sourceUnavailable
+            }
+            _ = try RecordingRecoveryJournal.write(
+                mediaURL: outputURL,
+                manifest: preparedManifest
+            )
+            try recorder.beginRecording(outputURL: outputURL, options: options)
         } catch {
             guard isCurrentSession(generation), !Task.isCancelled else { return }
             recordingStartTask = nil
@@ -1044,6 +1174,18 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
+    private var selectedCameraDevice: AVCaptureDevice? {
+        let devices = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .continuityCamera, .deskViewCamera, .external],
+            mediaType: .video,
+            position: .unspecified
+        ).devices
+        if let id = settings.selectedCameraID {
+            return devices.first { $0.uniqueID == id }
+        }
+        return AVCaptureDevice.default(for: .video)
+    }
+
     private func makeOutputURL(fileExtension: String) throws -> URL {
         let directory = library.directoryURL
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1096,11 +1238,13 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 sampleMouseFollowZoom(at: metrics.duration)
                 appendLevel(metrics.systemAudioLevel, to: &systemAudioHistory)
                 appendLevel(metrics.microphoneLevel, to: &microphoneAudioHistory)
-                boundaryController.setRecording(
-                    true,
-                    isPaused: state == .paused,
-                    duration: metrics.duration
-                )
+                if state == .recording || state == .paused {
+                    boundaryController.setRecording(
+                        true,
+                        isPaused: state == .paused,
+                        duration: metrics.duration
+                    )
+                }
                 if storageCheckTick == 0,
                    shouldStopForStorageReserve()
                 {
@@ -1363,8 +1507,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         recordingLease = nil
         sessionGeneration &+= 1
         deactivateSystemPicker()
-        countdownTask?.cancel()
-        countdownTask = nil
         recordingStartTask?.cancel()
         recordingStartTask = nil
         recordingStopTask = nil
@@ -1567,6 +1709,8 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     func installActiveMonitorQAScenario() {
         suppressesPermissionRefreshForQA = true
         directCapturePermission = .granted
+        cameraPermission = .authorized
+        settings.includeCamera = true
         installActiveMenuBarQAScenario()
         recordedDuration = 9
         recordedFileSize = 8_400_000
@@ -1604,6 +1748,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         suppressesPermissionRefreshForQA = true
         directCapturePermission = .granted
         microphonePermission = .authorized
+        cameraPermission = .authorized
         selectedSourceKind = .application
         hasSelectedSource = true
         selectedSource = Self.qaApplicationSource

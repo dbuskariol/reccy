@@ -57,6 +57,122 @@ struct ReccyTests {
         #expect(CaptureFailureContext.screenshot.title == "Screenshot couldn’t be saved")
     }
 
+    @Test func mediaImporterCopiesAndSeparatesLinkedVideoAndAudioTracks() async throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Media Import \(UUID().uuidString)", isDirectory: true)
+        let packageURL = directoryURL.appendingPathComponent("Project.reccyproject", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+        let fixtureURL = try await makeExportFixture(audioTrackCount: 1)
+        defer { try? FileManager.default.removeItem(at: fixtureURL) }
+        let originalBytes = try Data(contentsOf: fixtureURL)
+
+        let result = try await TimelineMediaImporter().prepare(
+            urls: [fixtureURL],
+            packageURL: packageURL,
+            timelineStart: 1.25,
+            canvasSize: CGSize(width: 1920, height: 1080),
+            frameRate: 30
+        )
+
+        let videoLane = try #require(result.lanes.first(where: { $0.kind == .importedVideo }))
+        let audioLane = try #require(result.lanes.first(where: { $0.kind == .importedAudio }))
+        let videoClip = try #require(videoLane.clips.first)
+        let audioClip = try #require(audioLane.clips.first)
+        #expect(videoClip.sourceURL == audioClip.sourceURL)
+        #expect(videoClip.sourceURL != fixtureURL)
+        #expect(videoClip.linkedGroupID != nil)
+        #expect(videoClip.linkedGroupID == audioClip.linkedGroupID)
+        #expect(abs(videoClip.timelineStart - 1.25) < 0.001)
+        #expect(FileManager.default.fileExists(atPath: videoClip.sourceURL.path))
+        #expect(try Data(contentsOf: fixtureURL) == originalBytes)
+    }
+
+    @Test func imageImportUsesBoundedProxyAndBuildsEditableStillOverlay() async throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Image Import \(UUID().uuidString)", isDirectory: true)
+        let packageURL = directoryURL.appendingPathComponent("Project.reccyproject", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+        let imageURL = directoryURL.appendingPathComponent("Overlay.png")
+        let context = try #require(CGContext(
+            data: nil,
+            width: 80,
+            height: 40,
+            bitsPerComponent: 8,
+            bytesPerRow: 80 * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(CGColor(red: 0.8, green: 0.1, blue: 0.6, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 80, height: 40))
+        try ScreenshotFileWriter.write(
+            try #require(context.makeImage()),
+            to: imageURL,
+            contentType: .png
+        )
+        let originalBytes = try Data(contentsOf: imageURL)
+
+        let result = try await TimelineMediaImporter().prepare(
+            urls: [imageURL],
+            packageURL: packageURL,
+            timelineStart: 2,
+            canvasSize: CGSize(width: 64, height: 64),
+            frameRate: 30
+        )
+        let importedLane = try #require(result.lanes.first)
+        let importedClip = try #require(importedLane.clips.first)
+        #expect(importedLane.kind == .importedVideo)
+        #expect(importedClip.stillImageOriginalURL != nil)
+        #expect(importedClip.stillImageOriginalURL != imageURL)
+        #expect(abs(importedClip.duration - 5) < 0.001)
+        let editableDuration = try #require(result.sourceDurations[importedClip.sourceURL])
+        #expect(abs(editableDuration - 24 * 60 * 60) < 0.001)
+        #expect(try Data(contentsOf: imageURL) == originalBytes)
+
+        let proxyAsset = AVURLAsset(url: importedClip.sourceURL)
+        let proxyDuration = try await proxyAsset.load(.duration).seconds
+        #expect(proxyDuration < 0.2)
+
+        let primaryURL = try await makeColorTestVideo(size: CGSize(width: 64, height: 64))
+        defer { try? FileManager.default.removeItem(at: primaryURL) }
+        let primaryAsset = AVURLAsset(url: primaryURL)
+        let primaryTrack = try #require(try await primaryAsset.loadTracks(withMediaType: .video).first)
+        let project = TimelineProject(
+            name: "Still Import",
+            frameRate: 30,
+            lanes: [
+                TimelineLane(
+                    kind: .video,
+                    name: "Screen",
+                    clips: [TimelineClip(
+                        sourceURL: primaryURL,
+                        sourceTrackID: primaryTrack.trackID,
+                        sourceStart: 0,
+                        timelineStart: 0,
+                        duration: 3,
+                        name: "Screen",
+                        linkedGroupID: nil
+                    )]
+                ),
+                importedLane,
+            ]
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        #expect(build.videoComposition != nil)
+        #expect(abs(build.composition.duration.seconds - 7) < 0.05)
+
+        let rendered = try await renderedColor(
+            at: 4,
+            composition: build.composition,
+            videoComposition: build.videoComposition
+        )
+        #expect(rendered.red > 150)
+        #expect(rendered.blue > 100)
+    }
+
     @Test func audioReaderProducesExactTrackPCMForTranscription() async throws {
         let url = try makeWaveformTestAudio(duration: 1) { frame, sampleRate in
             Float(sin(2 * Double.pi * 440 * Double(frame) / sampleRate) * 0.25)
@@ -98,15 +214,96 @@ struct ReccyTests {
         buffer.frameLength = 1
         let packet = TimedAudioBuffer(buffer: buffer, startTime: .zero)
         let router = LiveTranscriptionRouter()
+        let route = LiveTranscriptionRoute()
+        await router.begin(route: route)
 
         for _ in 0...1_500 {
-            await router.ingest(packet, role: .microphone)
+            await router.ingest(packet, role: .microphone, route: route)
         }
 
         let session = CountingLiveTranscriptionSession(role: .microphone)
-        await router.install([.microphone: session])
+        await router.install([.microphone: session], route: route)
         #expect(await session.ingestedPacketCount == 1_500)
-        await router.cancel()
+        await router.cancel(route: route)
+    }
+
+    @Test func staleLiveTranscriptionCancellationCannotClearTheNextRecording() async throws {
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1))
+        buffer.frameLength = 1
+        let packet = TimedAudioBuffer(buffer: buffer, startTime: .zero)
+        let router = LiveTranscriptionRouter()
+        let oldRoute = LiveTranscriptionRoute()
+        let currentRoute = LiveTranscriptionRoute()
+        let oldSession = CountingLiveTranscriptionSession(role: .microphone)
+        let currentSession = CountingLiveTranscriptionSession(role: .microphone)
+
+        await router.begin(route: oldRoute)
+        await router.install([.microphone: oldSession], route: oldRoute)
+        await router.begin(route: currentRoute)
+        await router.install([.microphone: currentSession], route: currentRoute)
+        await router.cancel(route: oldRoute)
+        await router.ingest(packet, role: .microphone, route: oldRoute)
+        await router.ingest(packet, role: .microphone, route: currentRoute)
+
+        #expect(await oldSession.ingestedPacketCount == 0)
+        #expect(await currentSession.ingestedPacketCount == 1)
+        await router.cancel(route: currentRoute)
+    }
+
+    @Test @MainActor func transcriptionControllerPublishesRoutedAudioInTheMonitorBeforeFinish() async throws {
+        let suiteName = "ReccyTests.LiveMonitor.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let modelDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Live Monitor Models \(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: modelDirectory) }
+        let engine = EmittingLiveTranscriptionEngine()
+        let controller = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory),
+            engineOverride: { _, _ in engine }
+        )
+        let configuration = CaptureTranscriptionConfiguration(
+            isEnabled: true,
+            provider: .appleSpeech,
+            localeIdentifier: "en-AU",
+            whisperModelIdentifier: WhisperModelManager.defaultModel,
+            createsLiveTranscript: true,
+            automaticallyTranscribes: false,
+            includesSystemAudio: false,
+            includesMicrophone: true
+        )
+        let route = try #require(await controller.beginLive(
+            configuration: configuration,
+            microphoneName: "Test Microphone"
+        ))
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1))
+        buffer.frameLength = 1
+        await controller.liveRouter.ingest(
+            TimedAudioBuffer(buffer: buffer, startTime: .zero),
+            role: .microphone,
+            route: route
+        )
+
+        for _ in 0..<100 where controller.liveUpdates[.microphone] == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let update = try #require(controller.liveUpdates[.microphone])
+        #expect(update.volatileSegments.map(\.text) == ["Visible while recording"])
+        controller.cancelLive()
     }
 
     @Test func transcriptionBatchKeepsSpokenTrackWhenAnotherSourceHasNoSpeech() async throws {
@@ -652,7 +849,7 @@ struct ReccyTests {
         #expect(cues[0].text == "– Remote speaker\n– Local reply")
     }
 
-    @Test func legacyTimelineProjectDecodesWithoutCaptionTrack() throws {
+    @Test func legacyTimelineProjectDecodesWithoutCaptionOrPosterFrame() throws {
         let project = makeProject()
         let encoder = JSONEncoder()
         var object = try #require(
@@ -660,12 +857,29 @@ struct ReccyTests {
         )
         object["formatVersion"] = 3
         object.removeValue(forKey: "captionTrack")
+        object.removeValue(forKey: "posterFrameTime")
         let legacyData = try JSONSerialization.data(withJSONObject: object)
 
         let decoded = try JSONDecoder().decode(TimelineProject.self, from: legacyData)
 
         #expect(decoded.formatVersion == 3)
         #expect(decoded.captionTrack == nil)
+        #expect(decoded.posterFrameTime == nil)
+        #expect(decoded.effectivePosterFrameTime == 0)
+    }
+
+    @Test func timelinePosterFrameUsesAValidComposedFrameBoundary() {
+        var project = makeProject()
+
+        project.setPosterFrame(at: 3.25)
+        #expect(project.posterFrameTime == 3.25)
+        #expect(project.effectivePosterFrameTime == 3.25)
+
+        project.setPosterFrame(at: 500)
+        #expect(project.effectivePosterFrameTime == project.duration - project.frameDuration)
+
+        project.setPosterFrame(at: -10)
+        #expect(project.effectivePosterFrameTime == 0)
     }
 
     @Test func transcriptStoreRoundTripsAnAtomicSidecar() async throws {
@@ -921,6 +1135,12 @@ struct ReccyTests {
         #expect(CaptureState.starting.stopButtonTitle == "Cancel Start")
         #expect(CaptureState.recording.stopButtonTitle == "Stop Recording")
         #expect(CaptureState.stopping.stopButtonTitle == "Finishing…")
+
+        #expect(!CaptureState.countingDown(3).requiresStopConfirmation)
+        #expect(!CaptureState.starting.requiresStopConfirmation)
+        #expect(CaptureState.recording.requiresStopConfirmation)
+        #expect(CaptureState.paused.requiresStopConfirmation)
+        #expect(!CaptureState.stopping.requiresStopConfirmation)
     }
 
     @Test func captureCompletionRoutesOnlySavedMediaToPostRecordingDestinations() {
@@ -1201,6 +1421,69 @@ struct ReccyTests {
         ])
     }
 
+    @Test func libraryRecordingSelectionSupportsCommandToggleAndShiftRange() {
+        let ids = ["A", "B", "C", "D", "E"].map {
+            URL(fileURLWithPath: "/recordings/\($0).mp4")
+        }
+        var selection = LibraryRecordingSelection()
+
+        selection.select(ids[1], from: ids, intent: .replace)
+        selection.select(ids[3], from: ids, intent: .extend(additive: false))
+
+        #expect(selection.selectedIDs == Set(ids[1...3]))
+        #expect(selection.primaryID == ids[3])
+        #expect(selection.anchorID == ids[1])
+
+        selection.select(ids[4], from: ids, intent: .toggle)
+        #expect(selection.selectedIDs == Set(ids[1...4]))
+        #expect(selection.primaryID == ids[4])
+        #expect(selection.anchorID == ids[4])
+
+        selection.select(ids[2], from: ids, intent: .extend(additive: true))
+        #expect(selection.selectedIDs == Set(ids[1...4]))
+        #expect(selection.primaryID == ids[2])
+        #expect(selection.anchorID == ids[4])
+
+        selection.select(ids[4], from: ids, intent: .toggle)
+        #expect(selection.selectedIDs == Set(ids[1...3]))
+        #expect(selection.primaryID == ids[2])
+        #expect(selection.anchorID == ids[2])
+    }
+
+    @Test func libraryRecordingSelectionReconcilesHiddenAndDeletedRows() {
+        let first = URL(fileURLWithPath: "/recordings/A.mp4")
+        let second = URL(fileURLWithPath: "/recordings/B.mp4")
+        let third = URL(fileURLWithPath: "/recordings/C.mp4")
+        var selection = LibraryRecordingSelection()
+        selection.select(second, from: [first, second, third], intent: .replace)
+        selection.select(third, from: [first, second, third], intent: .toggle)
+
+        selection.reconcile(with: [first, third], selectsFirstIfEmpty: true)
+        #expect(selection.selectedIDs == [third])
+        #expect(selection.primaryID == third)
+        #expect(selection.anchorID == third)
+
+        selection.reconcile(with: [first], selectsFirstIfEmpty: true)
+        #expect(selection.selectedIDs == [first])
+        #expect(selection.primaryID == first)
+        #expect(selection.anchorID == first)
+
+        selection.selectAll([first, second, third])
+        #expect(selection.selectedIDs == [first, second, third])
+        #expect(selection.primaryID == first)
+        #expect(selection.anchorID == first)
+
+        selection.clear(keepingPrimary: true)
+        #expect(selection.selectedIDs.isEmpty)
+        #expect(selection.primaryID == first)
+        #expect(selection.anchorID == nil)
+
+        selection.clear()
+        #expect(selection.selectedIDs.isEmpty)
+        #expect(selection.primaryID == nil)
+        #expect(selection.anchorID == nil)
+    }
+
     @Test @MainActor func unsupportedEditorProjectCanResetWithoutTouchingSourceMedia() async throws {
         let mediaURL = try await makeColorTestVideo()
         let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
@@ -1440,6 +1723,86 @@ struct ReccyTests {
         #expect(finalStart == 2)
         #expect(project.lanes[0].clips[0].timelineStart == 2)
         #expect(project.lanes[1].clips[0].timelineStart == 2)
+    }
+
+    @Test func clipMovementCannotCrossBeforeTimelineZero() {
+        var project = makeProject()
+        let videoID = project.lanes[0].clips[0].id
+
+        let finalStart = project.moveClip(id: videoID, to: -4)
+
+        #expect(finalStart == 0)
+        #expect(project.lanes[0].clips[0].timelineStart == 0)
+        #expect(project.lanes[1].clips[0].timelineStart == 0)
+    }
+
+    @Test func linkedClipMovementCannotMoveAnyTrackBeforeTimelineZero() {
+        var project = makeProject()
+        let videoID = project.lanes[0].clips[0].id
+
+        let finalStart = project.moveClip(id: videoID, to: -4, includeLinked: true)
+
+        #expect(finalStart == 0)
+        #expect(project.lanes[0].clips[0].timelineStart == 0)
+        #expect(project.lanes[1].clips[0].timelineStart == 0)
+    }
+
+    @Test func malformedImportedLaneIsNormalizedAtTimelineZeroWithoutOverlap() {
+        let first = TimelineClip(
+            sourceURL: URL(fileURLWithPath: "/tmp/import-one.mov"),
+            sourceTrackID: 1,
+            sourceStart: 0,
+            timelineStart: -2,
+            duration: 3,
+            name: "Import One",
+            linkedGroupID: nil
+        )
+        let second = TimelineClip(
+            sourceURL: URL(fileURLWithPath: "/tmp/import-two.mov"),
+            sourceTrackID: 1,
+            sourceStart: 0,
+            timelineStart: 0.5,
+            duration: 2,
+            name: "Import Two",
+            linkedGroupID: nil
+        )
+
+        let project = TimelineProject(
+            name: "Imported Bounds",
+            lanes: [TimelineLane(kind: .importedVideo, name: "Imported", clips: [first, second])]
+        )
+
+        #expect(project.lanes[0].clips.map(\.timelineStart) == [0, 3])
+        #expect(project.lanes[0].clips.allSatisfy { $0.timelineStart >= 0 })
+    }
+
+    @Test func mouseFollowZoomMovementPreservesDurationAndCannotCrossBounds() {
+        var project = makeProject()
+        let first = MouseFollowZoomSegment(
+            timelineStart: 1,
+            duration: 2,
+            zoomScale: 2,
+            points: [
+                MouseFollowZoomPoint(timelineTime: 1, position: CGPoint(x: 0.2, y: 0.3)),
+                MouseFollowZoomPoint(timelineTime: 3, position: CGPoint(x: 0.8, y: 0.7)),
+            ]
+        )
+        let second = MouseFollowZoomSegment(
+            timelineStart: 5,
+            duration: 2,
+            zoomScale: 3,
+            points: []
+        )
+        project.mouseFollowZoomTrack = MouseFollowZoomTrack(segments: [first, second])
+
+        let earliest = project.moveMouseFollowZoomSegment(id: first.id, to: -4)
+        #expect(earliest == 0)
+        #expect(project.mouseFollowZoomSegment(id: first.id)?.duration == 2)
+        #expect(project.mouseFollowZoomSegment(id: first.id)?.points.map(\.timelineTime) == [0, 2])
+
+        let latest = project.moveMouseFollowZoomSegment(id: first.id, to: 10)
+        #expect(latest == 3)
+        #expect(project.mouseFollowZoomSegment(id: first.id)?.timelineEnd == 5)
     }
 
     @Test func crossingAClipMagneticallyReordersItAfterItsNeighbour() {
@@ -1708,6 +2071,26 @@ struct ReccyTests {
 
         #expect(format.width == 1_280)
         #expect(format.height == 720)
+    }
+
+    @Test func cameraEffectsStateReportsNativeAvailabilityAndActiveEffectsTruthfully() {
+        let effects = WebcamVideoEffectsState(
+            supportsPortrait: true,
+            isPortraitActive: true,
+            supportsBackgroundReplacement: true,
+            isBackgroundReplacementActive: false
+        )
+
+        #expect(effects.supportsAnyEffect)
+        #expect(effects.activeTitles == ["Portrait"])
+
+        let background = WebcamVideoEffectsState(
+            supportsPortrait: true,
+            isPortraitActive: false,
+            supportsBackgroundReplacement: true,
+            isBackgroundReplacementActive: true
+        )
+        #expect(background.activeTitles == ["Background"])
     }
 
     @Test func cameraTailPaddingClosesOnlyMaterialEndDrift() throws {
@@ -3212,7 +3595,7 @@ struct ReccyTests {
             zoomScale: 8,
             position: CGPoint(x: -0.2, y: 1.4)
         )
-        #expect(session.currentScale == 4)
+        #expect(session.currentScale == 6)
         session.sample(at: 1.25, position: CGPoint(x: 1, y: 0))
         session.end(at: 2)
         let finishedTrack = session.finish(at: 2)
@@ -3224,12 +3607,37 @@ struct ReccyTests {
         #expect(track.segments.count == 1)
         #expect(segment.timelineStart == 1)
         #expect(segment.duration == 1)
-        #expect(segment.zoomScale == 4)
+        #expect(segment.zoomScale == 6)
         #expect(segment.points.first?.position == CGPoint(x: 0, y: 1))
         #expect(segment.points.last?.timelineTime == 2)
         #expect(segment.points.allSatisfy {
             (0...1).contains($0.x) && (0...1).contains($0.y)
         })
+    }
+
+    @Test func mouseFollowZoomOffersGranularNativeLevelsAndChangesScaleAtTheLiveClock() throws {
+        #expect(MouseFollowZoomLevel.allCases.map(\.rawValue) == [
+            1.25, 1.5, 1.75, 2, 2.25, 2.5, 3, 3.5, 4, 5, 6,
+        ])
+        #expect(MouseFollowZoomLevel.allCases.map(\.title) == [
+            "1.25×", "1.5×", "1.75×", "2×", "2.25×", "2.5×",
+            "3×", "3.5×", "4×", "5×", "6×",
+        ])
+
+        var session = MouseFollowZoomCaptureSession()
+        session.begin(at: 1, zoomScale: 1.5, position: CGPoint(x: 0.2, y: 0.3))
+        session.sample(at: 1.75, position: CGPoint(x: 0.4, y: 0.5))
+        session.changeScale(at: 2, zoomScale: 3.5, position: CGPoint(x: 0.6, y: 0.7))
+        let finishedTrack = session.finish(at: 3)
+        let track = try #require(finishedTrack)
+
+        #expect(track.segments.count == 2)
+        #expect(track.segments.map(\.timelineStart) == [1, 2])
+        #expect(track.segments.map(\.timelineEnd) == [2, 3])
+        #expect(track.segments.map(\.zoomScale) == [1.5, 3.5])
+        let boundary = try #require(track.segments[0].points.last?.position)
+        #expect(boundary == CGPoint(x: 0.264, y: 0.364))
+        #expect(track.segments[1].points.first?.position == boundary)
     }
 
     @Test func mouseFollowZoomFocusInterpolatesAnOrderedDecodedPath() throws {
@@ -3280,7 +3688,7 @@ struct ReccyTests {
 
         #expect(overlappingSegmentID == nil)
         project.setMouseFollowZoomScale(9, segmentID: segmentID)
-        #expect(project.mouseFollowZoomSegment(id: segmentID)?.zoomScale == 4)
+        #expect(project.mouseFollowZoomSegment(id: segmentID)?.zoomScale == 6)
         #expect(project.trimMouseFollowZoomSegment(
             id: segmentID,
             edge: .leading,
@@ -3955,11 +4363,14 @@ struct ReccyTests {
         let postRecordingTrack = try await engine.transcribe(request) { _ in }
         assertSpeechTranscript(postRecordingTrack)
 
+        let liveProbe = LiveTranscriptUpdateProbe()
         let liveSession = try await engine.makeLiveSession(
             role: liveRole,
             name: "Synthesized Speech",
             localeIdentifier: localeIdentifier
-        ) { _ in }
+        ) { update in
+            Task { await liveProbe.record(update) }
+        }
         let sourceFormat = try #require(AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16_000,
@@ -3974,6 +4385,14 @@ struct ReccyTests {
         for try await packet in packets {
             await liveSession.ingest(packet)
         }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while await liveProbe.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(
+            !(await liveProbe.isEmpty),
+            "The live engine must publish words before finish so Monitor can render them during capture."
+        )
         let liveTrack = try await liveSession.finish(sourceTrackID: sourceTrack.trackID)
         assertSpeechTranscript(liveTrack)
     }
@@ -4108,6 +4527,73 @@ private actor CountingLiveTranscriptionSession: LiveTranscriptionSession {
     func cancel() {}
 }
 
+private actor EmittingLiveTranscriptionEngine: TranscriptionEngine {
+    nonisolated let provider = TranscriptionProvider.appleSpeech
+
+    func availability(localeIdentifier: String) -> TranscriptionEngineAvailability { .ready }
+
+    func prepare(
+        localeIdentifier: String,
+        progress: @escaping @Sendable (TranscriptionProgressUpdate) -> Void
+    ) {}
+
+    func transcribe(
+        _ request: TranscriptionTrackRequest,
+        progress: @escaping @Sendable (TranscriptionProgressUpdate) -> Void
+    ) throws -> TranscriptTrack {
+        throw TranscriptionEngineError.providerUnavailable("Not used by this test.")
+    }
+
+    func makeLiveSession(
+        role: TranscriptTrackRole,
+        name: String,
+        localeIdentifier: String,
+        update: @escaping @Sendable (LiveTranscriptUpdate) -> Void
+    ) -> any LiveTranscriptionSession {
+        EmittingLiveTranscriptionSession(role: role, update: update)
+    }
+}
+
+private actor EmittingLiveTranscriptionSession: LiveTranscriptionSession {
+    nonisolated let role: TranscriptTrackRole
+    private let update: @Sendable (LiveTranscriptUpdate) -> Void
+
+    init(
+        role: TranscriptTrackRole,
+        update: @escaping @Sendable (LiveTranscriptUpdate) -> Void
+    ) {
+        self.role = role
+        self.update = update
+    }
+
+    func ingest(_ packet: TimedAudioBuffer) {
+        update(LiveTranscriptUpdate(
+            role: role,
+            finalizedSegments: [],
+            volatileSegments: [TranscriptSegment(
+                text: "Visible while recording",
+                sourceStart: packet.startTime.seconds,
+                duration: 0.5,
+                words: []
+            )]
+        ))
+    }
+
+    func finish(sourceTrackID: Int32) -> TranscriptTrack {
+        TranscriptTrack(
+            sourceTrackID: sourceTrackID,
+            role: role,
+            name: role.title,
+            provider: .appleSpeech,
+            localeIdentifier: "en-AU",
+            modelIdentifier: "test",
+            segments: []
+        )
+    }
+
+    func cancel() {}
+}
+
 private actor SelectiveTranscriptionEngine: TranscriptionEngine {
     nonisolated let provider = TranscriptionProvider.appleSpeech
     private let failingRoles: Set<TranscriptTrackRole>
@@ -4165,4 +4651,14 @@ private enum TestMediaError: Error {
     case cannotCreatePixelBuffer
     case speechSynthesisFailed(Int32)
     case writerFailed
+}
+
+private actor LiveTranscriptUpdateProbe {
+    private var updates: [LiveTranscriptUpdate] = []
+
+    var isEmpty: Bool { updates.isEmpty }
+
+    func record(_ update: LiveTranscriptUpdate) {
+        updates.append(update)
+    }
 }

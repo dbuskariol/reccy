@@ -11,6 +11,37 @@ nonisolated struct WebcamCaptureFormat: Equatable, Sendable {
     let height: Int
 }
 
+/// A truthful snapshot of Apple's system-owned camera effects. Reccy never
+/// segments or replaces the background itself; the same native effects that the
+/// user chooses in macOS are applied by AVFoundation to preview and recorded
+/// camera samples before they enter Reccy's independent camera track.
+nonisolated struct WebcamVideoEffectsState: Equatable, Sendable {
+    var supportsPortrait = false
+    var isPortraitActive = false
+    var supportsBackgroundReplacement = false
+    var isBackgroundReplacementActive = false
+
+    var activeTitles: [String] {
+        [
+            isPortraitActive ? "Portrait" : nil,
+            isBackgroundReplacementActive ? "Background" : nil,
+        ].compactMap { $0 }
+    }
+
+    var supportsAnyEffect: Bool {
+        supportsPortrait || supportsBackgroundReplacement
+    }
+
+    static func snapshot(for device: AVCaptureDevice) -> WebcamVideoEffectsState {
+        WebcamVideoEffectsState(
+            supportsPortrait: device.activeFormat.isPortraitEffectSupported,
+            isPortraitActive: device.isPortraitEffectActive,
+            supportsBackgroundReplacement: device.activeFormat.isBackgroundReplacementSupported,
+            isBackgroundReplacementActive: device.isBackgroundReplacementActive
+        )
+    }
+}
+
 nonisolated enum WebcamCaptureError: LocalizedError {
     case deviceUnavailable
     case cannotAddInput
@@ -40,6 +71,7 @@ nonisolated enum WebcamCaptureError: LocalizedError {
 /// screen/audio writer work while all writer mutations remain deterministic.
 nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
     typealias SampleHandler = @Sendable (CMSampleBuffer) -> Void
+    typealias EffectsHandler = @Sendable (WebcamVideoEffectsState) -> Void
 
     private let session = AVCaptureSession()
     private let output = AVCaptureVideoDataOutput()
@@ -53,6 +85,7 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
     )
     private let deliveryQueue: DispatchQueue
     private let sampleHandler: SampleHandler
+    private let effectsHandler: EffectsHandler?
     private let logger = Logger(subsystem: "com.reccy.mac", category: "Camera")
     private let sampleStateLock = NSLock()
     private var isConfigured = false
@@ -60,10 +93,16 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
     private var deliveredFormat: WebcamCaptureFormat?
     private var deliversSamples = false
     private var acceptsSamples = true
+    private var effectsObservations: [NSKeyValueObservation] = []
 
-    init(deliveryQueue: DispatchQueue, sampleHandler: @escaping SampleHandler) {
+    init(
+        deliveryQueue: DispatchQueue,
+        sampleHandler: @escaping SampleHandler,
+        effectsHandler: EffectsHandler? = nil
+    ) {
         self.deliveryQueue = deliveryQueue
         self.sampleHandler = sampleHandler
+        self.effectsHandler = effectsHandler
         super.init()
     }
 
@@ -193,7 +232,20 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
         withSampleStateLock {
             deviceIdentity = (device.uniqueID, device.localizedName)
         }
+        observeVideoEffects(on: device)
         isConfigured = true
+    }
+
+    private func observeVideoEffects(on device: AVCaptureDevice) {
+        let publish: @Sendable () -> Void = { [weak self, weak device] in
+            guard let self, let device else { return }
+            effectsHandler?(WebcamVideoEffectsState.snapshot(for: device))
+        }
+        effectsObservations = [
+            device.observe(\.isPortraitEffectActive, options: [.initial, .new]) { _, _ in publish() },
+            device.observe(\.isBackgroundReplacementActive, options: [.initial, .new]) { _, _ in publish() },
+            device.observe(\.activeFormat, options: [.new]) { _, _ in publish() },
+        ]
     }
 
     static func captureFormat(

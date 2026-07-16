@@ -18,6 +18,7 @@ struct EditorView: View {
     @State private var confirmsCaptionReplacement = false
     @State private var showsVoiceoverInputPopover = false
     @State private var playbackSyncTask: Task<Void, Never>?
+    @State private var timelineVerticalScrollOffset: CGFloat = 0
 
     private let trackHeaderWidth: CGFloat = 176
     private let rulerHeight: CGFloat = 32
@@ -47,6 +48,7 @@ struct EditorView: View {
         .toolbar {
             ToolbarSpacer(.flexible)
             ToolbarItemGroup(placement: .primaryAction) {
+                saveProjectToolbarButton
                 exportToolbarButton
             }
         }
@@ -173,25 +175,26 @@ struct EditorView: View {
                 NativeVideoPlayer(player: editor.player)
                     .background(.black)
 
-                if let cameraClip = editor.activeCameraClip,
-                   editor.previewRenderSize.width > 0,
+                if editor.previewRenderSize.width > 0,
                    editor.previewRenderSize.height > 0
                 {
-                    CameraOverlayManipulator(
-                        clip: cameraClip,
-                        renderSize: editor.previewRenderSize,
-                        isSelected: editor.selectedClipID == cameraClip.id,
-                        onSelect: {
-                            guard editor.selectedClipID != cameraClip.id else { return }
-                            editor.select(cameraClip, at: editor.playhead)
-                        },
-                        onCommit: { layout in
-                            editor.setVideoLayout(layout, clipID: cameraClip.id)
-                        },
-                        onReset: {
-                            editor.resetVideoLayout(clipID: cameraClip.id)
-                        }
-                    )
+                    ForEach(editor.activeOverlayVideoClips) { clip in
+                        VideoOverlayManipulator(
+                            clip: clip,
+                            renderSize: editor.previewRenderSize,
+                            isSelected: editor.selectedClipID == clip.id,
+                            onSelect: {
+                                guard editor.selectedClipID != clip.id else { return }
+                                editor.select(clip, at: editor.playhead)
+                            },
+                            onCommit: { layout in
+                                editor.setVideoLayout(layout, clipID: clip.id)
+                            },
+                            onReset: {
+                                editor.resetVideoLayout(clipID: clip.id)
+                            }
+                        )
+                    }
                 }
 
                 if let captionTrack = project.captionTrack {
@@ -259,6 +262,19 @@ struct EditorView: View {
 
             Spacer()
 
+            transportButton(
+                "photo.badge.checkmark",
+                help: "Use Current Frame as Poster"
+            ) {
+                editor.useCurrentFrameAsPoster()
+                if let sourceURL = editor.sourceRecordingURL,
+                   let item = coordinator.library.recordings.first(where: { $0.url == sourceURL })
+                {
+                    Task { await coordinator.library.refreshThumbnail(for: item) }
+                }
+            }
+            .help("Use this composed frame for previews throughout Reccy")
+
             if editor.isRebuilding {
                 ProgressView()
                     .controlSize(.small)
@@ -291,31 +307,94 @@ struct EditorView: View {
             timelineToolbar
             Divider()
 
-            HStack(alignment: .top, spacing: 0) {
-                trackHeaders(project)
+            GeometryReader { geometry in
+                let paddingDuration = max(4, 480 / max(editor.pixelsPerSecond, 1))
+                let canvasDuration = max(project.duration + paddingDuration, 12)
+                let trackWidth = canvasDuration * editor.pixelsPerSecond
+                let rowsHeight = timelineRowsHeight(project)
+                let visibleRowsHeight = max(geometry.size.height - rulerHeight - 1, 0)
+                let maximumVerticalOffset = max(rowsHeight - visibleRowsHeight, 0)
+
+                HStack(spacing: 0) {
+                    VStack(spacing: 0) {
+                        Text("TRACKS")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .frame(height: rulerHeight)
+
+                        Divider()
+
+                        GeometryReader { _ in
+                            trackHeaderRows(project)
+                                .frame(
+                                    width: trackHeaderWidth,
+                                    height: rowsHeight,
+                                    alignment: .top
+                                )
+                                .offset(
+                                    y: -min(
+                                        max(timelineVerticalScrollOffset, 0),
+                                        maximumVerticalOffset
+                                    )
+                                )
+                        }
+                        .clipped()
+                    }
                     .frame(width: trackHeaderWidth)
+                    .background(.bar.opacity(0.72))
 
-                Divider()
+                    Divider()
 
-                ScrollView(.horizontal) {
-                    timelineCanvas(project)
+                    ScrollView(.horizontal) {
+                        VStack(spacing: 0) {
+                            ZStack(alignment: .topLeading) {
+                                ruler(width: trackWidth, duration: canvasDuration)
+
+                                TimelinePlayhead()
+                                    .frame(height: rulerHeight)
+                                    .offset(x: editor.playhead * editor.pixelsPerSecond - 5)
+                                    .allowsHitTesting(false)
+                                    .zIndex(20)
+                            }
+                            .frame(width: trackWidth, height: rulerHeight, alignment: .topLeading)
+
+                            Divider()
+
+                            ScrollView(.vertical) {
+                                timelineTrackRows(
+                                    project,
+                                    trackWidth: trackWidth,
+                                    rowsHeight: rowsHeight
+                                )
+                            }
+                            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                                max(0, geometry.contentOffset.y + geometry.contentInsets.top)
+                            } action: { _, offset in
+                                timelineVerticalScrollOffset = offset
+                            }
+                            .frame(height: visibleRowsHeight, alignment: .topLeading)
+                            .scrollIndicators(.visible)
+                        }
+                        .frame(width: trackWidth, height: geometry.size.height, alignment: .topLeading)
+                        .coordinateSpace(name: "timelineCanvas")
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .scrollIndicators(.visible)
                 }
-                .frame(maxHeight: .infinity, alignment: .topLeading)
-                .scrollIndicators(.visible)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .background(Color(nsColor: .controlBackgroundColor))
         }
     }
 
-    private func trackHeaders(_ project: TimelineProject) -> some View {
-        VStack(spacing: 0) {
-            Text("TRACKS")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .frame(height: rulerHeight)
+    private func timelineRowsHeight(_ project: TimelineProject) -> CGFloat {
+        CGFloat(project.lanes.count + 2) * (laneHeight + 1)
+    }
 
+    private func trackHeaderRows(_ project: TimelineProject) -> some View {
+        VStack(spacing: 0) {
             ForEach(project.lanes) { lane in
                 laneHeader(lane)
                     .frame(height: laneHeight)
@@ -329,10 +408,7 @@ struct EditorView: View {
             captionLaneHeader(project.captionTrack)
                 .frame(height: laneHeight)
             Divider()
-
-            Spacer(minLength: 0)
         }
-        .background(.bar.opacity(0.72))
     }
 
     private func laneHeader(_ lane: TimelineLane) -> some View {
@@ -444,16 +520,13 @@ struct EditorView: View {
         .padding(.horizontal, 12)
     }
 
-    private func timelineCanvas(_ project: TimelineProject) -> some View {
-        let paddingDuration = max(4, 480 / max(editor.pixelsPerSecond, 1))
-        let canvasDuration = max(project.duration + paddingDuration, 12)
-        let trackWidth = canvasDuration * editor.pixelsPerSecond
-        let canvasHeight = rulerHeight + CGFloat(project.lanes.count + 2) * (laneHeight + 1)
-
-        return ZStack(alignment: .topLeading) {
+    private func timelineTrackRows(
+        _ project: TimelineProject,
+        trackWidth: Double,
+        rowsHeight: CGFloat
+    ) -> some View {
+        ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
-                ruler(width: trackWidth, duration: canvasDuration)
-
                 ForEach(project.lanes) { lane in
                     laneRow(
                         lane,
@@ -482,14 +555,15 @@ struct EditorView: View {
                 Divider()
             }
 
-            TimelinePlayhead()
-                .frame(height: canvasHeight)
-                .offset(x: editor.playhead * editor.pixelsPerSecond - 5)
+            Rectangle()
+                .fill(.red)
+                .frame(width: 1.5, height: rowsHeight)
+                .offset(x: editor.playhead * editor.pixelsPerSecond)
                 .allowsHitTesting(false)
                 .zIndex(20)
         }
-        .frame(width: trackWidth, height: canvasHeight, alignment: .topLeading)
-        .coordinateSpace(name: "timelineCanvas")
+        .frame(width: trackWidth, height: rowsHeight, alignment: .topLeading)
+        .clipped()
     }
 
     private func mouseFollowZoomLaneRow(
@@ -518,24 +592,7 @@ struct EditorView: View {
             ForEach(track?.segments ?? []) { segment in
                 TimelineMouseFollowZoomSegmentView(
                     segment: segment,
-                    pixelsPerSecond: editor.pixelsPerSecond,
-                    frameRate: editor.project?.frameRate ?? 30,
-                    isSelected: editor.selectedMouseFollowZoomSegmentID == segment.id,
-                    onSelect: { time in editor.select(segment, at: time) },
-                    onTrim: { edge, time in
-                        editor.trimMouseFollowZoomSegment(id: segment.id, edge: edge, to: time)
-                    },
-                    onNudgeTrim: { edge, frames in
-                        editor.nudgeMouseFollowZoomBoundary(
-                            id: segment.id,
-                            edge: edge,
-                            byFrames: frames
-                        )
-                    },
-                    onDelete: {
-                        editor.select(segment)
-                        editor.deleteSelection()
-                    }
+                    editor: editor
                 )
                 .frame(
                     width: max(segment.duration * editor.pixelsPerSecond, 18),
@@ -711,6 +768,10 @@ struct EditorView: View {
         HStack(spacing: 8) {
             ScrollView(.horizontal) {
                 HStack(spacing: 6) {
+                    importTimelineToolbarButton
+
+                    Divider().frame(height: 20)
+
                     timelineToolbarButton(
                         "Split Clip",
                         systemImage: "scissors",
@@ -755,11 +816,11 @@ struct EditorView: View {
                     .disabled(editor.selectedClipID == nil)
                     .keyboardShortcut(.delete, modifiers: .command)
 
-                    if editor.selectedClipIsCamera, let selectedClipID = editor.selectedClipID {
+                    if editor.selectedClipIsOverlayVideo, let selectedClipID = editor.selectedClipID {
                         timelineToolbarButton(
-                            "Reset Camera Position",
+                            "Reset Video Position",
                             systemImage: "arrow.counterclockwise",
-                            help: "Reset camera position and size"
+                            help: "Reset overlay video position and size"
                         ) {
                             editor.resetVideoLayout(clipID: selectedClipID)
                         }
@@ -783,13 +844,17 @@ struct EditorView: View {
                             }
                         } label: {
                             Label(
-                                "Zoom \(segment.zoomScale.formatted(.number.precision(.fractionLength(segment.zoomScale == floor(segment.zoomScale) ? 0 : 1))))×",
+                                MouseFollowZoomScale.title(segment.zoomScale),
                                 systemImage: "plus.magnifyingglass"
                             )
                         }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
+                        .menuStyle(.button)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .frame(height: timelineToolbarControlSize)
                         .accessibilityLabel("Mouse zoom level")
+                        .accessibilityValue(MouseFollowZoomScale.title(segment.zoomScale))
+                        .reccyTooltip("Mouse zoom level: \(MouseFollowZoomScale.title(segment.zoomScale))")
                     }
 
                     Divider().frame(height: 20)
@@ -809,10 +874,10 @@ struct EditorView: View {
                     inspectorButton(.transcript, title: "Transcript", systemImage: "captions.bubble")
                     inspectorButton(.captions, title: "Captions", systemImage: "captions.bubble.fill")
                 }
-                .padding(.vertical, 1)
+                .padding(.vertical, 4)
             }
             .scrollIndicators(.hidden)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, minHeight: timelineToolbarControlSize + 8)
 
             HStack(spacing: 6) {
                 Divider().frame(height: 20)
@@ -988,6 +1053,41 @@ struct EditorView: View {
         .disabled(!editor.hasProject || editor.isRebuilding)
         .reccyAccessibleControl("Export")
         .reccyTooltip("Export the current project")
+    }
+
+    private var saveProjectToolbarButton: some View {
+        Button {
+            editor.saveProject()
+        } label: {
+            Label("Save Project", systemImage: "square.and.arrow.down")
+                .labelStyle(.iconOnly)
+        }
+        .disabled(!editor.hasProject || editor.isRebuilding)
+        .reccyAccessibleControl("Save Project")
+        .reccyTooltip("Save the non-destructive project (⌘S)")
+    }
+
+    private var importTimelineToolbarButton: some View {
+        Button {
+            editor.chooseMediaToImport()
+        } label: {
+            if editor.isImportingMedia {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 16, height: 16)
+            } else {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .medium))
+                    .symbolRenderingMode(.monochrome)
+                    .frame(width: 16, height: 16)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .frame(width: timelineToolbarControlSize, height: timelineToolbarControlSize)
+        .disabled(!editor.hasProject || editor.isRebuilding || editor.isImportingMedia)
+        .reccyAccessibleControl("Import Media")
+        .reccyTooltip("Import video, audio, or images as new timeline tracks (⌘I)")
     }
 
     private func captionPanel(_ project: TimelineProject) -> some View {
@@ -1342,9 +1442,11 @@ struct EditorView: View {
         switch kind {
         case .video: .indigo
         case .camera: .blue
+        case .importedVideo: .purple
         case .systemAudio: .teal
         case .microphone: .orange
         case .voiceover: .pink
+        case .importedAudio: .mint
         }
     }
 
@@ -1581,15 +1683,37 @@ private struct TimelineGapView: View {
 
 private struct TimelineMouseFollowZoomSegmentView: View {
     let segment: MouseFollowZoomSegment
-    let pixelsPerSecond: Double
-    let frameRate: Double
-    let isSelected: Bool
-    let onSelect: (TimeInterval) -> Void
-    let onTrim: (TimelineTrimEdge, TimeInterval) -> Void
-    let onNudgeTrim: (TimelineTrimEdge, Int) -> Void
-    let onDelete: () -> Void
+    @ObservedObject var editor: TimelineEditorController
+
+    @State private var isMoving = false
+    @State private var trimmingEdge: TimelineTrimEdge?
+
+    private var pixelsPerSecond: Double { editor.pixelsPerSecond }
+    private var frameRate: Double { editor.project?.frameRate ?? 30 }
+    private var isSelected: Bool { editor.selectedMouseFollowZoomSegmentID == segment.id }
 
     var body: some View {
+        interactiveSegment
+            .modifier(
+                TimelineTrimFeedbackModifier(
+                    edge: trimmingEdge,
+                    boundaryTime: trimmingEdge == .trailing
+                        ? segment.timelineEnd
+                        : segment.timelineStart,
+                    frameRate: frameRate
+                )
+            )
+            .modifier(
+                TimelineMouseZoomAccessibilityModifier(
+                    segment: segment,
+                    frameRate: frameRate,
+                    isSelected: isSelected,
+                    editor: editor
+                )
+            )
+    }
+
+    private var segmentArtwork: some View {
         HStack(spacing: 7) {
             Image(systemName: "cursorarrow.motionlines")
             Text("\(zoomTitle) Mouse Follow")
@@ -1610,13 +1734,41 @@ private struct TimelineMouseFollowZoomSegmentView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .shadow(color: isSelected ? Color.purple.opacity(0.5) : .clear, radius: 5)
+    }
+
+    private var interactiveSegment: some View {
+        segmentArtwork
         .contentShape(Rectangle())
         .simultaneousGesture(
             SpatialTapGesture().onEnded { value in
                 let localTime = min(max(value.location.x / pixelsPerSecond, 0), segment.duration)
-                onSelect(segment.timelineStart + localTime)
+                editor.select(segment, at: segment.timelineStart + localTime)
             }
         )
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 3, coordinateSpace: .named("timelineCanvas"))
+                .onChanged { value in
+                    guard trimmingEdge == nil else { return }
+                    if !isMoving {
+                        isMoving = true
+                        editor.beginMouseFollowZoomMove(id: segment.id)
+                    }
+                    editor.updateMouseFollowZoomMove(
+                        id: segment.id,
+                        by: value.translation.width / pixelsPerSecond
+                    )
+                }
+                .onEnded { value in
+                    guard isMoving else { return }
+                    editor.updateMouseFollowZoomMove(
+                        id: segment.id,
+                        by: value.translation.width / pixelsPerSecond
+                    )
+                    editor.endMouseFollowZoomMove(id: segment.id)
+                    isMoving = false
+                }
+        )
+        .pointerStyle(isMoving ? .grabActive : .grabIdle)
         .overlay {
             HStack(spacing: 0) {
                 trimHandle(.leading)
@@ -1624,26 +1776,7 @@ private struct TimelineMouseFollowZoomSegmentView: View {
                 trimHandle(.trailing)
             }
         }
-        .reccyTooltip("Click to seek • Drag either edge to resize the zoom effect")
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Mouse-follow zoom effect")
-        .accessibilityValue(accessibilityValue)
-        .accessibilityHint("Activate to select. Additional actions resize or delete this effect.")
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-        .accessibilityAction { onSelect(segment.timelineStart) }
-        .accessibilityAction(named: "Move Start Earlier by One Frame") {
-            onNudgeTrim(.leading, -1)
-        }
-        .accessibilityAction(named: "Move Start Later by One Frame") {
-            onNudgeTrim(.leading, 1)
-        }
-        .accessibilityAction(named: "Move End Earlier by One Frame") {
-            onNudgeTrim(.trailing, -1)
-        }
-        .accessibilityAction(named: "Move End Later by One Frame") {
-            onNudgeTrim(.trailing, 1)
-        }
-        .accessibilityAction(named: "Delete Mouse Zoom", onDelete)
+        .reccyTooltip("Click to seek • Drag the body to move • Drag either edge to resize")
     }
 
     private func trimHandle(_ edge: TimelineTrimEdge) -> some View {
@@ -1657,47 +1790,85 @@ private struct TimelineMouseFollowZoomSegmentView: View {
                     .frame(width: isSelected ? 3 : 2, height: 28)
                     .padding(edge == .leading ? .leading : .trailing, 3)
             }
-            .onHover { hovering in
-                if hovering { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
-            }
+            .pointerStyle(.columnResize)
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
+                    .onChanged { value in
+                        guard !isMoving else { return }
+                        if trimmingEdge == nil {
+                            trimmingEdge = edge
+                            editor.beginMouseFollowZoomTrim(id: segment.id, edge: edge)
+                        }
+                        guard trimmingEdge == edge else { return }
+                        editor.updateMouseFollowZoomTrim(
+                            id: segment.id,
+                            edge: edge,
+                            by: value.translation.width / pixelsPerSecond
+                        )
+                    }
                     .onEnded { value in
-                        let original = edge == .leading
-                            ? segment.timelineStart
-                            : segment.timelineEnd
-                        onTrim(edge, original + value.translation.width / pixelsPerSecond)
+                        guard trimmingEdge == edge else { return }
+                        editor.updateMouseFollowZoomTrim(
+                            id: segment.id,
+                            edge: edge,
+                            by: value.translation.width / pixelsPerSecond
+                        )
+                        editor.endMouseFollowZoomTrim(id: segment.id, edge: edge)
+                        trimmingEdge = nil
                     }
             )
     }
 
     private var zoomTitle: String {
-        segment.zoomScale.formatted(
-            .number.precision(.fractionLength(segment.zoomScale == floor(segment.zoomScale) ? 0 : 1))
-        ) + "×"
+        MouseFollowZoomScale.title(segment.zoomScale)
+    }
+
+}
+
+private struct TimelineMouseZoomAccessibilityModifier: ViewModifier {
+    let segment: MouseFollowZoomSegment
+    let frameRate: Double
+    let isSelected: Bool
+    @ObservedObject var editor: TimelineEditorController
+
+    func body(content: Content) -> some View {
+        content
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Mouse-follow zoom effect")
+            .accessibilityValue(accessibilityValue)
+            .accessibilityHint("Activate to select. Additional actions move, resize, or delete this effect.")
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction { editor.select(segment, at: segment.timelineStart) }
+            .accessibilityAction(named: "Move Earlier by One Frame") {
+                editor.nudgeMouseFollowZoomSegment(id: segment.id, byFrames: -1)
+            }
+            .accessibilityAction(named: "Move Later by One Frame") {
+                editor.nudgeMouseFollowZoomSegment(id: segment.id, byFrames: 1)
+            }
+            .accessibilityAction(named: "Move Start Earlier by One Frame") {
+                editor.nudgeMouseFollowZoomBoundary(id: segment.id, edge: .leading, byFrames: -1)
+            }
+            .accessibilityAction(named: "Move Start Later by One Frame") {
+                editor.nudgeMouseFollowZoomBoundary(id: segment.id, edge: .leading, byFrames: 1)
+            }
+            .accessibilityAction(named: "Move End Earlier by One Frame") {
+                editor.nudgeMouseFollowZoomBoundary(id: segment.id, edge: .trailing, byFrames: -1)
+            }
+            .accessibilityAction(named: "Move End Later by One Frame") {
+                editor.nudgeMouseFollowZoomBoundary(id: segment.id, edge: .trailing, byFrames: 1)
+            }
+            .accessibilityAction(named: "Delete Mouse Zoom") {
+                editor.select(segment)
+                editor.deleteSelection()
+            }
     }
 
     private var accessibilityValue: String {
         let selection = isSelected ? "Selected" : "Not selected"
+        let zoom = MouseFollowZoomScale.title(segment.zoomScale)
+        let timecode = TimelineTimecodeFormatter.string(segment.timelineStart, frameRate: frameRate)
         let duration = segment.duration.formatted(.number.precision(.fractionLength(1)))
-        return "\(selection), \(zoomTitle), starts at \(timecode), \(duration) seconds"
-    }
-
-    private var timecode: String {
-        let safeTime = max(0, segment.timelineStart)
-        let seconds = Int(safeTime.rounded(.down))
-        let safeFrameRate = max(frameRate, 1)
-        let frames = min(
-            Int((safeTime - floor(safeTime)) * safeFrameRate),
-            Int(safeFrameRate) - 1
-        )
-        return String(
-            format: "%02d:%02d:%02d:%02d",
-            seconds / 3_600,
-            (seconds % 3_600) / 60,
-            seconds % 60,
-            frames
-        )
+        return "\(selection), \(zoom), starts at \(timecode), \(duration) seconds"
     }
 }
 
@@ -1781,6 +1952,7 @@ private struct TimelineClipView: View {
                     isMoving = false
                 }
         )
+        .pointerStyle(isMoving ? .grabActive : .grabIdle)
         .overlay {
             HStack(spacing: 0) {
                 trimHandle(edge: .leading)
@@ -1788,6 +1960,13 @@ private struct TimelineClipView: View {
                 trimHandle(edge: .trailing)
             }
         }
+        .modifier(
+            TimelineTrimFeedbackModifier(
+                edge: trimmingEdge,
+                boundaryTime: trimmingEdge == .trailing ? clip.timelineEnd : clip.timelineStart,
+                frameRate: frameRate
+            )
+        )
         .reccyTooltip("Click to seek • Drag the body to move • Drag either edge to trim")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(lane.name) clip, \(clip.name)")
@@ -1812,20 +1991,7 @@ private struct TimelineClipView: View {
     }
 
     private var accessibilityTimecode: String {
-        let safeTime = max(0, clip.timelineStart)
-        let seconds = Int(safeTime.rounded(.down))
-        let safeFrameRate = max(frameRate, 1)
-        let frames = min(
-            Int((safeTime - floor(safeTime)) * safeFrameRate),
-            Int(safeFrameRate) - 1
-        )
-        return String(
-            format: "%02d:%02d:%02d:%02d",
-            seconds / 3_600,
-            (seconds % 3_600) / 60,
-            seconds % 60,
-            frames
-        )
+        TimelineTimecodeFormatter.string(clip.timelineStart, frameRate: frameRate)
     }
 
     private func trimHandle(edge: TimelineTrimEdge) -> some View {
@@ -1839,9 +2005,7 @@ private struct TimelineClipView: View {
                     .frame(width: isSelected ? 3 : 2, height: 28)
                     .padding(edge == .leading ? .leading : .trailing, 3)
             }
-            .onHover { hovering in
-                if hovering { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
-            }
+            .pointerStyle(.columnResize)
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
                     .onChanged { value in
@@ -1879,10 +2043,72 @@ private struct TimelinePlayhead: View {
     }
 }
 
-/// Direct manipulation for the active camera clip. The outline updates at
+private struct TimelineTrimFeedbackModifier: ViewModifier {
+    let edge: TimelineTrimEdge?
+    let boundaryTime: TimeInterval
+    let frameRate: Double
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if let edge {
+                    HStack(spacing: 0) {
+                        if edge == .trailing { Spacer(minLength: 0) }
+                        TimelineTrimTimecodeBadge(time: boundaryTime, frameRate: frameRate)
+                        if edge == .leading { Spacer(minLength: 0) }
+                    }
+                    .offset(y: -26)
+                    .allowsHitTesting(false)
+                }
+            }
+            .scaleEffect(x: 1, y: edge == nil ? 1 : 1.08, anchor: .center)
+            .zIndex(edge == nil ? 0 : 10)
+            .animation(.snappy(duration: 0.12), value: edge)
+    }
+}
+
+private struct TimelineTrimTimecodeBadge: View {
+    let time: TimeInterval
+    let frameRate: Double
+
+    var body: some View {
+        Text(TimelineTimecodeFormatter.string(time, frameRate: frameRate))
+            .font(.caption2.monospacedDigit().weight(.semibold))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(.regularMaterial, in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 0.5)
+            }
+            .shadow(color: .black.opacity(0.24), radius: 4, y: 2)
+    }
+}
+
+private enum TimelineTimecodeFormatter {
+    static func string(_ time: TimeInterval, frameRate: Double) -> String {
+        let safeTime = max(0, time)
+        let seconds = Int(safeTime.rounded(.down))
+        let safeFrameRate = max(frameRate, 1)
+        let frames = min(
+            Int((safeTime - floor(safeTime)) * safeFrameRate),
+            Int(safeFrameRate) - 1
+        )
+        return String(
+            format: "%02d:%02d:%02d:%02d",
+            seconds / 3_600,
+            (seconds % 3_600) / 60,
+            seconds % 60,
+            frames
+        )
+    }
+}
+
+/// Direct manipulation for an active overlay-video clip. The outline updates at
 /// pointer rate while AVFoundation rebuilds once on commit, keeping editing
 /// responsive without asking the compositor to reconstruct on every mouse event.
-private struct CameraOverlayManipulator: View {
+private struct VideoOverlayManipulator: View {
     let clip: TimelineClip
     let renderSize: CGSize
     let isSelected: Bool
@@ -1907,7 +2133,7 @@ private struct CameraOverlayManipulator: View {
             ZStack(alignment: .topLeading) {
                 overlayControl(layout: layout, overlayRect: overlayRect, videoRect: videoRect)
 
-                if isSelected || isHovering {
+                if isSelected {
                     resizeHandle(overlayRect: overlayRect, videoRect: videoRect)
                 }
             }
@@ -1935,9 +2161,9 @@ private struct CameraOverlayManipulator: View {
             .simultaneousGesture(TapGesture().onEnded(onSelect))
             .gesture(moveGesture(videoRect: videoRect))
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Camera overlay")
+            .accessibilityLabel("\(clip.name) video overlay")
             .accessibilityValue(accessibilityValue(for: layout))
-            .accessibilityHint("Activate to select. Additional actions move, resize, or reset the camera video.")
+            .accessibilityHint("Activate to select. Additional actions move, resize, or reset the overlay video.")
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
             .accessibilityAction { onSelect() }
             .accessibilityActions {
@@ -1971,9 +2197,7 @@ private struct CameraOverlayManipulator: View {
             .position(x: overlayRect.maxX, y: overlayRect.maxY)
             .shadow(color: .black.opacity(0.35), radius: 2)
             .highPriorityGesture(resizeGesture(videoRect: videoRect))
-            .onHover { hovering in
-                if hovering { NSCursor.crosshair.set() } else { NSCursor.arrow.set() }
-            }
+            .pointerStyle(.frameResize(position: .bottomTrailing))
             .accessibilityHidden(true)
     }
 
