@@ -1630,6 +1630,28 @@ struct ReccyTests {
         #expect(compression[kVTCompressionPropertyKey_RealTime as String] as? Bool == true)
     }
 
+    @Test func cameraFormatUsesTheDeliveredPixelBufferDimensions() throws {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            1_280,
+            720,
+            kCVPixelFormatType_32BGRA,
+            nil,
+            &pixelBuffer
+        )
+        #expect(status == kCVReturnSuccess)
+        let deliveredPixelBuffer = try #require(pixelBuffer)
+        let format = try #require(WebcamCaptureSession.captureFormat(
+            deviceID: "external-camera",
+            deviceName: "External Camera",
+            pixelBuffer: deliveredPixelBuffer
+        ))
+
+        #expect(format.width == 1_280)
+        #expect(format.height == 720)
+    }
+
     @Test func cameraTailPaddingClosesOnlyMaterialEndDrift() throws {
         let frameDuration = CMTime(value: 1, timescale: 30)
         let recordingEnd = CMTime(seconds: 10, preferredTimescale: 600)
