@@ -340,7 +340,7 @@ struct TimelineLane: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
-    static let currentFormatVersion = 5
+    static let currentFormatVersion = 6
 
     var formatVersion = currentFormatVersion
     var id = UUID()
@@ -352,6 +352,7 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
     var videoGaps: [TimelineGapSegment]
     var mouseFollowZoomTrack: MouseFollowZoomTrack?
     var captionTrack: TimelineCaptionTrack?
+    var posterFrameTime: TimeInterval?
 
     init(
         name: String,
@@ -359,7 +360,8 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         lanes: [TimelineLane],
         videoGaps: [TimelineGapSegment] = [],
         mouseFollowZoomTrack: MouseFollowZoomTrack? = nil,
-        captionTrack: TimelineCaptionTrack? = nil
+        captionTrack: TimelineCaptionTrack? = nil,
+        posterFrameTime: TimeInterval? = nil
     ) {
         self.name = name
         self.frameRate = max(frameRate, 1)
@@ -367,6 +369,7 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         self.videoGaps = videoGaps
         self.mouseFollowZoomTrack = mouseFollowZoomTrack
         self.captionTrack = captionTrack
+        self.posterFrameTime = posterFrameTime
         reconcileVideoGaps()
     }
 
@@ -375,6 +378,17 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
     }
 
     var frameDuration: TimeInterval { 1 / max(frameRate, 1) }
+
+    var effectivePosterFrameTime: TimeInterval {
+        min(max(posterFrameTime ?? 0, 0), max(0, duration - frameDuration))
+    }
+
+    mutating func setPosterFrame(at time: TimeInterval) {
+        let clamped = min(max(time, 0), max(0, duration - frameDuration))
+        guard abs((posterFrameTime ?? 0) - clamped) > 0.000_1 else { return }
+        posterFrameTime = clamped
+        modifiedAt = Date()
+    }
 
     func clip(id: UUID) -> TimelineClip? {
         lanes.lazy.flatMap(\.clips).first(where: { $0.id == id })

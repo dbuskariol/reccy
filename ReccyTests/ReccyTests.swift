@@ -733,7 +733,7 @@ struct ReccyTests {
         #expect(cues[0].text == "– Remote speaker\n– Local reply")
     }
 
-    @Test func legacyTimelineProjectDecodesWithoutCaptionTrack() throws {
+    @Test func legacyTimelineProjectDecodesWithoutCaptionOrPosterFrame() throws {
         let project = makeProject()
         let encoder = JSONEncoder()
         var object = try #require(
@@ -741,12 +741,29 @@ struct ReccyTests {
         )
         object["formatVersion"] = 3
         object.removeValue(forKey: "captionTrack")
+        object.removeValue(forKey: "posterFrameTime")
         let legacyData = try JSONSerialization.data(withJSONObject: object)
 
         let decoded = try JSONDecoder().decode(TimelineProject.self, from: legacyData)
 
         #expect(decoded.formatVersion == 3)
         #expect(decoded.captionTrack == nil)
+        #expect(decoded.posterFrameTime == nil)
+        #expect(decoded.effectivePosterFrameTime == 0)
+    }
+
+    @Test func timelinePosterFrameUsesAValidComposedFrameBoundary() {
+        var project = makeProject()
+
+        project.setPosterFrame(at: 3.25)
+        #expect(project.posterFrameTime == 3.25)
+        #expect(project.effectivePosterFrameTime == 3.25)
+
+        project.setPosterFrame(at: 500)
+        #expect(project.effectivePosterFrameTime == project.duration - project.frameDuration)
+
+        project.setPosterFrame(at: -10)
+        #expect(project.effectivePosterFrameTime == 0)
     }
 
     @Test func transcriptStoreRoundTripsAnAtomicSidecar() async throws {

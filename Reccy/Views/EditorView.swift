@@ -259,6 +259,22 @@ struct EditorView: View {
 
             Spacer()
 
+            Button {
+                editor.useCurrentFrameAsPoster()
+                if let sourceURL = editor.sourceRecordingURL,
+                   let item = coordinator.library.recordings.first(where: { $0.url == sourceURL })
+                {
+                    Task { await coordinator.library.refreshThumbnail(for: item) }
+                }
+            } label: {
+                Label("Set Poster", systemImage: "photo.badge.checkmark")
+            }
+            .buttonStyle(.borderless)
+            .reccyAccessibleControl(
+                "Use Current Frame as Poster",
+                help: "Use this composed frame for previews throughout Reccy"
+            )
+
             if editor.isRebuilding {
                 ProgressView()
                     .controlSize(.small)
