@@ -2,6 +2,7 @@ import AVKit
 import Combine
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct EditorView: View {
     @Environment(\.undoManager) private var undoManager
@@ -47,6 +48,7 @@ struct EditorView: View {
         .toolbar {
             ToolbarSpacer(.flexible)
             ToolbarItemGroup(placement: .primaryAction) {
+                importToolbarButton
                 exportToolbarButton
             }
         }
@@ -173,25 +175,26 @@ struct EditorView: View {
                 NativeVideoPlayer(player: editor.player)
                     .background(.black)
 
-                if let cameraClip = editor.activeCameraClip,
-                   editor.previewRenderSize.width > 0,
+                if editor.previewRenderSize.width > 0,
                    editor.previewRenderSize.height > 0
                 {
-                    CameraOverlayManipulator(
-                        clip: cameraClip,
-                        renderSize: editor.previewRenderSize,
-                        isSelected: editor.selectedClipID == cameraClip.id,
-                        onSelect: {
-                            guard editor.selectedClipID != cameraClip.id else { return }
-                            editor.select(cameraClip, at: editor.playhead)
-                        },
-                        onCommit: { layout in
-                            editor.setVideoLayout(layout, clipID: cameraClip.id)
-                        },
-                        onReset: {
-                            editor.resetVideoLayout(clipID: cameraClip.id)
-                        }
-                    )
+                    ForEach(editor.activeOverlayVideoClips) { clip in
+                        VideoOverlayManipulator(
+                            clip: clip,
+                            renderSize: editor.previewRenderSize,
+                            isSelected: editor.selectedClipID == clip.id,
+                            onSelect: {
+                                guard editor.selectedClipID != clip.id else { return }
+                                editor.select(clip, at: editor.playhead)
+                            },
+                            onCommit: { layout in
+                                editor.setVideoLayout(layout, clipID: clip.id)
+                            },
+                            onReset: {
+                                editor.resetVideoLayout(clipID: clip.id)
+                            }
+                        )
+                    }
                 }
 
                 if let captionTrack = project.captionTrack {
@@ -771,11 +774,11 @@ struct EditorView: View {
                     .disabled(editor.selectedClipID == nil)
                     .keyboardShortcut(.delete, modifiers: .command)
 
-                    if editor.selectedClipIsCamera, let selectedClipID = editor.selectedClipID {
+                    if editor.selectedClipIsOverlayVideo, let selectedClipID = editor.selectedClipID {
                         timelineToolbarButton(
-                            "Reset Camera Position",
+                            "Reset Video Position",
                             systemImage: "arrow.counterclockwise",
-                            help: "Reset camera position and size"
+                            help: "Reset overlay video position and size"
                         ) {
                             editor.resetVideoLayout(clipID: selectedClipID)
                         }
@@ -1004,6 +1007,33 @@ struct EditorView: View {
         .disabled(!editor.hasProject || editor.isRebuilding)
         .reccyAccessibleControl("Export")
         .reccyTooltip("Export the current project")
+    }
+
+    private var importToolbarButton: some View {
+        Button {
+            let panel = NSOpenPanel()
+            panel.title = "Import Media"
+            panel.prompt = "Import"
+            panel.message = "Choose video, audio, or images to add as independent timeline tracks."
+            panel.allowedContentTypes = [.movie, .audio, .image]
+            panel.allowsMultipleSelection = true
+            panel.canChooseDirectories = false
+            panel.canChooseFiles = true
+            guard panel.runModal() == .OK else { return }
+            Task { await editor.importMedia(from: panel.urls) }
+        } label: {
+            if editor.isImportingMedia {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Label("Import Media", systemImage: "square.and.arrow.down")
+                    .labelStyle(.iconOnly)
+            }
+        }
+        .disabled(!editor.hasProject || editor.isRebuilding || editor.isImportingMedia)
+        .keyboardShortcut("i", modifiers: .command)
+        .reccyAccessibleControl("Import Media")
+        .reccyTooltip("Import video, audio, or images as new timeline tracks (⌘I)")
     }
 
     private func captionPanel(_ project: TimelineProject) -> some View {
@@ -1358,9 +1388,11 @@ struct EditorView: View {
         switch kind {
         case .video: .indigo
         case .camera: .blue
+        case .importedVideo: .purple
         case .systemAudio: .teal
         case .microphone: .orange
         case .voiceover: .pink
+        case .importedAudio: .mint
         }
     }
 
@@ -1893,10 +1925,10 @@ private struct TimelinePlayhead: View {
     }
 }
 
-/// Direct manipulation for the active camera clip. The outline updates at
+/// Direct manipulation for an active overlay-video clip. The outline updates at
 /// pointer rate while AVFoundation rebuilds once on commit, keeping editing
 /// responsive without asking the compositor to reconstruct on every mouse event.
-private struct CameraOverlayManipulator: View {
+private struct VideoOverlayManipulator: View {
     let clip: TimelineClip
     let renderSize: CGSize
     let isSelected: Bool
@@ -1949,9 +1981,9 @@ private struct CameraOverlayManipulator: View {
             .simultaneousGesture(TapGesture().onEnded(onSelect))
             .gesture(moveGesture(videoRect: videoRect))
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Camera overlay")
+            .accessibilityLabel("\(clip.name) video overlay")
             .accessibilityValue(accessibilityValue(for: layout))
-            .accessibilityHint("Activate to select. Additional actions move, resize, or reset the camera video.")
+            .accessibilityHint("Activate to select. Additional actions move, resize, or reset the overlay video.")
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
             .accessibilityAction { onSelect() }
             .accessibilityActions {

@@ -39,7 +39,12 @@ enum RecordingTimelineProjectLoader {
             savedProject.formatVersion = TimelineProject.currentFormatVersion
             var durations: [URL: TimeInterval] = [:]
             for url in Set(savedProject.lanes.flatMap(\.clips).map(\.sourceURL)) {
-                durations[url] = try await AVURLAsset(url: url).load(.duration).seconds
+                let containsStill = savedProject.lanes
+                    .flatMap(\.clips)
+                    .contains { $0.sourceURL == url && $0.stillImageOriginalURL != nil }
+                durations[url] = containsStill
+                    ? 24 * 60 * 60
+                    : try await AVURLAsset(url: url).load(.duration).seconds
             }
             return LoadedTimelineProject(
                 project: savedProject,

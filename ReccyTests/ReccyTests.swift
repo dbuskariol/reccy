@@ -57,6 +57,122 @@ struct ReccyTests {
         #expect(CaptureFailureContext.screenshot.title == "Screenshot couldn’t be saved")
     }
 
+    @Test func mediaImporterCopiesAndSeparatesLinkedVideoAndAudioTracks() async throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Media Import \(UUID().uuidString)", isDirectory: true)
+        let packageURL = directoryURL.appendingPathComponent("Project.reccyproject", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+        let fixtureURL = try await makeExportFixture(audioTrackCount: 1)
+        defer { try? FileManager.default.removeItem(at: fixtureURL) }
+        let originalBytes = try Data(contentsOf: fixtureURL)
+
+        let result = try await TimelineMediaImporter().prepare(
+            urls: [fixtureURL],
+            packageURL: packageURL,
+            timelineStart: 1.25,
+            canvasSize: CGSize(width: 1920, height: 1080),
+            frameRate: 30
+        )
+
+        let videoLane = try #require(result.lanes.first(where: { $0.kind == .importedVideo }))
+        let audioLane = try #require(result.lanes.first(where: { $0.kind == .importedAudio }))
+        let videoClip = try #require(videoLane.clips.first)
+        let audioClip = try #require(audioLane.clips.first)
+        #expect(videoClip.sourceURL == audioClip.sourceURL)
+        #expect(videoClip.sourceURL != fixtureURL)
+        #expect(videoClip.linkedGroupID != nil)
+        #expect(videoClip.linkedGroupID == audioClip.linkedGroupID)
+        #expect(abs(videoClip.timelineStart - 1.25) < 0.001)
+        #expect(FileManager.default.fileExists(atPath: videoClip.sourceURL.path))
+        #expect(try Data(contentsOf: fixtureURL) == originalBytes)
+    }
+
+    @Test func imageImportUsesBoundedProxyAndBuildsEditableStillOverlay() async throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Image Import \(UUID().uuidString)", isDirectory: true)
+        let packageURL = directoryURL.appendingPathComponent("Project.reccyproject", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+        let imageURL = directoryURL.appendingPathComponent("Overlay.png")
+        let context = try #require(CGContext(
+            data: nil,
+            width: 80,
+            height: 40,
+            bitsPerComponent: 8,
+            bytesPerRow: 80 * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(CGColor(red: 0.8, green: 0.1, blue: 0.6, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 80, height: 40))
+        try ScreenshotFileWriter.write(
+            try #require(context.makeImage()),
+            to: imageURL,
+            contentType: .png
+        )
+        let originalBytes = try Data(contentsOf: imageURL)
+
+        let result = try await TimelineMediaImporter().prepare(
+            urls: [imageURL],
+            packageURL: packageURL,
+            timelineStart: 2,
+            canvasSize: CGSize(width: 64, height: 64),
+            frameRate: 30
+        )
+        let importedLane = try #require(result.lanes.first)
+        let importedClip = try #require(importedLane.clips.first)
+        #expect(importedLane.kind == .importedVideo)
+        #expect(importedClip.stillImageOriginalURL != nil)
+        #expect(importedClip.stillImageOriginalURL != imageURL)
+        #expect(abs(importedClip.duration - 5) < 0.001)
+        let editableDuration = try #require(result.sourceDurations[importedClip.sourceURL])
+        #expect(abs(editableDuration - 24 * 60 * 60) < 0.001)
+        #expect(try Data(contentsOf: imageURL) == originalBytes)
+
+        let proxyAsset = AVURLAsset(url: importedClip.sourceURL)
+        let proxyDuration = try await proxyAsset.load(.duration).seconds
+        #expect(proxyDuration < 0.2)
+
+        let primaryURL = try await makeColorTestVideo(size: CGSize(width: 64, height: 64))
+        defer { try? FileManager.default.removeItem(at: primaryURL) }
+        let primaryAsset = AVURLAsset(url: primaryURL)
+        let primaryTrack = try #require(try await primaryAsset.loadTracks(withMediaType: .video).first)
+        let project = TimelineProject(
+            name: "Still Import",
+            frameRate: 30,
+            lanes: [
+                TimelineLane(
+                    kind: .video,
+                    name: "Screen",
+                    clips: [TimelineClip(
+                        sourceURL: primaryURL,
+                        sourceTrackID: primaryTrack.trackID,
+                        sourceStart: 0,
+                        timelineStart: 0,
+                        duration: 3,
+                        name: "Screen",
+                        linkedGroupID: nil
+                    )]
+                ),
+                importedLane,
+            ]
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        #expect(build.videoComposition != nil)
+        #expect(abs(build.composition.duration.seconds - 7) < 0.05)
+
+        let rendered = try await renderedColor(
+            at: 4,
+            composition: build.composition,
+            videoComposition: build.videoComposition
+        )
+        #expect(rendered.red > 150)
+        #expect(rendered.blue > 100)
+    }
+
     @Test func audioReaderProducesExactTrackPCMForTranscription() async throws {
         let url = try makeWaveformTestAudio(duration: 1) { frame, sampleRate in
             Float(sin(2 * Double.pi * 440 * Double(frame) / sampleRate) * 0.25)
