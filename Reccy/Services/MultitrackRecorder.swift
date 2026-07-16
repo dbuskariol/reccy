@@ -236,27 +236,26 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         try Task.checkCancellation()
         var startingWebcam: WebcamCaptureSession?
         var cameraFormat: WebcamCaptureFormat?
-        if options.includesCamera {
-            let webcam = WebcamCaptureSession(
-                deliveryQueue: sampleQueue,
-                sampleHandler: { [weak self] sampleBuffer in
-                    self?.handleCamera(sampleBuffer)
-                }
-            )
-            cameraFormat = try await webcam.prepare(
-                deviceID: options.cameraDeviceID,
-                fileType: options.encodingPlan.fileType
-            )
-            startingWebcam = webcam
-        }
-        try configureWriter(outputURL: outputURL, options: options, cameraFormat: cameraFormat)
         var startingStream: SCStream?
         do {
             try Task.checkCancellation()
+            if options.includesCamera {
+                let webcam = WebcamCaptureSession(
+                    deliveryQueue: sampleQueue,
+                    sampleHandler: { [weak self] sampleBuffer in
+                        self?.handleCamera(sampleBuffer)
+                    }
+                )
+                startingWebcam = webcam
+                try await webcam.prepare(deviceID: options.cameraDeviceID)
+                cameraFormat = try await webcam.start()
+            }
+            try Task.checkCancellation()
+            try configureWriter(outputURL: outputURL, options: options, cameraFormat: cameraFormat)
             if let startingWebcam, let cameraFormat {
                 webcamSession = startingWebcam
                 onCameraPrepared?(cameraFormat)
-                try await startingWebcam.start()
+                startingWebcam.beginDelivery()
             }
             try Task.checkCancellation()
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)

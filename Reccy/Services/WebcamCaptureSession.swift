@@ -56,8 +56,9 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
     private let logger = Logger(subsystem: "com.reccy.mac", category: "Camera")
     private let sampleStateLock = NSLock()
     private var isConfigured = false
-    private var format: WebcamCaptureFormat?
-    private var hasDeliveredSample = false
+    private var deviceIdentity: (id: String, name: String)?
+    private var deliveredFormat: WebcamCaptureFormat?
+    private var deliversSamples = false
     private var acceptsSamples = true
 
     init(deliveryQueue: DispatchQueue, sampleHandler: @escaping SampleHandler) {
@@ -66,12 +67,12 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
         super.init()
     }
 
-    func prepare(deviceID: String?, fileType: AVFileType) async throws -> WebcamCaptureFormat {
+    func prepare(deviceID: String?) async throws {
         try await withCheckedThrowingContinuation { continuation in
             sessionQueue.async { [self] in
                 do {
-                    let format = try configure(deviceID: deviceID, fileType: fileType)
-                    continuation.resume(returning: format)
+                    try configure(deviceID: deviceID)
+                    continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -79,7 +80,11 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
         }
     }
 
-    func start() async throws {
+    /// Starts hardware and resolves the camera track from the first delivered
+    /// pixel buffer. External cameras can advertise writer recommendations
+    /// whose aspect ratio differs from the negotiated output; the actual
+    /// buffer is the authoritative format that AVAssetWriter must preserve.
+    func start() async throws -> WebcamCaptureFormat {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sessionQueue.async { [self] in
                 guard isConfigured else {
@@ -95,13 +100,20 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
             }
         }
         let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-        while !withSampleStateLock({ hasDeliveredSample }) {
+        while true {
             try Task.checkCancellation()
+            if let format = withSampleStateLock({ deliveredFormat }) {
+                return format
+            }
             guard ContinuousClock.now < deadline else {
                 throw WebcamCaptureError.failedToStart
             }
             try await Task.sleep(for: .milliseconds(20))
         }
+    }
+
+    func beginDelivery() {
+        withSampleStateLock { deliversSamples = true }
     }
 
     /// Ends the recorder-facing half of capture without making asset writer
@@ -141,8 +153,8 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
         logger.info("Camera samples drained from recorder")
     }
 
-    private func configure(deviceID: String?, fileType: AVFileType) throws -> WebcamCaptureFormat {
-        if let format, isConfigured { return format }
+    private func configure(deviceID: String?) throws {
+        if isConfigured { return }
 
         let devices = AVCaptureDevice.DiscoverySession(
             deviceTypes: [.builtInWideAngleCamera, .continuityCamera, .deskViewCamera, .external],
@@ -154,46 +166,50 @@ nonisolated final class WebcamCaptureSession: NSObject, @unchecked Sendable {
         guard let device else { throw WebcamCaptureError.deviceUnavailable }
 
         session.beginConfiguration()
-        defer { session.commitConfiguration() }
-        if session.canSetSessionPreset(.hd1280x720) {
-            session.sessionPreset = .hd1280x720
-        } else if session.canSetSessionPreset(.high) {
-            session.sessionPreset = .high
+        do {
+            if session.canSetSessionPreset(.hd1280x720) {
+                session.sessionPreset = .hd1280x720
+            } else if session.canSetSessionPreset(.high) {
+                session.sessionPreset = .high
+            }
+
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else { throw WebcamCaptureError.cannotAddInput }
+            session.addInput(input)
+
+            output.alwaysDiscardsLateVideoFrames = true
+            output.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            ]
+            guard session.canAddOutput(output) else { throw WebcamCaptureError.cannotAddOutput }
+            session.addOutput(output)
+            output.setSampleBufferDelegate(self, queue: captureQueue)
+            session.commitConfiguration()
+        } catch {
+            session.commitConfiguration()
+            throw error
         }
 
-        let input = try AVCaptureDeviceInput(device: device)
-        guard session.canAddInput(input) else { throw WebcamCaptureError.cannotAddInput }
-        session.addInput(input)
+        withSampleStateLock {
+            deviceIdentity = (device.uniqueID, device.localizedName)
+        }
+        isConfigured = true
+    }
 
-        output.alwaysDiscardsLateVideoFrames = true
-        output.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-        ]
-        guard session.canAddOutput(output) else { throw WebcamCaptureError.cannotAddOutput }
-        session.addOutput(output)
-        output.setSampleBufferDelegate(self, queue: captureQueue)
-
-        guard let recommended = output.recommendedVideoSettingsForAssetWriter(writingTo: fileType),
-              let width = Self.integer(recommended[AVVideoWidthKey]),
-              let height = Self.integer(recommended[AVVideoHeightKey]),
-              width > 0,
-              height > 0
-        else { throw WebcamCaptureError.formatUnavailable }
-
-        let format = WebcamCaptureFormat(
-            deviceID: device.uniqueID,
-            deviceName: device.localizedName,
+    static func captureFormat(
+        deviceID: String,
+        deviceName: String,
+        pixelBuffer: CVPixelBuffer
+    ) -> WebcamCaptureFormat? {
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        guard width > 0, height > 0 else { return nil }
+        return WebcamCaptureFormat(
+            deviceID: deviceID,
+            deviceName: deviceName,
             width: width,
             height: height
         )
-        self.format = format
-        isConfigured = true
-        return format
-    }
-
-    private static func integer(_ value: Any?) -> Int? {
-        if let value = value as? Int { return value }
-        return (value as? NSNumber)?.intValue
     }
 
     private func withSampleStateLock<Value>(_ body: () -> Value) -> Value {
@@ -262,9 +278,19 @@ nonisolated extension WebcamCaptureSession: AVCaptureVideoDataOutputSampleBuffer
         guard withSampleStateLock({ acceptsSamples }),
               sampleBuffer.isValid,
               CMSampleBufferDataIsReady(sampleBuffer),
-              let converted = sampleInHostTime(sampleBuffer)
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let identity = withSampleStateLock({ deviceIdentity }),
+              let format = Self.captureFormat(
+                  deviceID: identity.id,
+                  deviceName: identity.name,
+                  pixelBuffer: pixelBuffer
+              )
         else { return }
-        withSampleStateLock { hasDeliveredSample = true }
+        let shouldDeliver = withSampleStateLock {
+            deliveredFormat = deliveredFormat ?? format
+            return deliversSamples
+        }
+        guard shouldDeliver, let converted = sampleInHostTime(sampleBuffer) else { return }
         let retained = WebcamRetainedSampleBuffer(converted)
         deliveryQueue.async { [sampleHandler] in
             sampleHandler(retained.value)
