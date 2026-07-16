@@ -198,7 +198,7 @@ final class TimelineEditorController: ObservableObject {
         project = loaded.project
         projectPackageURL = packageURL
         sourceDurations = loaded.sourceDurations
-        playhead = 0
+        playhead = loaded.project.effectivePosterFrameTime
         selectedClipID = loaded.project.lanes.flatMap(\.clips).first?.id
         selectedGapID = nil
         selectedCaptionID = nil
@@ -724,9 +724,17 @@ final class TimelineEditorController: ObservableObject {
         guard let project, let packageURL = projectPackageURL else {
             throw TimelineEditorError.noProject
         }
-        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
-        let data = try JSONEncoder.reccy.encode(project)
-        try data.write(to: packageURL.appendingPathComponent("project.json"), options: .atomic)
+        try RecordingTimelineProjectLoader.save(project, packageURL: packageURL)
+    }
+
+    func useCurrentFrameAsPoster() {
+        updateProjectWithoutRebuild(actionName: "Set Poster Frame") { project in
+            project.setPosterFrame(at: playhead)
+        }
+    }
+
+    var sourceRecordingURL: URL? {
+        project?.lanes.first(where: { $0.kind == .video })?.clips.first?.sourceURL
     }
 
     func makeExportSource() throws -> ExportSource {
@@ -1074,14 +1082,5 @@ private enum TimelineInteractionKind: Equatable {
         switch self {
         case .move(let id), .trim(let id, _): id
         }
-    }
-}
-
-private extension JSONEncoder {
-    static var reccy: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        return encoder
     }
 }

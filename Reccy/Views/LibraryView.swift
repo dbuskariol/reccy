@@ -611,6 +611,18 @@ struct LibraryView: View {
                 Spacer(minLength: 0)
 
                 Button {
+                    useCurrentFrameAsPoster(item)
+                } label: {
+                    Image(systemName: "photo.badge.checkmark")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .reccyAccessibleControl(
+                    "Use Current Frame as Poster",
+                    help: "Use this composed frame for recording previews"
+                )
+
+                Button {
                     library.reveal(item)
                 } label: {
                     Image(systemName: "folder")
@@ -806,6 +818,13 @@ struct LibraryView: View {
                 player.replaceCurrentItem(with: playerItem)
                 previewCaptionTrack = loadedProject.project.captionTrack
                 previewRenderSize = build.renderSize ?? previewRenderSize
+                let posterTime = loadedProject.project.effectivePosterFrameTime
+                playbackTime = posterTime
+                await player.seek(
+                    to: CMTime(seconds: posterTime, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
                 isPreviewLoading = false
                 logger.info(
                     "Prepared composed preview videoTracks=\(build.composition.tracks(withMediaType: .video).count) file=\(item.url.lastPathComponent, privacy: .public)"
@@ -825,6 +844,29 @@ struct LibraryView: View {
             }
         }
         transcription.loadDocument(for: item.url)
+    }
+
+    private func useCurrentFrameAsPoster(_ item: RecordingItem) {
+        let posterTime = playbackTime
+        Task { @MainActor in
+            do {
+                let loaded = try await RecordingTimelineProjectLoader.load(for: item)
+                var project = loaded.project
+                project.setPosterFrame(at: posterTime)
+                try RecordingTimelineProjectLoader.save(
+                    project,
+                    packageURL: item.artifacts.projectPackageURL
+                )
+                await library.refreshThumbnail(for: item)
+            } catch {
+                library.presentNotice(
+                    kind: .warning,
+                    title: "Poster Frame Couldn’t Be Saved",
+                    message: error.localizedDescription,
+                    fileURL: item.url
+                )
+            }
+        }
     }
 
     private func loadTranscriptDocuments() {

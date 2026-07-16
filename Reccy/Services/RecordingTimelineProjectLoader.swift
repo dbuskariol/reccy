@@ -72,6 +72,15 @@ enum RecordingTimelineProjectLoader {
         )
     }
 
+    static func save(_ project: TimelineProject, packageURL: URL) throws {
+        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(project)
+        try data.write(to: packageURL.appendingPathComponent("project.json"), options: .atomic)
+    }
+
     private static func makeInitialProject(for item: RecordingItem) async throws -> LoadedTimelineProject {
         let asset = AVURLAsset(url: item.url)
         let duration = try await asset.load(.duration).seconds
