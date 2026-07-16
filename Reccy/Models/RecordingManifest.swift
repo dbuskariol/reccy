@@ -56,7 +56,7 @@ nonisolated struct RecordingCameraDescriptor: Codable, Hashable, Sendable {
 }
 
 nonisolated struct RecordingManifest: Codable, Hashable, Sendable {
-    static let currentVersion = 2
+    static let currentVersion = 3
 
     var version = currentVersion
     var createdAt: Date
@@ -73,6 +73,7 @@ nonisolated struct RecordingManifest: Codable, Hashable, Sendable {
     var camera: RecordingCameraDescriptor? = nil
     var showsCursor: Bool
     var highlightsClicks: Bool
+    var mouseFollowZoomTrack: MouseFollowZoomTrack? = nil
 
     static func sidecarURL(for mediaURL: URL) -> URL {
         mediaURL.deletingPathExtension().appendingPathExtension("reccy.json")

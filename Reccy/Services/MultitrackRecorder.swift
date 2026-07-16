@@ -37,6 +37,7 @@ nonisolated struct MultitrackRecordingOptions: Sendable {
 
 nonisolated struct MultitrackRecordingCompletion: Equatable, Sendable {
     var cameraTailPaddingSeconds: TimeInterval = 0
+    var durationSeconds: TimeInterval = 0
 }
 
 /// Resolves user intent into one internally consistent writer configuration.
@@ -1114,6 +1115,10 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                 }
 
                 let cameraTail = appendCameraTailIfNeeded()
+                let recordingDuration = max(
+                    0,
+                    CMTimeSubtract(latestPresentationEndTime, sessionStartTime ?? .zero).seconds
+                )
                 videoInput?.markAsFinished()
                 cameraInput?.markAsFinished()
                 systemAudioInput?.markAsFinished()
@@ -1130,7 +1135,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                                 )
                             } else {
                                 continuation.resume(returning: MultitrackRecordingCompletion(
-                                    cameraTailPaddingSeconds: cameraTail.gapSeconds
+                                    cameraTailPaddingSeconds: cameraTail.gapSeconds,
+                                    durationSeconds: recordingDuration
                                 ))
                             }
                         } else {

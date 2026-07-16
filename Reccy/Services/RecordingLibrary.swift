@@ -69,7 +69,7 @@ final class RecordingLibrary: ObservableObject {
             let values = try? url.resourceValues(forKeys: keys)
             guard values?.isRegularFile != false else { return nil }
             guard let manifest = loadManifest(for: url),
-                  manifest.version == RecordingManifest.currentVersion
+                  (2...RecordingManifest.currentVersion).contains(manifest.version)
             else { return nil }
             return RecordingItem(
                 url: url,

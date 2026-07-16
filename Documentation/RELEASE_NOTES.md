@@ -2,6 +2,10 @@
 
 This production-readiness release continues Reccy's native macOS polish and reliability work:
 
+- Adds live mouse-follow zoom at 1.5×–4× with start-enabled and level defaults, Monitor and menu-bar controls, and a configurable global shortcut that can start or stop the effect during recording or pause.
+- Preserves every live mouse-follow interval as a non-destructive Editor effect with its recorded pointer path, editable magnification, resizable boundaries, Split All and ripple-delete behavior, undo, and VoiceOver actions.
+- Renders the same mouse-follow zoom in Monitor, Library, Editor, and delivery export through bounded native AVFoundation transform ramps while retaining the full-frame source and keeping camera video and captions anchored.
+- Gives Monitor a taller, reset default overview pane and an adaptive native status card so recording metadata and all three controls remain visible without clipping at supported window sizes.
 - Gives every global-shortcut recorder a unique assistive label so VoiceOver users can identify the action they are assigning.
 - Makes the Editor camera overlay fully operable with VoiceOver actions for selection, movement, aspect-preserving sizing, and reset instead of requiring pointer-only dragging.
 - Gives remaining icon-only folder, search, and transcript-export controls explicit spoken names, and removes the duplicated app name from update status.
