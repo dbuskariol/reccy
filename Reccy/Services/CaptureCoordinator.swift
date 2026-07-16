@@ -698,8 +698,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 configuration.displayIntent = .canonical
                 let destinationURL = try makeScreenshotURL()
                 configuration.fileURL = destinationURL
-                if let selectedSourceRect {
-                    configuration.sourceRect = selectedSourceRect
+                let geometry = captureGeometry(for: selectedFilter)
+                if let sourceRect = geometry.sourceRect {
+                    configuration.sourceRect = sourceRect
                 }
 
                 let output = try await SCScreenshotManager.captureScreenshot(
@@ -960,9 +961,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             configuration.pixelFormat = kCVPixelFormatType_32BGRA
         }
 
-        let captureRect = selectedSourceRect ?? filter.contentRect
+        let geometry = captureGeometry(for: filter)
         let size = settings.resolution.outputSize(
-            contentRect: captureRect,
+            contentRect: geometry.contentRect,
             pointPixelScale: CGFloat(filter.pointPixelScale)
         )
         configuration.width = Int(size.width)
@@ -983,10 +984,19 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         configuration.captureMicrophone = settings.includeMicrophone
         configuration.microphoneCaptureDeviceID = settings.selectedMicrophoneID
         configuration.streamName = "Reccy Recording"
-        if let selectedSourceRect {
-            configuration.sourceRect = selectedSourceRect
+        if let sourceRect = geometry.sourceRect {
+            configuration.sourceRect = sourceRect
         }
         return configuration
+    }
+
+    private func captureGeometry(for filter: SCContentFilter) -> CaptureStreamGeometry {
+        CaptureStreamGeometry.resolve(
+            kind: selectedSourceKind,
+            filterContentRect: filter.contentRect,
+            displayFrames: filter.includedDisplays.map(\.frame),
+            selectedSourceRect: selectedSourceRect
+        )
     }
 
     private func requestMicrophonePermissionIfNeeded() async -> Bool {

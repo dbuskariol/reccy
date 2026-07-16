@@ -1254,6 +1254,57 @@ struct ReccyTests {
         #expect(size.height == 1440)
     }
 
+    @Test func applicationCaptureCropsScreenSpaceContentIntoTheSelectedDisplay() {
+        let geometry = CaptureStreamGeometry.resolve(
+            kind: .application,
+            filterContentRect: CGRect(x: 5_600, y: 220, width: 1_600, height: 900),
+            displayFrames: [
+                CGRect(x: 0, y: 0, width: 3_840, height: 2_160),
+                CGRect(x: 3_840, y: 0, width: 5_120, height: 2_160),
+            ],
+            selectedSourceRect: nil
+        )
+
+        #expect(geometry.contentRect == CGRect(x: 0, y: 0, width: 1_600, height: 900))
+        #expect(geometry.sourceRect == CGRect(x: 1_760, y: 220, width: 1_600, height: 900))
+    }
+
+    @Test func displayAndWindowCaptureKeepScreenCaptureKitsNativeExtent() {
+        let filterRect = CGRect(x: 4_800, y: 160, width: 1_920, height: 1_080)
+        let displayFrame = CGRect(x: 3_840, y: 0, width: 5_120, height: 2_160)
+
+        let display = CaptureStreamGeometry.resolve(
+            kind: .display,
+            filterContentRect: displayFrame,
+            displayFrames: [displayFrame],
+            selectedSourceRect: nil
+        )
+        let window = CaptureStreamGeometry.resolve(
+            kind: .window,
+            filterContentRect: filterRect,
+            displayFrames: [displayFrame],
+            selectedSourceRect: nil
+        )
+
+        #expect(display.sourceRect == nil)
+        #expect(display.contentRect.size == displayFrame.size)
+        #expect(window.sourceRect == nil)
+        #expect(window.contentRect.size == filterRect.size)
+    }
+
+    @Test func portionCaptureRetainsItsDisplayLocalCrop() {
+        let region = CGRect(x: 320, y: 180, width: 1_280, height: 720)
+        let geometry = CaptureStreamGeometry.resolve(
+            kind: .region,
+            filterContentRect: CGRect(x: 0, y: 0, width: 2_560, height: 1_440),
+            displayFrames: [CGRect(x: 3_840, y: 0, width: 2_560, height: 1_440)],
+            selectedSourceRect: region
+        )
+
+        #expect(geometry.sourceRect == region)
+        #expect(geometry.contentRect == CGRect(x: 0, y: 0, width: 1_280, height: 720))
+    }
+
     @Test func resolutionDoesNotUpscaleSmallWindow() {
         let size = CaptureResolution.ultraHD.outputSize(
             contentRect: CGRect(x: 0, y: 0, width: 1280, height: 720),
