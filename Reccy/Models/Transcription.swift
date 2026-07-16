@@ -152,6 +152,86 @@ nonisolated struct TranscriptDocument: Codable, Equatable, Sendable {
     var searchableText: String {
         tracks.map(\.text).joined(separator: " ")
     }
+
+    /// An empty document is a durable, successful "no speech" result. Keeping
+    /// that outcome in the sidecar prevents a silent recording from reverting
+    /// to "No transcript yet" every time the app relaunches.
+    var hasRecognizedSpeech: Bool {
+        !searchableText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func sanitized(sourceDuration: TimeInterval) -> Self {
+        guard sourceDuration.isFinite, sourceDuration > 0 else { return self }
+        var document = self
+        document.tracks = tracks.map { sourceTrack in
+            var track = sourceTrack
+            track.segments = TranscriptSegmentSanitizer.sanitize(
+                track.segments,
+                sourceRange: 0..<sourceDuration,
+                removesWhisperSilencePlaceholders: track.provider == .whisperKit
+            )
+            return track
+        }
+        return document
+    }
+}
+
+nonisolated enum TranscriptSegmentSanitizer {
+    static func sanitize(
+        _ segments: [TranscriptSegment],
+        sourceRange: Range<TimeInterval>? = nil,
+        removesWhisperSilencePlaceholders: Bool = false
+    ) -> [TranscriptSegment] {
+        let lowerBound = sourceRange?.lowerBound ?? 0
+        let upperBound = sourceRange?.upperBound ?? .infinity
+        guard lowerBound.isFinite, upperBound > lowerBound else { return [] }
+
+        return segments.compactMap { sourceSegment in
+            let displayText = sourceSegment.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !displayText.isEmpty else { return nil }
+            if removesWhisperSilencePlaceholders, isWhisperSilencePlaceholder(displayText) {
+                return nil
+            }
+            guard sourceSegment.sourceStart.isFinite,
+                  sourceSegment.duration.isFinite,
+                  sourceSegment.duration > 0
+            else { return nil }
+
+            let sourceEnd = sourceSegment.sourceEnd
+            guard sourceEnd.isFinite else { return nil }
+            let start = max(lowerBound, sourceSegment.sourceStart)
+            let end = min(upperBound, sourceEnd)
+            guard end - start > 0.001 else { return nil }
+
+            var segment = sourceSegment
+            segment.sourceStart = start
+            segment.duration = end - start
+            segment.words = sourceSegment.words.compactMap { sourceWord in
+                guard sourceWord.sourceStart.isFinite,
+                      sourceWord.duration.isFinite,
+                      sourceWord.duration > 0,
+                      sourceWord.sourceEnd.isFinite
+                else { return nil }
+                let wordStart = max(start, sourceWord.sourceStart)
+                let wordEnd = min(end, sourceWord.sourceEnd)
+                guard wordEnd - wordStart > 0.001 else { return nil }
+                var word = sourceWord
+                word.sourceStart = wordStart
+                word.duration = wordEnd - wordStart
+                return word
+            }
+            return segment
+        }
+    }
+
+    private static func isWhisperSilencePlaceholder(_ text: String) -> Bool {
+        let token = text.lowercased().filter(\.isLetter)
+        return token == "blankaudio"
+            || token == "noaudio"
+            || token == "silence"
+            || token == "silentaudio"
+            || token == "nospeech"
+    }
 }
 
 nonisolated struct ProjectedTranscriptSegment: Identifiable, Hashable, Sendable {

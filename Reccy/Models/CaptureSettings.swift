@@ -261,7 +261,11 @@ enum ScreenshotRange: String, CaseIterable, Identifiable, Codable, Sendable {
     var screenCaptureRange: SCScreenshotConfiguration.DynamicRange {
         switch self {
         case .sdr: .sdr
-        case .hdr: .hdr
+        // Asking for both representations keeps the HDR image available to
+        // Reccy's encoder when ScreenCaptureKit does not persist its requested
+        // file. Some macOS 26 display/content combinations return neither a
+        // file nor `hdrImage` when HDR is requested alone.
+        case .hdr: .bothSDRAndHDR
         }
     }
 }

@@ -58,6 +58,9 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(navigation.settingsCategory == category ? .primary : .secondary)
+                .accessibilityAddTraits(
+                    navigation.settingsCategory == category ? .isSelected : []
+                )
                 .reccyTooltip(category.title)
             }
             Spacer()
@@ -169,7 +172,8 @@ struct SettingsView: View {
                             Image(systemName: "folder")
                                 .frame(width: 16, height: 16)
                         }
-                        .reccyTooltip("Open recording folder")
+                        .reccyAccessibleControl("Open Recording Folder")
+                        .disabled(!coordinator.library.availability.isAvailable)
                     }
                 }
                 if coordinator.settings.outputFolderPath != nil {
@@ -629,6 +633,7 @@ struct SettingsView: View {
                         systemImage: shortcutSystemImage(shortcut)
                     ) {
                         KeyboardShortcuts.Recorder(for: shortcut.name)
+                            .accessibilityLabel("\(shortcut.title) shortcut")
                     }
                     if index < ReccyGlobalShortcut.allCases.count - 1 {
                         SettingsDivider()
@@ -718,7 +723,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsCard(title: "Reccy") {
+            SettingsCard(title: "Current Version") {
                 SettingsActionRow(
                     title: appVersion,
                     detail: "Updates are signed and verified by Sparkle before installation.",
@@ -871,7 +876,7 @@ struct SettingsView: View {
     private var appVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
-        return "Reccy \(version) (\(build))"
+        return "\(version) (\(build))"
     }
 }
 

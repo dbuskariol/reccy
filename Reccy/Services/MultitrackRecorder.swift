@@ -35,6 +35,10 @@ nonisolated struct MultitrackRecordingOptions: Sendable {
     var targetCameraBitRate: Int { 5_000_000 }
 }
 
+nonisolated struct MultitrackRecordingCompletion: Equatable, Sendable {
+    var cameraTailPaddingSeconds: TimeInterval = 0
+}
+
 /// Resolves user intent into one internally consistent writer configuration.
 /// HDR always uses HEVC; SDR follows the selected preset. The preset continues
 /// to control the container and quality target while the resolved codec is
@@ -67,6 +71,7 @@ enum MultitrackRecorderError: LocalizedError {
     case writerFailed(Error?)
     case noVideoFrames
     case couldNotRetimeSample
+    case cameraTrackEndedEarly
 
     var errorDescription: String? {
         switch self {
@@ -86,6 +91,8 @@ enum MultitrackRecorderError: LocalizedError {
         case .writerFailed: "The recording encoder stopped unexpectedly. Reccy preserved any recoverable media."
         case .noVideoFrames: "No complete video frames were received from the selected source."
         case .couldNotRetimeSample: "The recorder couldn’t close the paused section of the media timeline."
+        case .cameraTrackEndedEarly:
+            "The camera stopped sending video before the screen recording ended. Reccy preserved the recoverable media."
         }
     }
 }
@@ -184,6 +191,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     private var sessionStartTime: CMTime?
     private var latestPresentationTime: CMTime = .invalid
     private var latestPresentationEndTime: CMTime = .invalid
+    private var latestCameraPresentationEndTime: CMTime = .invalid
+    private var lastCameraSample: CMSampleBuffer?
     private var nominalVideoFrameDuration: CMTime = .invalid
     private var pauseTimeline = RecordingPauseTimeline()
     private var outputURL: URL?
@@ -279,7 +288,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         }
     }
 
-    func stop() async throws {
+    func stop() async throws -> MultitrackRecordingCompletion {
         let request = requestStreamStop()
         guard let stream = request.stream else {
             throw MultitrackRecorderError.noVideoFrames
@@ -292,9 +301,9 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             await webcam?.stop()
             logger.info("Camera samples drained while recording start was settling")
             await waitForStreamStartToSettle()
-            try await finishWriting()
+            let completion = try await finishWriting()
             logger.info("Recording writer finalized after in-flight start")
-            return
+            return completion
         }
         let webcam = webcamSession
         webcamSession = nil
@@ -316,8 +325,9 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         await webcam?.stop()
         logger.info("Camera samples drained")
         do {
-            try await finishWriting()
+            let completion = try await finishWriting()
             logger.info("Recording writer finalized")
+            return completion
         } catch {
             logger.error(
                 "Recording writer finalization failed reason=\(error.localizedDescription, privacy: .public)"
@@ -549,6 +559,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         sessionStartTime = nil
         latestPresentationTime = .invalid
         latestPresentationEndTime = .invalid
+        latestCameraPresentationEndTime = .invalid
+        lastCameraSample = nil
         nominalVideoFrameDuration = CMTime(
             value: 1,
             timescale: CMTimeScale(options.frameRate)
@@ -716,7 +728,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             return
         }
         guard CMTimeCompare(writerBuffer.presentationTimeStamp, sessionStartTime) >= 0 else { return }
-        _ = append(writerBuffer, to: cameraInput, fallbackDuration: nominalVideoFrameDuration)
+        _ = appendCamera(writerBuffer)
         if writer?.status == .failed {
             notifyFailure(MultitrackRecorderError.writerFailed(writer?.error))
         }
@@ -755,9 +767,24 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         for sample in pendingCamera
             where CMTimeCompare(sample.presentationTimeStamp, startTime) >= 0
         {
-            _ = append(sample, to: cameraInput, fallbackDuration: nominalVideoFrameDuration)
+            _ = appendCamera(sample)
         }
         pendingCamera.removeAll(keepingCapacity: true)
+    }
+
+    @discardableResult
+    private func appendCamera(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        guard append(
+            sampleBuffer,
+            to: cameraInput,
+            fallbackDuration: nominalVideoFrameDuration
+        ) else { return false }
+        lastCameraSample = sampleBuffer
+        latestCameraPresentationEndTime = Self.sampleEndTime(
+            sampleBuffer,
+            fallbackDuration: nominalVideoFrameDuration
+        )
+        return true
     }
 
     private func handleAudio(
@@ -836,18 +863,102 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             latestPresentationTime = presentationTime
         }
 
-        let sampleDuration = sampleBuffer.duration
-        let duration = sampleDuration.isValid && CMTimeCompare(sampleDuration, .zero) > 0
-            ? sampleDuration
-            : fallbackDuration
-        let endTime = duration.isValid && CMTimeCompare(duration, .zero) > 0
-            ? CMTimeAdd(presentationTime, duration)
-            : presentationTime
+        let endTime = Self.sampleEndTime(sampleBuffer, fallbackDuration: fallbackDuration)
         if !latestPresentationEndTime.isValid
             || CMTimeCompare(endTime, latestPresentationEndTime) > 0
         {
             latestPresentationEndTime = endTime
         }
+    }
+
+    private static func sampleEndTime(
+        _ sampleBuffer: CMSampleBuffer,
+        fallbackDuration: CMTime
+    ) -> CMTime {
+        let presentationTime = sampleBuffer.presentationTimeStamp
+        let sampleDuration = sampleBuffer.duration
+        let duration = sampleDuration.isValid && CMTimeCompare(sampleDuration, .zero) > 0
+            ? sampleDuration
+            : fallbackDuration
+        return duration.isValid && CMTimeCompare(duration, .zero) > 0
+            ? CMTimeAdd(presentationTime, duration)
+            : presentationTime
+    }
+
+    /// Returns the timestamp for one duplicate tail frame when a camera stops
+    /// substantially before the rest of the recording. A short, ordinary
+    /// shutdown skew is left untouched; a larger gap is closed so the editable
+    /// camera lane remains aligned with screen and audio while the UI warns that
+    /// the last camera frame was held.
+    static func cameraTailPaddingPresentationTime(
+        cameraEnd: CMTime,
+        recordingEnd: CMTime,
+        sampleDuration: CMTime,
+        lastPresentationTime: CMTime
+    ) -> CMTime? {
+        guard cameraEnd.isValid,
+              recordingEnd.isValid,
+              sampleDuration.isValid,
+              lastPresentationTime.isValid,
+              CMTimeCompare(sampleDuration, .zero) > 0,
+              CMTimeCompare(
+                  CMTimeSubtract(recordingEnd, cameraEnd),
+                  CMTime(seconds: 0.25, preferredTimescale: 600)
+              ) > 0
+        else { return nil }
+
+        let target = CMTimeSubtract(recordingEnd, sampleDuration)
+        return CMTimeCompare(target, lastPresentationTime) > 0 ? target : nil
+    }
+
+    private static func retimed(
+        _ sampleBuffer: CMSampleBuffer,
+        toPresentationTime presentationTime: CMTime
+    ) -> CMSampleBuffer? {
+        let originalPresentationTime = sampleBuffer.presentationTimeStamp
+        guard originalPresentationTime.isValid, presentationTime.isValid else { return nil }
+        let adjustment = CMTimeSubtract(presentationTime, originalPresentationTime)
+
+        var timingCount = 0
+        guard CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: 0,
+            arrayToFill: nil,
+            entriesNeededOut: &timingCount
+        ) == noErr, timingCount > 0 else { return nil }
+
+        var timing = Array(repeating: CMSampleTimingInfo(), count: timingCount)
+        guard CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: timingCount,
+            arrayToFill: &timing,
+            entriesNeededOut: &timingCount
+        ) == noErr else { return nil }
+
+        for index in timing.indices {
+            if timing[index].presentationTimeStamp.isValid {
+                timing[index].presentationTimeStamp = CMTimeAdd(
+                    timing[index].presentationTimeStamp,
+                    adjustment
+                )
+            }
+            if timing[index].decodeTimeStamp.isValid {
+                timing[index].decodeTimeStamp = CMTimeAdd(
+                    timing[index].decodeTimeStamp,
+                    adjustment
+                )
+            }
+        }
+
+        var result: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: sampleBuffer,
+            sampleTimingEntryCount: timing.count,
+            sampleTimingArray: &timing,
+            sampleBufferOut: &result
+        )
+        return status == noErr ? result : nil
     }
 
     private static func retimed(
@@ -963,8 +1074,37 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         return min(max((decibels + 60) / 60, 0), 1)
     }
 
-    private func finishWriting() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+    private func appendCameraTailIfNeeded() -> (gapSeconds: TimeInterval, appended: Bool) {
+        guard cameraInput != nil, let sessionStartTime, latestPresentationEndTime.isValid else {
+            return (0, true)
+        }
+        guard let lastCameraSample, latestCameraPresentationEndTime.isValid else {
+            let duration = CMTimeSubtract(latestPresentationEndTime, sessionStartTime)
+            return (max(0, duration.seconds), false)
+        }
+
+        let duration = lastCameraSample.duration.isValid
+            && CMTimeCompare(lastCameraSample.duration, .zero) > 0
+            ? lastCameraSample.duration
+            : nominalVideoFrameDuration
+        guard let target = Self.cameraTailPaddingPresentationTime(
+            cameraEnd: latestCameraPresentationEndTime,
+            recordingEnd: latestPresentationEndTime,
+            sampleDuration: duration,
+            lastPresentationTime: lastCameraSample.presentationTimeStamp
+        ) else { return (0, true) }
+
+        let gap = CMTimeSubtract(latestPresentationEndTime, latestCameraPresentationEndTime)
+        guard let tail = Self.retimed(lastCameraSample, toPresentationTime: target) else {
+            return (max(0, gap.seconds), false)
+        }
+        let appended = append(tail, to: cameraInput, fallbackDuration: duration)
+        return (max(0, gap.seconds), appended)
+    }
+
+    private func finishWriting() async throws -> MultitrackRecordingCompletion {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<MultitrackRecordingCompletion, Error>) in
             sampleQueue.async { [self] in
                 guard let writer, sessionStartTime != nil else {
                     writer?.cancelWriting()
@@ -973,6 +1113,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                     return
                 }
 
+                let cameraTail = appendCameraTailIfNeeded()
                 videoInput?.markAsFinished()
                 cameraInput?.markAsFinished()
                 systemAudioInput?.markAsFinished()
@@ -983,7 +1124,15 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                         let error = self.writer?.error
                         resetWriterState(keepOutputURL: true)
                         if status == .completed {
-                            continuation.resume()
+                            if cameraTail.gapSeconds > 0, !cameraTail.appended {
+                                continuation.resume(
+                                    throwing: MultitrackRecorderError.cameraTrackEndedEarly
+                                )
+                            } else {
+                                continuation.resume(returning: MultitrackRecordingCompletion(
+                                    cameraTailPaddingSeconds: cameraTail.gapSeconds
+                                ))
+                            }
                         } else {
                             continuation.resume(throwing: MultitrackRecorderError.writerFailed(error))
                         }
@@ -1012,6 +1161,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         sessionStartTime = nil
         latestPresentationTime = .invalid
         latestPresentationEndTime = .invalid
+        latestCameraPresentationEndTime = .invalid
+        lastCameraSample = nil
         nominalVideoFrameDuration = .invalid
         pauseTimeline.reset()
         systemAudioLevel = 0

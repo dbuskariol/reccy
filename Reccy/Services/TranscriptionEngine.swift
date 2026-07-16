@@ -94,6 +94,12 @@ nonisolated struct TranscriptionBatchResult: Sendable {
     let tracks: [TranscriptTrack]
     let failures: [TranscriptionTrackFailure]
 
+    var containsOnlyNoSpeechFailures: Bool {
+        !failures.isEmpty && failures.allSatisfy {
+            $0.message == TranscriptionEngineError.noSpeechRecognized.localizedDescription
+        }
+    }
+
     var failureMessage: String {
         guard failures.count > 1 else {
             return failures.first?.message

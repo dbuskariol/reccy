@@ -139,7 +139,10 @@ reccy_assert_release_metadata() {
   if [[ -z "$tag" && "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
     tag="${GITHUB_REF_NAME:-}"
   fi
-  if [[ -z "$tag" ]]; then
+  # An exact tag describes the committed tree, not uncommitted version work.
+  # Release builds already require a clean worktree; local verification must
+  # remain usable while preparing the next version directly from a release tag.
+  if [[ -z "$tag" && -z "$(/usr/bin/git -C "$root" status --porcelain --untracked-files=normal)" ]]; then
     tag="$(/usr/bin/git -C "$root" describe --tags --exact-match 2>/dev/null || true)"
   fi
   if [[ -n "$tag" ]]; then

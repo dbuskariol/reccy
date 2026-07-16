@@ -3,19 +3,29 @@ import AVFoundation
 import Foundation
 import QuickLookThumbnailing
 
+enum RecordingLibraryAvailability: Equatable, Sendable {
+    case available
+    case unavailable(message: String)
+
+    var isAvailable: Bool {
+        if case .available = self { return true }
+        return false
+    }
+}
+
 @MainActor
 final class RecordingLibrary: ObservableObject {
     @Published private(set) var recordings: [RecordingItem] = []
     @Published private(set) var directoryURL: URL
     @Published private(set) var thumbnails: [URL: NSImage] = [:]
     @Published private(set) var recoveryNotice: RecordingRecoveryNotice?
+    @Published private(set) var availability: RecordingLibraryAvailability = .available
     private var isRecoveringInterruptedRecording = false
     private var recoveryTask: Task<Void, Never>?
 
     init(directoryURL: URL) {
         self.directoryURL = directoryURL
         refresh()
-        recoverInterruptedRecordingIfNeeded()
     }
 
     func setDirectory(_ url: URL) {
@@ -23,9 +33,9 @@ final class RecordingLibrary: ObservableObject {
         recoveryTask?.cancel()
         recoveryTask = nil
         isRecoveringInterruptedRecording = false
+        recoveryNotice = nil
         directoryURL = url
         refresh()
-        recoverInterruptedRecordingIfNeeded()
     }
 
     func refresh() {
@@ -47,14 +57,10 @@ final class RecordingLibrary: ObservableObject {
         } catch {
             recordings = []
             thumbnails = [:]
-            presentNotice(
-                kind: .warning,
-                title: "Recording Folder Is Unavailable",
-                message: error.localizedDescription,
-                fileURL: directoryURL
-            )
+            availability = .unavailable(message: error.localizedDescription)
             return
         }
+        availability = .available
 
         recordings = urls.compactMap { url in
             guard ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased()) else {
@@ -81,6 +87,7 @@ final class RecordingLibrary: ObservableObject {
 
         thumbnails = thumbnails.filter { url, _ in recordings.contains(where: { $0.url == url }) }
         Task { await loadMediaDetails() }
+        recoverInterruptedRecordingIfNeeded()
     }
 
     func delete(_ item: RecordingItem) throws {
@@ -121,7 +128,7 @@ final class RecordingLibrary: ObservableObject {
     }
 
     func recoverInterruptedRecordingIfNeeded() {
-        guard !isRecoveringInterruptedRecording else { return }
+        guard availability.isAvailable, !isRecoveringInterruptedRecording else { return }
         isRecoveringInterruptedRecording = true
         let directory = directoryURL
         recoveryTask = Task { [weak self] in

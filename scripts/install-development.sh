@@ -8,6 +8,7 @@ DERIVED_DATA="${RECCY_DERIVED_DATA:-$(reccy_default_derived_data Development)}"
 INSTALL_PATH="${RECCY_INSTALL_PATH:-/Applications/Reccy.app}"
 BUILT_APP="$DERIVED_DATA/Build/Products/Debug/Reccy.app"
 SIGNING_IDENTITY="${RECCY_CODESIGN_IDENTITY:-}"
+HOST_ARCH="$(/usr/bin/uname -m)"
 
 if [[ -z "$SIGNING_IDENTITY" ]]; then
   SIGNING_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null \
@@ -39,7 +40,7 @@ XCODE_ARGS=(
   -project "$ROOT_DIR/Reccy.xcodeproj"
   -scheme Reccy
   -configuration Debug
-  -destination "platform=macOS"
+  -destination "platform=macOS,arch=$HOST_ARCH"
   -derivedDataPath "$DERIVED_DATA"
   CODE_SIGN_STYLE=Manual
   CODE_SIGN_IDENTITY="$SIGNING_IDENTITY"

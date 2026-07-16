@@ -233,6 +233,22 @@ nonisolated struct RecordingRecoveryJournal: Codable, Equatable, Sendable {
         guard FileManager.default.fileExists(atPath: journalURL.path) else { return }
         try FileManager.default.removeItem(at: journalURL)
     }
+
+    /// Removes a recording that never reached its first complete video frame.
+    /// The journal stays in place until the partial media has been removed, so
+    /// a filesystem failure can still be surfaced by the normal recovery path.
+    static func discardIncompleteRecording(mediaURL: URL) throws {
+        let directory = mediaURL.deletingLastPathComponent()
+        if let journal = try load(from: directory),
+           journal.mediaFileName != mediaURL.lastPathComponent
+        {
+            throw RecordingRecoveryError.invalidJournal
+        }
+        if FileManager.default.fileExists(atPath: mediaURL.path) {
+            try FileManager.default.removeItem(at: mediaURL)
+        }
+        try remove(from: directory)
+    }
 }
 
 nonisolated enum RecordingRecoveryError: LocalizedError {

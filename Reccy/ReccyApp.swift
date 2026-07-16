@@ -10,8 +10,10 @@ struct ReccyApp: App {
 
 #if DEBUG
     private let presentsActiveMenuBarQAHarness = CommandLine.arguments.contains("-ReccyMenuBarActiveQA")
+    private let presentsBlockedMenuBarQAHarness = CommandLine.arguments.contains("-ReccyMenuBarBlockedQA")
     private let presentsMenuBarQAHarness = CommandLine.arguments.contains("-ReccyMenuBarQA")
         || CommandLine.arguments.contains("-ReccyMenuBarActiveQA")
+        || CommandLine.arguments.contains("-ReccyMenuBarBlockedQA")
 #endif
 
     var body: some Scene {
@@ -28,45 +30,10 @@ struct ReccyApp: App {
         .defaultSize(width: defaultWindowWidth, height: defaultWindowHeight)
         .windowStyle(.hiddenTitleBar)
         .commands {
-            CommandMenu("Recording") {
-                Button("Choose Display…") {
-                    coordinator.chooseSource(.display)
-                }
-                .keyboardShortcut("1", modifiers: [.command, .shift])
-
-                Button("Choose Application…") {
-                    coordinator.chooseSource(.application)
-                }
-                .keyboardShortcut("2", modifiers: [.command, .shift])
-
-                Button("Choose Portion…") {
-                    coordinator.chooseSource(.region)
-                }
-                .keyboardShortcut("3", modifiers: [.command, .shift])
-
-                Button("Choose Window…") {
-                    coordinator.chooseSource(.window)
-                }
-                .keyboardShortcut("4", modifiers: [.command, .shift])
-
-                Divider()
-
-                Button(coordinator.state.isRecording ? coordinator.state.stopButtonTitle : "Start Recording") {
-                    if coordinator.state.isRecording {
-                        coordinator.stopRecording()
-                    } else {
-                        coordinator.startRecording()
-                    }
-                }
-                .disabled(coordinator.state == .stopping)
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-
-                Button(coordinator.state == .paused ? "Resume Recording" : "Pause Recording") {
-                    coordinator.toggleRecordingPause()
-                }
-                .disabled(coordinator.state != .recording && coordinator.state != .paused)
-                .keyboardShortcut("p", modifiers: [.command, .shift])
-            }
+            RecordingCommands(
+                coordinator: coordinator,
+                transcription: coordinator.transcription
+            )
 
             CommandMenu("Editor") {
                 Button("Previous Frame") {
@@ -148,6 +115,8 @@ struct ReccyApp: App {
                 .task {
                     if presentsActiveMenuBarQAHarness {
                         coordinator.installActiveMenuBarQAScenario()
+                    } else if presentsBlockedMenuBarQAHarness {
+                        coordinator.installBlockedMenuBarQAScenario()
                     }
                 }
         } else {
@@ -212,6 +181,20 @@ struct ReccyApp: App {
         } else if CommandLine.arguments.contains("-ReccyLibraryQA") {
             coordinator.library.refresh()
             navigation.section = .library
+        } else if CommandLine.arguments.contains("-ReccyEmptyLibraryQA") {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("Reccy Empty Library QA", isDirectory: true)
+            try? FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            coordinator.library.setDirectory(directory)
+            navigation.section = .library
+        } else if CommandLine.arguments.contains("-ReccyUnavailableLibraryQA") {
+            coordinator.library.setDirectory(
+                URL(fileURLWithPath: "/dev/null/Reccy Unavailable Library", isDirectory: true)
+            )
+            navigation.section = .library
         } else if CommandLine.arguments.contains("-ReccyLibraryTranscriptionQA") {
             coordinator.library.refresh()
             if let recording = coordinator.library.recordings.first {
@@ -254,4 +237,63 @@ struct ReccyApp: App {
         }
     }
 #endif
+}
+
+private struct RecordingCommands: Commands {
+    @ObservedObject var coordinator: CaptureCoordinator
+    @ObservedObject var transcription: TranscriptionController
+
+    var body: some Commands {
+        CommandMenu("Recording") {
+            Button("Choose Display…") {
+                coordinator.chooseSource(.display)
+            }
+            .keyboardShortcut("1", modifiers: [.command, .shift])
+            .disabled(!canChooseSource)
+
+            Button("Choose Application…") {
+                coordinator.chooseSource(.application)
+            }
+            .keyboardShortcut("2", modifiers: [.command, .shift])
+            .disabled(!canChooseSource)
+
+            Button("Choose Portion…") {
+                coordinator.chooseSource(.region)
+            }
+            .keyboardShortcut("3", modifiers: [.command, .shift])
+            .disabled(!canChooseSource)
+
+            Button("Choose Window…") {
+                coordinator.chooseSource(.window)
+            }
+            .keyboardShortcut("4", modifiers: [.command, .shift])
+            .disabled(!canChooseSource)
+
+            Divider()
+
+            Button(coordinator.state.isRecording ? coordinator.state.stopButtonTitle : "Start Recording") {
+                if coordinator.state.isRecording {
+                    coordinator.stopRecording()
+                } else {
+                    coordinator.startRecording()
+                }
+            }
+            .disabled(
+                coordinator.state.isRecording
+                    ? coordinator.state == .stopping
+                    : !coordinator.canStartRecording
+            )
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+
+            Button(coordinator.state == .paused ? "Resume Recording" : "Pause Recording") {
+                coordinator.toggleRecordingPause()
+            }
+            .disabled(coordinator.state != .recording && coordinator.state != .paused)
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+        }
+    }
+
+    private var canChooseSource: Bool {
+        coordinator.state.canChangeSettings && !coordinator.isSelectingSource
+    }
 }

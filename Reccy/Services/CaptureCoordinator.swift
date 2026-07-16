@@ -46,11 +46,39 @@ enum CaptureState: Equatable, Sendable {
     }
 }
 
+enum CaptureFailureContext: Equatable, Sendable {
+    case capture
+    case screenshot
+
+    var title: String {
+        switch self {
+        case .capture: "Reccy couldn’t continue"
+        case .screenshot: "Screenshot couldn’t be saved"
+        }
+    }
+}
+
 enum CaptureStopOperation: Equatable, Sendable {
     case none
     case cancelCountdown
     case cancelStartup
     case finishRecording
+}
+
+enum CaptureFailureArtifactDisposition: Equatable, Sendable {
+    case none
+    case discard
+    case recover
+
+    static func resolve(state: CaptureState, hasOutputURL: Bool) -> Self {
+        guard hasOutputURL else { return .none }
+        switch state {
+        case .recording, .paused, .stopping:
+            return .recover
+        case .idle, .sourceSelected, .countingDown, .starting, .failed:
+            return .discard
+        }
+    }
 }
 
 struct CaptureSessionCompletion: Equatable, Identifiable, Sendable {
@@ -71,6 +99,48 @@ enum CapturePermissionStatus: Equatable, Sendable {
     var isGranted: Bool { self == .granted }
 }
 
+struct CapturePermissionReadiness: Equatable, Sendable {
+    let directCaptureIssue: CapturePermissionStatus?
+    let needsCameraAccess: Bool
+    let needsMicrophoneAccess: Bool
+
+    var needsAttention: Bool {
+        directCaptureIssue != nil || needsCameraAccess || needsMicrophoneAccess
+    }
+
+    var detail: String {
+        var details: [String] = []
+        if let directCaptureIssue {
+            details.append(
+                directCaptureIssue == .restartRequired
+                    ? "Quit and reopen Reccy to finish enabling Portion capture."
+                    : "Portion capture needs Direct Screen & System Audio Access."
+            )
+        }
+        if needsCameraAccess {
+            details.append("Camera recording is enabled but camera access is not allowed.")
+        }
+        if needsMicrophoneAccess {
+            details.append("Microphone recording is enabled but microphone access is not allowed.")
+        }
+        return details.joined(separator: " ")
+    }
+}
+
+struct CaptureStartReadiness: Equatable, Sendable {
+    let hasSelectedSource: Bool
+    let canChangeSettings: Bool
+    let permissionNeedsAttention: Bool
+    let transcriptionNeedsAttention: Bool
+
+    var canStart: Bool {
+        hasSelectedSource
+            && canChangeSettings
+            && !permissionNeedsAttention
+            && !transcriptionNeedsAttention
+    }
+}
+
 @MainActor
 final class CaptureCoordinator: NSObject, ObservableObject {
     @Published var settings: CaptureSettings {
@@ -82,6 +152,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
     @Published private(set) var state: CaptureState = .idle
+    @Published private(set) var failureContext: CaptureFailureContext = .capture
     @Published private(set) var selectedSourceKind: CaptureSourceKind = .display
     @Published private(set) var hasSelectedSource = false
     @Published private(set) var recordedDuration: TimeInterval = 0
@@ -123,7 +194,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var meterTask: Task<Void, Never>?
     private var sessionGeneration: UInt = 0
     private var activationCancellable: AnyCancellable?
-    private var observesSystemPicker = false
     private let regionSelectionController = RegionSelectionController()
     private let boundaryController = CaptureBoundaryController()
 #if DEBUG
@@ -144,6 +214,11 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         // unassociated stream.
         picker.maximumStreamCount = CaptureSourcePickerPolicy.maximumConcurrentStreams
         picker.isActive = false
+        // Keep one observer registration for the coordinator lifetime. Removing
+        // it from inside a picker callback and adding it again for the next
+        // selection can eventually stop macOS from delivering either update or
+        // cancellation callbacks, leaving the source workflow stuck.
+        picker.add(self)
         refreshAudioInputDevices()
         refreshCameraInputDevices()
         refreshPermissionStatus()
@@ -157,6 +232,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                     self?.refreshCameraInputDevices()
                 }
             }
+    }
+
+    deinit {
+        SCContentSharingPicker.shared.remove(self)
     }
 
     var formattedDuration: String {
@@ -186,6 +265,33 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
         return AVCaptureDevice.default(for: .video)?.localizedName ?? "System Default"
     }
+
+    var capturePermissionReadiness: CapturePermissionReadiness {
+        CapturePermissionReadiness(
+            directCaptureIssue: selectedSourceKind.requiresDirectCapturePermission
+                && !directCapturePermission.isGranted
+                ? directCapturePermission
+                : nil,
+            needsCameraAccess: settings.includeCamera && cameraPermission != .authorized,
+            needsMicrophoneAccess: settings.includeMicrophone && microphonePermission != .authorized
+        )
+    }
+
+    var captureStartReadiness: CaptureStartReadiness {
+        let transcriptionConfiguration = transcription.makeCaptureConfiguration(
+            systemAudio: settings.includeSystemAudio,
+            microphone: settings.includeMicrophone
+        )
+        return CaptureStartReadiness(
+            hasSelectedSource: hasSelectedSource,
+            canChangeSettings: state.canChangeSettings,
+            permissionNeedsAttention: capturePermissionReadiness.needsAttention,
+            transcriptionNeedsAttention: transcriptionConfiguration.isEnabled
+                && !transcription.captureReadiness.isReady
+        )
+    }
+
+    var canStartRecording: Bool { captureStartReadiness.canStart }
 
     private var selectedCameraUniqueID: String {
         settings.selectedCameraID ?? AVCaptureDevice.default(for: .video)?.uniqueID ?? ""
@@ -242,9 +348,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         hasSelectedSource = false
         boundaryController.hide()
         state = .idle
+        sourceSelectionMessage = nil
 
         guard !kind.requiresDirectCapturePermission || directCapturePermission.isGranted else {
-            sourceSelectionMessage = "Portion capture needs Direct Screen & System Audio Access. Allow Reccy once in Permissions."
             return
         }
 
@@ -274,10 +380,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
         let picker = SCContentSharingPicker.shared
         picker.defaultConfiguration = pickerConfiguration
-        if !observesSystemPicker {
-            picker.add(self)
-            observesSystemPicker = true
-        }
         picker.isActive = true
         picker.present(using: contentStyle)
     }
@@ -330,11 +432,11 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         let granted = CGRequestScreenCaptureAccess()
         if granted && !wasGranted {
             directCapturePermission = .restartRequired
-            sourceSelectionMessage = "Direct capture access granted. Quit and reopen Reccy once to enable Portion capture."
+            sourceSelectionMessage = nil
         } else {
             refreshPermissionStatus()
             if !granted {
-                sourceSelectionMessage = "Enable Reccy in System Settings → Privacy & Security → Screen & System Audio Recording to use Portion capture."
+                sourceSelectionMessage = nil
             }
         }
     }
@@ -400,10 +502,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     func startRecording() {
-        guard let filter = selectedFilter, state.canChangeSettings else {
+        guard state.canChangeSettings else { return }
+        guard let filter = selectedFilter, hasSelectedSource else {
             chooseSource(selectedSourceKind)
             return
         }
+        guard !capturePermissionReadiness.needsAttention else { return }
 
         let transcriptionConfiguration = transcription.makeCaptureConfiguration(
             systemAudio: settings.includeSystemAudio,
@@ -482,9 +586,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
         recordingStopTask = Task { [weak self] in
             do {
-                try await recorder.stop()
+                let completion = try await recorder.stop()
                 guard let self else { return }
-                self.finishRecording()
+                self.finishRecording(completion: completion)
             } catch {
                 guard let self else { return }
                 self.handleFailure(error)
@@ -555,7 +659,8 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 configuration.contentType = settings.screenshotFormat.contentType as UTTypeReference
                 configuration.dynamicRange = settings.screenshotRange.screenCaptureRange
                 configuration.displayIntent = .canonical
-                configuration.fileURL = try makeScreenshotURL()
+                let destinationURL = try makeScreenshotURL()
+                configuration.fileURL = destinationURL
                 if let selectedSourceRect {
                     configuration.sourceRect = selectedSourceRect
                 }
@@ -564,19 +669,51 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                     contentFilter: selectedFilter,
                     configuration: configuration
                 )
-                lastScreenshotURL = (output.fileURL as URL?) ?? configuration.fileURL
+                let frameworkURL = output.fileURL as URL?
+                if let frameworkURL, ScreenshotFileWriter.isValidImageFile(at: frameworkURL) {
+                    lastScreenshotURL = frameworkURL
+                } else if ScreenshotFileWriter.isValidImageFile(at: destinationURL) {
+                    lastScreenshotURL = destinationURL
+                } else {
+                    let capturedImage = switch settings.screenshotRange {
+                    case .sdr: output.sdrImage
+                    case .hdr: output.hdrImage
+                    }
+                    guard let capturedImage else {
+                        throw settings.screenshotRange == .hdr
+                            ? ScreenshotFileWriterError.hdrUnavailable
+                            : ScreenshotFileWriterError.missingCapturedImage
+                    }
+                    try ScreenshotFileWriter.write(
+                        capturedImage,
+                        to: destinationURL,
+                        contentType: settings.screenshotFormat.contentType
+                    )
+                    lastScreenshotURL = destinationURL
+                }
                 isCapturingScreenshot = false
                 NSApp.requestUserAttention(.informationalRequest)
             } catch {
                 isCapturingScreenshot = false
-                handleFailure(error)
+                handleScreenshotFailure(error)
             }
         }
+    }
+
+    /// A screenshot is an isolated operation over an already-approved filter.
+    /// Its encoder or framework output may fail without invalidating that
+    /// source, so preserve the selection and let Dismiss return to a ready
+    /// workspace instead of tearing down the complete capture lifecycle.
+    private func handleScreenshotFailure(_ error: Error) {
+        logCaptureFailure(error)
+        failureContext = .screenshot
+        state = .failed(error.localizedDescription)
     }
 
     func clearError() {
         if case .failed = state {
             state = hasSelectedSource ? .sourceSelected : .idle
+            failureContext = .capture
         }
     }
 
@@ -933,7 +1070,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
-    private func finishRecording() {
+    private func finishRecording(
+        completion: MultitrackRecordingCompletion = MultitrackRecordingCompletion()
+    ) {
         sessionGeneration &+= 1
         recordingStartTask?.cancel()
         recordingStartTask = nil
@@ -982,6 +1121,13 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 message: indexingError.localizedDescription,
                 fileURL: lastRecordingURL
             )
+        } else if completion.cameraTailPaddingSeconds > 0 {
+            library.presentNotice(
+                kind: .warning,
+                title: "Camera video ended early",
+                message: "Reccy saved the complete screen and audio recording and held the last camera frame through a \(String(format: "%.1f", completion.cameraTailPaddingSeconds))-second gap.",
+                fileURL: lastRecordingURL
+            )
         } else if let pendingCompletionNotice {
             library.presentNotice(
                 kind: .warning,
@@ -1009,11 +1155,15 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     private func discardIncompleteRecording(at outputURL: URL?) {
         transcription.cancelLive()
+        var needsRecoveryInspection = false
         if let outputURL {
-            try? RecordingRecoveryJournal.remove(
-                from: outputURL.deletingLastPathComponent()
-            )
-            try? FileManager.default.removeItem(at: outputURL)
+            do {
+                try RecordingRecoveryJournal.discardIncompleteRecording(
+                    mediaURL: outputURL
+                )
+            } catch {
+                needsRecoveryInspection = true
+            }
         }
 
         recordingStartTask = nil
@@ -1032,6 +1182,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         resetSessionTelemetry()
         state = .idle
         sessionCompletion = CaptureSessionCompletion(outcome: .cancelled)
+        if needsRecoveryInspection {
+            library.recoverInterruptedRecordingIfNeeded()
+        }
     }
 
     private func isCurrentSession(_ generation: UInt) -> Bool {
@@ -1072,15 +1225,20 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private func deactivateSystemPicker() {
         let picker = SCContentSharingPicker.shared
         picker.isActive = false
-        if observesSystemPicker {
-            picker.remove(self)
-            observesSystemPicker = false
-        }
     }
 
     private func handleFailure(_ error: Error) {
         transcription.cancelLive()
         logCaptureFailure(error)
+        failureContext = .capture
+        let failedState = state
+        let failedOutputURL = activeOutputURL
+        let artifactDisposition = CaptureFailureArtifactDisposition.resolve(
+            state: failedState,
+            hasOutputURL: failedOutputURL != nil
+        )
+        let failedLease = recordingLease
+        recordingLease = nil
         sessionGeneration &+= 1
         deactivateSystemPicker()
         countdownTask?.cancel()
@@ -1090,17 +1248,21 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         recordingStopTask = nil
         meterTask?.cancel()
         meterTask = nil
-        let shouldInspectRecovery = activeOutputURL != nil
         if let multitrackRecorder {
-            Task {
+            Task { [weak self, failedLease] in
                 await multitrackRecorder.cancel()
-                recordingLease = nil
-                if shouldInspectRecovery {
-                    library.recoverInterruptedRecordingIfNeeded()
-                }
+                failedLease?.release()
+                self?.settleFailedRecordingArtifacts(
+                    artifactDisposition,
+                    outputURL: failedOutputURL
+                )
             }
         } else {
-            recordingLease = nil
+            failedLease?.release()
+            settleFailedRecordingArtifacts(
+                artifactDisposition,
+                outputURL: failedOutputURL
+            )
         }
         multitrackRecorder = nil
         activeOutputURL = nil
@@ -1112,6 +1274,27 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         cameraPreviewPipeline.clear()
         pendingCompletionNotice = nil
         state = .failed(error.localizedDescription)
+    }
+
+    private func settleFailedRecordingArtifacts(
+        _ disposition: CaptureFailureArtifactDisposition,
+        outputURL: URL?
+    ) {
+        guard let outputURL else { return }
+        switch disposition {
+        case .none:
+            break
+        case .discard:
+            do {
+                try RecordingRecoveryJournal.discardIncompleteRecording(
+                    mediaURL: outputURL
+                )
+            } catch {
+                library.recoverInterruptedRecordingIfNeeded()
+            }
+        case .recover:
+            library.recoverInterruptedRecordingIfNeeded()
+        }
     }
 
     private func logCaptureFailure(_ error: Error) {
@@ -1297,6 +1480,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         selectedSource = Self.qaApplicationSource
         sourceSelectionMessage = nil
         state = .sourceSelected
+    }
+
+    func installBlockedMenuBarQAScenario() {
+        installRecordReadyQAScenario()
+        directCapturePermission = .notGranted
+        microphonePermission = .denied
     }
 
     /// Drives the exact production menu-bar view during installed-app visual QA.

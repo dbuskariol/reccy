@@ -7,6 +7,7 @@ import SwiftUI
 struct LibraryView: View {
     private let logger = Logger(subsystem: "com.reccy.mac", category: "LibraryPreview")
     @EnvironmentObject private var transcription: TranscriptionController
+    @EnvironmentObject private var navigation: AppNavigationModel
     @ObservedObject var library: RecordingLibrary
     let onEdit: (RecordingItem) -> Void
 
@@ -21,8 +22,7 @@ struct LibraryView: View {
     @State private var previewCaptionTrack: TimelineCaptionTrack?
     @State private var previewRenderSize = CGSize.zero
     @State private var searchText = ""
-
-    private let playbackTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
+    @State private var playbackSyncTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,12 +32,24 @@ struct LibraryView: View {
             }
 
             Group {
-                if library.recordings.isEmpty {
+                if case let .unavailable(message) = library.availability {
+                    WorkspaceEmptyState(
+                        "Recording Folder Unavailable",
+                        systemImage: "folder.badge.questionmark",
+                        description: message,
+                        actionTitle: "Review Storage Settings"
+                    ) {
+                        navigation.openSettings(.general)
+                    }
+                } else if library.recordings.isEmpty {
                     WorkspaceEmptyState(
                         "No Recordings Yet",
                         systemImage: "rectangle.stack.badge.plus",
-                        description: "Your completed recordings will appear here."
-                    )
+                        description: "Your completed recordings will appear here.",
+                        actionTitle: "Start a Recording"
+                    ) {
+                        navigation.section = .record
+                    }
                 } else {
                     ReccySplitView(
                         axis: .horizontal,
@@ -71,14 +83,11 @@ struct LibraryView: View {
                     Label("Open Folder", systemImage: "folder")
                 }
                 .reccyTooltip("Open recording folder")
+                .disabled(!library.availability.isAvailable)
             }
         }
         .sheet(item: $exportItem) { item in
-            ExportSheet(source: ExportSource(
-                name: item.name,
-                asset: AVURLAsset(url: item.url),
-                sourceURL: item.url
-            ))
+            RecordingExportSheet(item: item)
         }
         .alert(
             "Move Recording to Trash?",
@@ -93,7 +102,7 @@ struct LibraryView: View {
                 pendingDelete = nil
                 do {
                     try library.delete(item)
-                    selectFirstRecording()
+                    selectFirstVisibleRecording()
                 } catch {
                     library.presentNotice(
                         kind: .warning,
@@ -107,26 +116,26 @@ struct LibraryView: View {
             Text("This moves \(item.name), its metadata, and its non-destructive editing project to the Trash.")
         }
         .onAppear {
-            selectFirstRecording()
+            selectFirstVisibleRecording()
             loadTranscriptDocuments()
         }
         .onChange(of: selectedID) { _, _ in loadSelectedRecording() }
         .onChange(of: library.recordings.map(\.id)) { _, _ in
-            selectFirstRecording()
+            selectFirstVisibleRecording()
             loadTranscriptDocuments()
+        }
+        .onChange(of: filteredRecordings.map(\.id)) { _, _ in
+            selectFirstVisibleRecording()
         }
         .onReceive(player.publisher(for: \.timeControlStatus)) { status in
             isPreviewPlaying = status == .playing
-        }
-        .onReceive(playbackTimer) { _ in
-            let seconds = player.currentTime().seconds
-            if seconds.isFinite {
-                playbackTime = max(0, seconds)
-            }
+            updatePlaybackSync(for: status)
         }
         .onDisappear {
             previewLoadTask?.cancel()
             previewLoadTask = nil
+            playbackSyncTask?.cancel()
+            playbackSyncTask = nil
             player.pause()
             isPreviewPlaying = false
             isPreviewLoading = false
@@ -150,8 +159,14 @@ struct LibraryView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if notice.fileURL != nil {
-                Button("Show in Finder") { library.revealRecoveryItem() }
+            if let fileURL = notice.fileURL {
+                if let recording = library.recordings.first(where: { $0.url == fileURL }) {
+                    if selectedID != recording.id {
+                        Button("View Recording") { load(recording, autoplay: false) }
+                    }
+                } else {
+                    Button("Show in Finder") { library.revealRecoveryItem() }
+                }
             }
             Button {
                 library.dismissRecoveryNotice()
@@ -198,7 +213,7 @@ struct LibraryView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
-                    .reccyTooltip("Clear search")
+                    .reccyAccessibleControl("Clear Search")
                 }
             }
             .padding(.horizontal, 12)
@@ -242,8 +257,8 @@ struct LibraryView: View {
         .onTapGesture(count: 2) { load(item, autoplay: true) }
         .contextMenu {
             Button("Play") { load(item, autoplay: true) }
-            Button("Edit") { onEdit(item) }
-            Button("Export As…") { exportItem = item }
+            Button("Edit Recording") { onEdit(item) }
+            Button("Export Recording…") { exportItem = item }
             transcriptionContextActions(item)
             Button("Show in Finder") { library.reveal(item) }
             Divider()
@@ -310,6 +325,15 @@ struct LibraryView: View {
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .background(Color(nsColor: .windowBackgroundColor))
+        } else if hasActiveSearch {
+            WorkspaceEmptyState(
+                "No Matching Recordings",
+                systemImage: "magnifyingglass",
+                description: "Try a different recording name, source, or spoken phrase.",
+                actionTitle: "Clear Search"
+            ) {
+                searchText = ""
+            }
         } else {
             WorkspaceEmptyState(
                 "Select a Recording",
@@ -360,14 +384,17 @@ struct LibraryView: View {
                             .frame(width: 18, height: 18)
                     }
                     .buttonStyle(.bordered)
-                    .reccyAccessibleControl("Export Recording", help: "Export recording")
+                    .reccyAccessibleControl("Export Recording…", help: "Export recording")
 
                     ShareLink(item: item.url) {
                         Image(systemName: "square.and.arrow.up")
                             .frame(width: 18, height: 18)
                     }
                     .buttonStyle(.bordered)
-                    .reccyAccessibleControl("Share Recording", help: "Share recording")
+                    .reccyAccessibleControl(
+                        "Share Source Recording",
+                        help: "Share the editable multitrack source recording"
+                    )
 
                     Button(role: .destructive) {
                         pendingDelete = item
@@ -452,7 +479,13 @@ struct LibraryView: View {
                         .foregroundStyle(.secondary)
                 case .ready:
                     if let document = transcription.document(for: item.url) {
-                        transcriptDocument(document)
+                        if document.hasRecognizedSpeech {
+                            transcriptDocument(document)
+                        } else {
+                            Label("No speech was detected in the selected audio tracks.", systemImage: "waveform.slash")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
                         Text("Transcript metadata is loading…")
                             .font(.callout)
@@ -490,7 +523,7 @@ struct LibraryView: View {
                 transcription.document(for: item.url) == nil ? "Transcribe" : "Transcribe Again"
             )
 
-            if transcription.document(for: item.url) != nil {
+            if transcription.document(for: item.url)?.hasRecognizedSpeech == true {
                 Menu {
                     ForEach(TranscriptExportFormat.allCases) { format in
                         Button(format.title) { exportTranscript(item, format: format) }
@@ -716,7 +749,11 @@ struct LibraryView: View {
 
     private var selectedItem: RecordingItem? {
         guard let selectedID else { return nil }
-        return library.recordings.first(where: { $0.id == selectedID })
+        return filteredRecordings.first(where: { $0.id == selectedID })
+    }
+
+    private var hasActiveSearch: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var filteredRecordings: [RecordingItem] {
@@ -729,12 +766,11 @@ struct LibraryView: View {
         }
     }
 
-    private func selectFirstRecording() {
-        if let selectedID, library.recordings.contains(where: { $0.id == selectedID }) {
+    private func selectFirstVisibleRecording() {
+        if let selectedID, filteredRecordings.contains(where: { $0.id == selectedID }) {
             return
         }
-        selectedID = library.recordings.first?.id
-        loadSelectedRecording()
+        selectedID = filteredRecordings.first?.id
     }
 
     private func loadSelectedRecording() {
@@ -810,10 +846,17 @@ struct LibraryView: View {
             )
             .foregroundStyle(.tint)
         case .ready:
-            Image(systemName: "captions.bubble.fill")
-                .font(.caption2)
-                .foregroundStyle(.green)
-                .accessibilityLabel("Transcript ready")
+            if transcription.document(for: item.url)?.hasRecognizedSpeech == false {
+                Image(systemName: "waveform.slash")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("No speech detected")
+            } else {
+                Image(systemName: "captions.bubble.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                    .accessibilityLabel("Transcript ready")
+            }
         case .failed:
             Image(systemName: "exclamationmark.bubble.fill")
                 .font(.caption2)
@@ -896,6 +939,31 @@ struct LibraryView: View {
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
+    }
+
+    private func updatePlaybackSync(for status: AVPlayer.TimeControlStatus) {
+        playbackSyncTask?.cancel()
+        playbackSyncTask = nil
+        syncPlaybackTime()
+        guard status == .playing else { return }
+
+        playbackSyncTask = Task { @MainActor in
+            while !Task.isCancelled, player.timeControlStatus == .playing {
+                syncPlaybackTime()
+                do {
+                    try await Task.sleep(for: .milliseconds(50))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func syncPlaybackTime() {
+        let seconds = player.currentTime().seconds
+        if seconds.isFinite {
+            playbackTime = max(0, seconds)
+        }
     }
 
     private func playbackTimecode(_ seconds: TimeInterval) -> String {
