@@ -31,6 +31,7 @@ final class TimelineEditorController: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var isRebuilding = false
     @Published private(set) var isVoiceoverRecording = false
+    @Published private(set) var isImportingMedia = false
     @Published private(set) var previewRenderSize: CGSize = .zero
     @Published var selectedClipID: UUID?
     @Published var selectedGapID: UUID?
@@ -74,6 +75,7 @@ final class TimelineEditorController: ObservableObject {
     private var rebuildGeneration: UInt = 0
     private var unsupportedProjectRecovery: UnsupportedProjectRecovery?
     private weak var undoManager: UndoManager?
+    private let mediaImporter = TimelineMediaImporter()
 
     init() {
         refreshVoiceoverInputDevices()
@@ -100,20 +102,20 @@ final class TimelineEditorController: ObservableObject {
         project?.lanes.flatMap(\.clips).contains(where: { $0.contains(playhead) }) == true
     }
     var selectedGapFillMode: TimelineGapFillMode { selectedGap?.fillMode ?? .black }
-    var selectedClipIsCamera: Bool {
+    var selectedClipIsOverlayVideo: Bool {
         guard let selectedClipID else { return false }
         return project?.lanes.contains(where: {
-            $0.kind == .camera && $0.clips.contains(where: { $0.id == selectedClipID })
+            $0.kind.isOverlayVideo && $0.clips.contains(where: { $0.id == selectedClipID })
         }) == true
     }
-    var activeCameraClip: TimelineClip? {
+    var activeOverlayVideoClips: [TimelineClip] {
         project?.lanes
-            .first(where: { $0.kind == .camera })?
-            .clips
-            .first(where: {
+            .filter { $0.kind.isOverlayVideo }
+            .flatMap(\.clips)
+            .filter {
                 $0.timelineStart <= playhead + 0.000_1
                     && playhead < $0.timelineEnd - 0.000_1
-            })
+            } ?? []
     }
     var selectedVoiceoverInputName: String {
         guard let selectedVoiceoverInputID else { return "System Default" }
@@ -521,7 +523,7 @@ final class TimelineEditorController: ObservableObject {
         let undoSnapshot = currentSnapshot()
         guard var project,
               let laneIndex = project.lanes.firstIndex(where: {
-                  $0.kind == .camera && $0.clips.contains(where: { $0.id == clipID })
+                  $0.kind.isOverlayVideo && $0.clips.contains(where: { $0.id == clipID })
               }),
               let clipIndex = project.lanes[laneIndex].clips.firstIndex(where: { $0.id == clipID })
         else { return }
@@ -531,7 +533,7 @@ final class TimelineEditorController: ObservableObject {
         selectedClipID = clipID
         selectedGapID = nil
         selectedMouseFollowZoomSegmentID = nil
-        registerUndo(undoSnapshot, actionName: "Move Camera Overlay")
+        registerUndo(undoSnapshot, actionName: "Move Video Overlay")
         rebuildAndSave()
     }
 
@@ -660,15 +662,23 @@ final class TimelineEditorController: ObservableObject {
     }
 
     func resetVideoLayout(clipID: UUID) {
-        guard let clip = project?.clip(id: clipID) else { return }
+        guard let project,
+              let lane = project.lanes.first(where: { $0.clips.contains(where: { $0.id == clipID }) }),
+              let clip = lane.clips.first(where: { $0.id == clipID })
+        else { return }
         let current = (clip.videoLayout ?? .defaultCamera).clamped()
-        let width = 0.28
-        let height = min(0.5, width * current.height / max(current.width, 0.001))
+        let width = lane.kind == .camera ? 0.28 : 0.6
+        let height = min(
+            lane.kind == .camera ? 0.5 : 0.8,
+            width * current.height / max(current.width, 0.001)
+        )
         let margin = 0.03
+        let x = lane.kind == .camera ? 1 - width - margin : (1 - width) / 2
+        let y = lane.kind == .camera ? 1 - height - margin : (1 - height) / 2
         setVideoLayout(
             TimelineVideoLayout(
-                x: 1 - width - margin,
-                y: 1 - height - margin,
+                x: x,
+                y: y,
                 width: width,
                 height: height
             ),
@@ -717,6 +727,61 @@ final class TimelineEditorController: ObservableObject {
             stopVoiceover()
         } else {
             Task { await startVoiceover() }
+        }
+    }
+
+    func importMedia(from urls: [URL]) async {
+        guard !urls.isEmpty, let project, let packageURL = projectPackageURL else {
+            errorMessage = TimelineEditorError.noProject.localizedDescription
+            return
+        }
+        guard !isImportingMedia else { return }
+        player.pause()
+        isImportingMedia = true
+        defer { isImportingMedia = false }
+
+        let snapshot = currentSnapshot()
+        var createdFiles: [URL] = []
+        do {
+            let canvasSize = previewRenderSize.width > 0 && previewRenderSize.height > 0
+                ? previewRenderSize
+                : CGSize(width: 1920, height: 1080)
+            let result = try await mediaImporter.prepare(
+                urls: urls,
+                packageURL: packageURL,
+                timelineStart: playhead,
+                canvasSize: canvasSize,
+                frameRate: project.frameRate
+            )
+            createdFiles = result.createdFiles
+
+            var updated = project
+            updated.lanes.append(contentsOf: result.lanes)
+            updated.modifiedAt = Date()
+            self.project = updated
+            for (url, duration) in result.sourceDurations {
+                sourceDurations[url] = duration
+            }
+            selectedClipID = result.lanes.first?.clips.first?.id
+            selectedGapID = nil
+            selectedMouseFollowZoomSegmentID = nil
+            try await rebuildComposition()
+            try save()
+            registerUndo(snapshot, actionName: "Import Media")
+        } catch {
+            self.project = snapshot.project
+            projectPackageURL = snapshot.projectPackageURL
+            sourceDurations = snapshot.sourceDurations
+            selectedClipID = snapshot.selectedClipID
+            selectedGapID = snapshot.selectedGapID
+            selectedCaptionID = snapshot.selectedCaptionID
+            selectedMouseFollowZoomSegmentID = snapshot.selectedMouseFollowZoomSegmentID
+            playhead = snapshot.playhead
+            for url in createdFiles.reversed() {
+                try? FileManager.default.removeItem(at: url)
+            }
+            try? await rebuildComposition()
+            errorMessage = error.localizedDescription
         }
     }
 

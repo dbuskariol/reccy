@@ -25,9 +25,11 @@ enum TimelineCompositionBuildError: LocalizedError {
         switch kind {
         case .video: "Screen"
         case .camera: "Camera"
+        case .importedVideo: "Imported Video"
         case .systemAudio: "System Audio"
         case .microphone: "Microphone"
         case .voiceover: "Voiceover"
+        case .importedAudio: "Imported Audio"
         }
     }
 
@@ -80,10 +82,14 @@ enum TimelineCompositionBuilder {
         let composition = AVMutableComposition()
         var audioParameters: [AVMutableAudioMixInputParameters] = []
         var primaryVideoTrack: AVMutableCompositionTrack?
-        var videoLayers: [(kind: TimelineLaneKind, instruction: AVVideoCompositionLayerInstruction)] = []
+        var videoLayers: [(
+            kind: TimelineLaneKind,
+            laneOrder: Int,
+            instruction: AVVideoCompositionLayerInstruction
+        )] = []
         let videoRenderSize = try await primaryVideoRenderSize(for: project, sources: sources)
 
-        for lane in project.lanes where !lane.clips.isEmpty {
+        for (laneOrder, lane) in project.lanes.enumerated() where !lane.clips.isEmpty {
             guard let compositionTrack = composition.addMutableTrack(
                 withMediaType: lane.kind.mediaType,
                 preferredTrackID: kCMPersistentTrackID_Invalid
@@ -98,7 +104,7 @@ enum TimelineCompositionBuilder {
             var videoLayerConfiguration = lane.kind.isVideo
                 ? AVVideoCompositionLayerInstruction.Configuration(trackID: compositionTrack.trackID)
                 : nil
-            if lane.kind == .camera,
+            if lane.kind.isOverlayVideo,
                let firstClip = sortedClips.first,
                firstClip.timelineStart > 0
             {
@@ -139,14 +145,23 @@ enum TimelineCompositionBuilder {
                 }
 
                 do {
-                    try compositionTrack.insertTimeRange(
-                        CMTimeRange(
-                            start: timelineTime(clip.sourceStart),
-                            duration: timelineTime(clip.duration)
-                        ),
-                        of: sourceTrack,
-                        at: timelineTime(clip.timelineStart)
-                    )
+                    if clip.stillImageOriginalURL != nil {
+                        try insertStillImage(
+                            clip,
+                            sourceTrack: sourceTrack,
+                            frameDuration: project.frameDuration,
+                            compositionTrack: compositionTrack
+                        )
+                    } else {
+                        try compositionTrack.insertTimeRange(
+                            CMTimeRange(
+                                start: timelineTime(clip.sourceStart),
+                                duration: timelineTime(clip.duration)
+                            ),
+                            of: sourceTrack,
+                            at: timelineTime(clip.timelineStart)
+                        )
+                    }
                 } catch {
                     throw TimelineCompositionBuildError.couldNotInsertClip(clip.name, error)
                 }
@@ -156,7 +171,7 @@ enum TimelineCompositionBuilder {
                     let transform = videoTransform(
                         geometry: geometry,
                         renderSize: videoRenderSize,
-                        layout: lane.kind == .camera
+                        layout: lane.kind.isOverlayVideo
                             ? (clip.videoLayout ?? .defaultCamera)
                             : nil
                     )
@@ -170,7 +185,7 @@ enum TimelineCompositionBuilder {
                             transform: transform
                         ))
                     }
-                    if lane.kind == .camera {
+                    if lane.kind.isOverlayVideo {
                         videoLayerConfiguration?.setOpacity(1, at: timelineTime(clip.timelineStart))
                         videoLayerConfiguration?.setOpacity(0, at: timelineTime(clip.timelineEnd))
                     }
@@ -228,6 +243,7 @@ enum TimelineCompositionBuilder {
                 }
                 videoLayers.append((
                     kind: lane.kind,
+                    laneOrder: laneOrder,
                     instruction: instruction
                 ))
             } else {
@@ -654,9 +670,38 @@ enum TimelineCompositionBuilder {
         )
     }
 
+    /// Image imports use a one-frame project proxy and stretch that frame only
+    /// inside the composition. The source image remains untouched in Media/,
+    /// and timeline duration does not increase proxy size or decode work.
+    private static func insertStillImage(
+        _ clip: TimelineClip,
+        sourceTrack: AVAssetTrack,
+        frameDuration: TimeInterval,
+        compositionTrack: AVMutableCompositionTrack
+    ) throws {
+        let insertedDuration = min(max(frameDuration, 1 / 600), clip.duration)
+        let insertedRange = CMTimeRange(
+            start: timelineTime(clip.timelineStart),
+            duration: timelineTime(insertedDuration)
+        )
+        try compositionTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: insertedRange.duration),
+            of: sourceTrack,
+            at: insertedRange.start
+        )
+        compositionTrack.scaleTimeRange(
+            insertedRange,
+            toDuration: timelineTime(clip.duration)
+        )
+    }
+
     private static func makeVideoComposition(
         primaryTrack: AVMutableCompositionTrack?,
-        layers: [(kind: TimelineLaneKind, instruction: AVVideoCompositionLayerInstruction)],
+        layers: [(
+            kind: TimelineLaneKind,
+            laneOrder: Int,
+            instruction: AVVideoCompositionLayerInstruction
+        )],
         renderSize: CGSize?,
         duration: TimeInterval,
         frameDuration: TimeInterval
@@ -676,12 +721,23 @@ enum TimelineCompositionBuilder {
         )
         instructionConfiguration.backgroundColor = CGColor.black
         // AVFoundation defines layerInstructions in top-to-bottom order. Keep
-        // each secondary camera track above the primary screen track.
+        // imported overlays above the camera and primary screen tracks.
         instructionConfiguration.layerInstructions = layers
             .sorted { lhs, rhs in
-                let lhsPriority = lhs.kind == .camera ? 0 : 1
-                let rhsPriority = rhs.kind == .camera ? 0 : 1
-                return lhsPriority < rhsPriority
+                let lhsPriority = switch lhs.kind {
+                case .importedVideo: 0
+                case .camera: 1
+                default: 2
+                }
+                let rhsPriority = switch rhs.kind {
+                case .importedVideo: 0
+                case .camera: 1
+                default: 2
+                }
+                if lhsPriority != rhsPriority {
+                    return lhsPriority < rhsPriority
+                }
+                return lhs.laneOrder > rhs.laneOrder
             }
             .map(\.instruction)
         let instruction = AVVideoCompositionInstruction(configuration: instructionConfiguration)

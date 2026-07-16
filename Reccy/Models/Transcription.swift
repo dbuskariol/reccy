@@ -73,7 +73,7 @@ nonisolated enum TranscriptTrackRole: String, Codable, CaseIterable, Sendable {
         case .systemAudio: self = .systemAudio
         case .microphone: self = .microphone
         case .voiceover: self = .voiceover
-        case .video, .camera: self = .unknown
+        case .video, .camera, .importedVideo, .importedAudio: self = .unknown
         }
     }
 }
@@ -318,7 +318,7 @@ nonisolated extension TranscriptTrackRole {
         case .systemAudio: .systemAudio
         case .microphone: .microphone
         case .voiceover: .voiceover
-        case .unknown: .systemAudio
+        case .unknown: .importedAudio
         }
     }
 

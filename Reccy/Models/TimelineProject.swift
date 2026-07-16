@@ -5,17 +5,21 @@ import Foundation
 enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
     case video
     case camera
+    case importedVideo
     case systemAudio
     case microphone
     case voiceover
+    case importedAudio
 
     var title: String {
         switch self {
         case .video: "Screen"
         case .camera: "Camera"
+        case .importedVideo: "Imported Video"
         case .systemAudio: "System Audio"
         case .microphone: "Microphone"
         case .voiceover: "Voiceover"
+        case .importedAudio: "Imported Audio"
         }
     }
 
@@ -23,9 +27,11 @@ enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
         switch self {
         case .video: "film"
         case .camera: "web.camera"
+        case .importedVideo: "rectangle.on.rectangle"
         case .systemAudio: "speaker.wave.2"
         case .microphone: "mic"
         case .voiceover: "waveform.badge.mic"
+        case .importedAudio: "waveform.badge.plus"
         }
     }
 
@@ -33,7 +39,8 @@ enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
         isVideo ? .video : .audio
     }
 
-    nonisolated var isVideo: Bool { self == .video || self == .camera }
+    nonisolated var isVideo: Bool { self == .video || isOverlayVideo }
+    nonisolated var isOverlayVideo: Bool { self == .camera || self == .importedVideo }
     nonisolated var isAudio: Bool { !isVideo }
 }
 
@@ -46,6 +53,29 @@ struct TimelineVideoLayout: Codable, Hashable, Sendable {
     var height: Double
 
     static let defaultCamera = TimelineVideoLayout(x: 0.69, y: 0.69, width: 0.28, height: 0.28)
+
+    nonisolated static func defaultImportedVideo(
+        canvasSize: CGSize,
+        sourceSize: CGSize
+    ) -> TimelineVideoLayout {
+        guard canvasSize.width > 0,
+              canvasSize.height > 0,
+              sourceSize.width > 0,
+              sourceSize.height > 0
+        else { return TimelineVideoLayout(x: 0.2, y: 0.2, width: 0.6, height: 0.6) }
+        let width = 0.6
+        let sourceAspect = sourceSize.width / sourceSize.height
+        let height = min(
+            0.8,
+            width * Double(canvasSize.width / canvasSize.height) / Double(sourceAspect)
+        )
+        return TimelineVideoLayout(
+            x: (1 - width) / 2,
+            y: (1 - height) / 2,
+            width: width,
+            height: height
+        ).clamped()
+    }
 
     static func defaultCamera(canvasSize: CGSize, sourceSize: CGSize) -> TimelineVideoLayout {
         guard canvasSize.width > 0,
@@ -72,7 +102,7 @@ struct TimelineVideoLayout: Codable, Hashable, Sendable {
         CGRect(x: x, y: y, width: width, height: height)
     }
 
-    func clamped(minimumSize: Double = 0.08) -> TimelineVideoLayout {
+    nonisolated func clamped(minimumSize: Double = 0.08) -> TimelineVideoLayout {
         let width = min(max(self.width, minimumSize), 1)
         let height = min(max(self.height, minimumSize), 1)
         return TimelineVideoLayout(
@@ -263,6 +293,9 @@ struct TimelineClip: Identifiable, Codable, Hashable, Sendable {
     var name: String
     var linkedGroupID: UUID?
     var videoLayout: TimelineVideoLayout? = nil
+    /// The project-owned original image for a generated single-frame proxy.
+    /// Presence distinguishes an indefinitely trimmable still from a movie.
+    var stillImageOriginalURL: URL? = nil
 
     var timelineEnd: TimeInterval { timelineStart + duration }
 
