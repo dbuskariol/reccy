@@ -744,6 +744,7 @@ struct LibraryView: View {
                     )
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
