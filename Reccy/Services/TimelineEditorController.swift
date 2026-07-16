@@ -3,6 +3,7 @@ import AVFoundation
 import Combine
 import Foundation
 import OSLog
+import UniformTypeIdentifiers
 
 enum TimelineEditorError: LocalizedError {
     case noMedia
@@ -72,6 +73,10 @@ final class TimelineEditorController: ObservableObject {
     private var interactionSnapTime: TimeInterval = 0
     private var interactionPreviewVideoID: UUID?
     private var interactionOriginalSnapshot: EditorProjectSnapshot?
+    private var mouseZoomInteractionOriginalProject: TimelineProject?
+    private var mouseZoomInteractionOriginalSegment: MouseFollowZoomSegment?
+    private var mouseZoomInteractionOriginalSnapshot: EditorProjectSnapshot?
+    private var mouseZoomInteractionKind: MouseZoomInteractionKind?
     private var rebuildGeneration: UInt = 0
     private var unsupportedProjectRecovery: UnsupportedProjectRecovery?
     private weak var undoManager: UndoManager?
@@ -381,6 +386,128 @@ final class TimelineEditorController: ObservableObject {
             edge: edge,
             to: boundary + Double(frames) * frameDuration
         )
+    }
+
+    func beginMouseFollowZoomMove(id: UUID) {
+        guard interactionKind == nil,
+              mouseZoomInteractionKind == nil,
+              let project,
+              let segment = project.mouseFollowZoomSegment(id: id)
+        else { return }
+
+        player.pause()
+        mouseZoomInteractionOriginalSnapshot = currentSnapshot()
+        mouseZoomInteractionOriginalProject = project
+        mouseZoomInteractionOriginalSegment = segment
+        mouseZoomInteractionKind = .move(id)
+        selectedClipID = nil
+        selectedGapID = nil
+        selectedCaptionID = nil
+        selectedMouseFollowZoomSegmentID = id
+        playhead = segment.timelineStart
+    }
+
+    func updateMouseFollowZoomMove(id: UUID, by translation: TimeInterval) {
+        guard mouseZoomInteractionKind == .move(id),
+              var draft = mouseZoomInteractionOriginalProject,
+              let original = mouseZoomInteractionOriginalSegment,
+              let finalStart = draft.moveMouseFollowZoomSegment(
+                  id: id,
+                  to: original.timelineStart + translation
+              )
+        else { return }
+
+        project = draft
+        selectedMouseFollowZoomSegmentID = id
+        playhead = finalStart
+    }
+
+    func endMouseFollowZoomMove(id: UUID) {
+        guard mouseZoomInteractionKind == .move(id) else { return }
+        finishMouseZoomInteraction(actionName: "Move Mouse Zoom")
+    }
+
+    func beginMouseFollowZoomTrim(id: UUID, edge: TimelineTrimEdge) {
+        guard interactionKind == nil,
+              mouseZoomInteractionKind == nil,
+              let project,
+              let segment = project.mouseFollowZoomSegment(id: id)
+        else { return }
+
+        player.pause()
+        mouseZoomInteractionOriginalSnapshot = currentSnapshot()
+        mouseZoomInteractionOriginalProject = project
+        mouseZoomInteractionOriginalSegment = segment
+        mouseZoomInteractionKind = .trim(id, edge)
+        selectedClipID = nil
+        selectedGapID = nil
+        selectedCaptionID = nil
+        selectedMouseFollowZoomSegmentID = id
+    }
+
+    func updateMouseFollowZoomTrim(
+        id: UUID,
+        edge: TimelineTrimEdge,
+        by translation: TimeInterval
+    ) {
+        guard mouseZoomInteractionKind == .trim(id, edge),
+              var draft = mouseZoomInteractionOriginalProject,
+              let original = mouseZoomInteractionOriginalSegment
+        else { return }
+
+        let originalBoundary = edge == .leading
+            ? original.timelineStart
+            : original.timelineEnd
+        guard let boundary = draft.trimMouseFollowZoomSegment(
+            id: id,
+            edge: edge,
+            to: originalBoundary + translation
+        ) else { return }
+
+        project = draft
+        selectedMouseFollowZoomSegmentID = id
+        playhead = boundary
+    }
+
+    func endMouseFollowZoomTrim(id: UUID, edge: TimelineTrimEdge) {
+        guard mouseZoomInteractionKind == .trim(id, edge) else { return }
+        finishMouseZoomInteraction(actionName: "Resize Mouse Zoom")
+    }
+
+    func nudgeMouseFollowZoomSegment(id: UUID, byFrames frames: Int) {
+        let undoSnapshot = currentSnapshot()
+        guard frames != 0,
+              var project,
+              let segment = project.mouseFollowZoomSegment(id: id),
+              let finalStart = project.moveMouseFollowZoomSegment(
+                  id: id,
+                  to: segment.timelineStart + Double(frames) * frameDuration
+              )
+        else { return }
+
+        self.project = project
+        selectedClipID = nil
+        selectedGapID = nil
+        selectedCaptionID = nil
+        selectedMouseFollowZoomSegmentID = id
+        playhead = finalStart
+        registerUndo(undoSnapshot, actionName: "Move Mouse Zoom")
+        rebuildAndSave()
+    }
+
+    private func finishMouseZoomInteraction(actionName: String) {
+        let changed = project != mouseZoomInteractionOriginalProject
+        let undoSnapshot = mouseZoomInteractionOriginalSnapshot
+        mouseZoomInteractionOriginalProject = nil
+        mouseZoomInteractionOriginalSegment = nil
+        mouseZoomInteractionOriginalSnapshot = nil
+        mouseZoomInteractionKind = nil
+
+        guard changed else { return }
+        if let undoSnapshot {
+            registerUndo(undoSnapshot, actionName: actionName)
+        }
+        rebuildAndSave()
     }
 
     func beginClipMove(id: UUID, anchorTime: TimeInterval) {
@@ -730,6 +857,19 @@ final class TimelineEditorController: ObservableObject {
         }
     }
 
+    func chooseMediaToImport() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Media"
+        panel.prompt = "Import"
+        panel.message = "Choose video, audio, or images to add as independent timeline tracks."
+        panel.allowedContentTypes = [.movie, .audio, .image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        guard panel.runModal() == .OK else { return }
+        Task { await importMedia(from: panel.urls) }
+    }
+
     func importMedia(from urls: [URL]) async {
         guard !urls.isEmpty, let project, let packageURL = projectPackageURL else {
             errorMessage = TimelineEditorError.noProject.localizedDescription
@@ -790,6 +930,14 @@ final class TimelineEditorController: ObservableObject {
             throw TimelineEditorError.noProject
         }
         try RecordingTimelineProjectLoader.save(project, packageURL: packageURL)
+    }
+
+    func saveProject() {
+        do {
+            try save()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func useCurrentFrameAsPoster() {
@@ -1148,4 +1296,9 @@ private enum TimelineInteractionKind: Equatable {
         case .move(let id), .trim(let id, _): id
         }
     }
+}
+
+private enum MouseZoomInteractionKind: Equatable {
+    case move(UUID)
+    case trim(UUID, TimelineTrimEdge)
 }

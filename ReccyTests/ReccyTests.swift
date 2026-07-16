@@ -1135,6 +1135,12 @@ struct ReccyTests {
         #expect(CaptureState.starting.stopButtonTitle == "Cancel Start")
         #expect(CaptureState.recording.stopButtonTitle == "Stop Recording")
         #expect(CaptureState.stopping.stopButtonTitle == "Finishing…")
+
+        #expect(!CaptureState.countingDown(3).requiresStopConfirmation)
+        #expect(!CaptureState.starting.requiresStopConfirmation)
+        #expect(CaptureState.recording.requiresStopConfirmation)
+        #expect(CaptureState.paused.requiresStopConfirmation)
+        #expect(!CaptureState.stopping.requiresStopConfirmation)
     }
 
     @Test func captureCompletionRoutesOnlySavedMediaToPostRecordingDestinations() {
@@ -1415,6 +1421,69 @@ struct ReccyTests {
         ])
     }
 
+    @Test func libraryRecordingSelectionSupportsCommandToggleAndShiftRange() {
+        let ids = ["A", "B", "C", "D", "E"].map {
+            URL(fileURLWithPath: "/recordings/\($0).mp4")
+        }
+        var selection = LibraryRecordingSelection()
+
+        selection.select(ids[1], from: ids, intent: .replace)
+        selection.select(ids[3], from: ids, intent: .extend(additive: false))
+
+        #expect(selection.selectedIDs == Set(ids[1...3]))
+        #expect(selection.primaryID == ids[3])
+        #expect(selection.anchorID == ids[1])
+
+        selection.select(ids[4], from: ids, intent: .toggle)
+        #expect(selection.selectedIDs == Set(ids[1...4]))
+        #expect(selection.primaryID == ids[4])
+        #expect(selection.anchorID == ids[4])
+
+        selection.select(ids[2], from: ids, intent: .extend(additive: true))
+        #expect(selection.selectedIDs == Set(ids[1...4]))
+        #expect(selection.primaryID == ids[2])
+        #expect(selection.anchorID == ids[4])
+
+        selection.select(ids[4], from: ids, intent: .toggle)
+        #expect(selection.selectedIDs == Set(ids[1...3]))
+        #expect(selection.primaryID == ids[2])
+        #expect(selection.anchorID == ids[2])
+    }
+
+    @Test func libraryRecordingSelectionReconcilesHiddenAndDeletedRows() {
+        let first = URL(fileURLWithPath: "/recordings/A.mp4")
+        let second = URL(fileURLWithPath: "/recordings/B.mp4")
+        let third = URL(fileURLWithPath: "/recordings/C.mp4")
+        var selection = LibraryRecordingSelection()
+        selection.select(second, from: [first, second, third], intent: .replace)
+        selection.select(third, from: [first, second, third], intent: .toggle)
+
+        selection.reconcile(with: [first, third], selectsFirstIfEmpty: true)
+        #expect(selection.selectedIDs == [third])
+        #expect(selection.primaryID == third)
+        #expect(selection.anchorID == third)
+
+        selection.reconcile(with: [first], selectsFirstIfEmpty: true)
+        #expect(selection.selectedIDs == [first])
+        #expect(selection.primaryID == first)
+        #expect(selection.anchorID == first)
+
+        selection.selectAll([first, second, third])
+        #expect(selection.selectedIDs == [first, second, third])
+        #expect(selection.primaryID == first)
+        #expect(selection.anchorID == first)
+
+        selection.clear(keepingPrimary: true)
+        #expect(selection.selectedIDs.isEmpty)
+        #expect(selection.primaryID == first)
+        #expect(selection.anchorID == nil)
+
+        selection.clear()
+        #expect(selection.selectedIDs.isEmpty)
+        #expect(selection.primaryID == nil)
+        #expect(selection.anchorID == nil)
+    }
+
     @Test @MainActor func unsupportedEditorProjectCanResetWithoutTouchingSourceMedia() async throws {
         let mediaURL = try await makeColorTestVideo()
         let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
@@ -1654,6 +1723,86 @@ struct ReccyTests {
         #expect(finalStart == 2)
         #expect(project.lanes[0].clips[0].timelineStart == 2)
         #expect(project.lanes[1].clips[0].timelineStart == 2)
+    }
+
+    @Test func clipMovementCannotCrossBeforeTimelineZero() {
+        var project = makeProject()
+        let videoID = project.lanes[0].clips[0].id
+
+        let finalStart = project.moveClip(id: videoID, to: -4)
+
+        #expect(finalStart == 0)
+        #expect(project.lanes[0].clips[0].timelineStart == 0)
+        #expect(project.lanes[1].clips[0].timelineStart == 0)
+    }
+
+    @Test func linkedClipMovementCannotMoveAnyTrackBeforeTimelineZero() {
+        var project = makeProject()
+        let videoID = project.lanes[0].clips[0].id
+
+        let finalStart = project.moveClip(id: videoID, to: -4, includeLinked: true)
+
+        #expect(finalStart == 0)
+        #expect(project.lanes[0].clips[0].timelineStart == 0)
+        #expect(project.lanes[1].clips[0].timelineStart == 0)
+    }
+
+    @Test func malformedImportedLaneIsNormalizedAtTimelineZeroWithoutOverlap() {
+        let first = TimelineClip(
+            sourceURL: URL(fileURLWithPath: "/tmp/import-one.mov"),
+            sourceTrackID: 1,
+            sourceStart: 0,
+            timelineStart: -2,
+            duration: 3,
+            name: "Import One",
+            linkedGroupID: nil
+        )
+        let second = TimelineClip(
+            sourceURL: URL(fileURLWithPath: "/tmp/import-two.mov"),
+            sourceTrackID: 1,
+            sourceStart: 0,
+            timelineStart: 0.5,
+            duration: 2,
+            name: "Import Two",
+            linkedGroupID: nil
+        )
+
+        let project = TimelineProject(
+            name: "Imported Bounds",
+            lanes: [TimelineLane(kind: .importedVideo, name: "Imported", clips: [first, second])]
+        )
+
+        #expect(project.lanes[0].clips.map(\.timelineStart) == [0, 3])
+        #expect(project.lanes[0].clips.allSatisfy { $0.timelineStart >= 0 })
+    }
+
+    @Test func mouseFollowZoomMovementPreservesDurationAndCannotCrossBounds() {
+        var project = makeProject()
+        let first = MouseFollowZoomSegment(
+            timelineStart: 1,
+            duration: 2,
+            zoomScale: 2,
+            points: [
+                MouseFollowZoomPoint(timelineTime: 1, position: CGPoint(x: 0.2, y: 0.3)),
+                MouseFollowZoomPoint(timelineTime: 3, position: CGPoint(x: 0.8, y: 0.7)),
+            ]
+        )
+        let second = MouseFollowZoomSegment(
+            timelineStart: 5,
+            duration: 2,
+            zoomScale: 3,
+            points: []
+        )
+        project.mouseFollowZoomTrack = MouseFollowZoomTrack(segments: [first, second])
+
+        let earliest = project.moveMouseFollowZoomSegment(id: first.id, to: -4)
+        #expect(earliest == 0)
+        #expect(project.mouseFollowZoomSegment(id: first.id)?.duration == 2)
+        #expect(project.mouseFollowZoomSegment(id: first.id)?.points.map(\.timelineTime) == [0, 2])
+
+        let latest = project.moveMouseFollowZoomSegment(id: first.id, to: 10)
+        #expect(latest == 3)
+        #expect(project.mouseFollowZoomSegment(id: first.id)?.timelineEnd == 5)
     }
 
     @Test func crossingAClipMagneticallyReordersItAfterItsNeighbour() {
@@ -1922,6 +2071,26 @@ struct ReccyTests {
 
         #expect(format.width == 1_280)
         #expect(format.height == 720)
+    }
+
+    @Test func cameraEffectsStateReportsNativeAvailabilityAndActiveEffectsTruthfully() {
+        let effects = WebcamVideoEffectsState(
+            supportsPortrait: true,
+            isPortraitActive: true,
+            supportsBackgroundReplacement: true,
+            isBackgroundReplacementActive: false
+        )
+
+        #expect(effects.supportsAnyEffect)
+        #expect(effects.activeTitles == ["Portrait"])
+
+        let background = WebcamVideoEffectsState(
+            supportsPortrait: true,
+            isPortraitActive: false,
+            supportsBackgroundReplacement: true,
+            isBackgroundReplacementActive: true
+        )
+        #expect(background.activeTitles == ["Background"])
     }
 
     @Test func cameraTailPaddingClosesOnlyMaterialEndDrift() throws {

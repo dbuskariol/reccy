@@ -91,9 +91,29 @@ final class RecordingLibrary: ObservableObject {
     }
 
     func delete(_ item: RecordingItem) throws {
-        try RecordingArtifactTrashTransaction.perform(item.artifacts.trashOrder)
-        recordings.removeAll { $0.id == item.id }
-        thumbnails[item.url] = nil
+        try delete([item])
+    }
+
+    /// Moves the complete artifact graph for every selected recording as one
+    /// rollback-capable transaction. The Library is updated only after Finder
+    /// accepts the full batch, so a partial failure cannot leave the browser
+    /// claiming that only some selected recordings were deleted.
+    func delete(_ items: [RecordingItem]) throws {
+        var seenItems = Set<URL>()
+        let uniqueItems = items.filter { seenItems.insert($0.id).inserted }
+        guard !uniqueItems.isEmpty else { return }
+
+        var seenArtifacts = Set<URL>()
+        let artifactURLs = uniqueItems
+            .flatMap { $0.artifacts.trashOrder }
+            .filter { seenArtifacts.insert($0).inserted }
+        try RecordingArtifactTrashTransaction.perform(artifactURLs)
+
+        let deletedIDs = Set(uniqueItems.map(\.id))
+        recordings.removeAll { deletedIDs.contains($0.id) }
+        for item in uniqueItems {
+            thumbnails[item.url] = nil
+        }
     }
 
     func reveal(_ item: RecordingItem) {

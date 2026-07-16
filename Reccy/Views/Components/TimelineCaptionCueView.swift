@@ -59,9 +59,7 @@ struct TimelineCaptionCueView: View {
             .offset(x: dragOffset)
             .simultaneousGesture(TapGesture().onEnded(onSelect))
             .highPriorityGesture(moveGesture)
-            .onHover { hovering in
-                if hovering { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
-            }
+            .pointerStyle(dragOffset == .zero ? .grabIdle : .grabActive)
             .focusable()
             .onKeyPress(.leftArrow) {
                 onNudge(-1)

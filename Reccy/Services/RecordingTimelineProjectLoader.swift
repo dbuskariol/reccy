@@ -35,7 +35,9 @@ enum RecordingTimelineProjectLoader {
                 throw TimelineEditorError.projectFormatUnsupported
             }
             var savedProject = try decoder.decode(TimelineProject.self, from: data)
+            let needsTimelineBoundsSave = savedProject.normalizeTimelineBounds()
             let needsMigrationSave = savedProject.formatVersion != TimelineProject.currentFormatVersion
+                || needsTimelineBoundsSave
             savedProject.formatVersion = TimelineProject.currentFormatVersion
             var durations: [URL: TimeInterval] = [:]
             for url in Set(savedProject.lanes.flatMap(\.clips).map(\.sourceURL)) {
