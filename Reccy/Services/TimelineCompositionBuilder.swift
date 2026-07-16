@@ -316,7 +316,7 @@ enum TimelineCompositionBuilder {
         focus: CGPoint,
         zoomScale: Double
     ) -> CGAffineTransform {
-        let scale = CGFloat(min(max(zoomScale, 1), 4))
+        let scale = CGFloat(min(max(zoomScale, 1), MouseFollowZoomScale.maximum))
         guard scale > 1,
               renderSize.width > 0,
               renderSize.height > 0
@@ -381,7 +381,7 @@ enum TimelineCompositionBuilder {
                 $0.timelineEnd > base.range.lowerBound
                     && $0.timelineStart < base.range.upperBound
             }
-            for segment in segments {
+            for (segmentIndex, segment) in segments.enumerated() {
                 let start = max(base.range.lowerBound, segment.timelineStart)
                 let end = min(base.range.upperBound, segment.timelineEnd)
                 let duration = end - start
@@ -394,6 +394,18 @@ enum TimelineCompositionBuilder {
                     configuration: &animated
                 )
 
+                let previous = segmentIndex > 0 ? segments[segmentIndex - 1] : nil
+                let next = segments.indices.contains(segmentIndex + 1)
+                    ? segments[segmentIndex + 1]
+                    : nil
+                let continuousPrevious = previous.map {
+                    abs($0.timelineEnd - segment.timelineStart) < 0.000_1
+                } ?? false
+                let continuousNextScale = next.flatMap {
+                    abs(segment.timelineEnd - $0.timelineStart) < 0.000_1
+                        ? $0.zoomScale
+                        : nil
+                }
                 let transition = min(0.2, segment.duration / 3)
                 let zoomStart = segment.timelineStart + transition
                 let zoomEnd = segment.timelineEnd - transition
@@ -418,13 +430,23 @@ enum TimelineCompositionBuilder {
                             baseTransform: base.transform,
                             renderSize: renderSize,
                             focus: segment.focus(at: lower),
-                            zoomScale: zoomScale(for: segment, at: lower)
+                            zoomScale: zoomScale(
+                                for: segment,
+                                at: lower,
+                                hasContinuousPrevious: continuousPrevious,
+                                continuousNextScale: continuousNextScale
+                            )
                         ),
                         end: mouseFollowZoomTransform(
                             baseTransform: base.transform,
                             renderSize: renderSize,
                             focus: segment.focus(at: upper),
-                            zoomScale: zoomScale(for: segment, at: upper)
+                            zoomScale: zoomScale(
+                                for: segment,
+                                at: upper,
+                                hasContinuousPrevious: continuousPrevious,
+                                continuousNextScale: continuousNextScale
+                            )
                         )
                     ))
                 }
@@ -459,18 +481,21 @@ enum TimelineCompositionBuilder {
 
     private static func zoomScale(
         for segment: MouseFollowZoomSegment,
-        at time: TimeInterval
+        at time: TimeInterval,
+        hasContinuousPrevious: Bool,
+        continuousNextScale: Double?
     ) -> Double {
         let transition = min(0.2, segment.duration / 3)
-        let amount: Double
-        if time < segment.timelineStart + transition {
-            amount = (time - segment.timelineStart) / max(transition, 0.000_1)
-        } else if time > segment.timelineEnd - transition {
-            amount = (segment.timelineEnd - time) / max(transition, 0.000_1)
-        } else {
-            amount = 1
+        if !hasContinuousPrevious, time < segment.timelineStart + transition {
+            let amount = (time - segment.timelineStart) / max(transition, 0.000_1)
+            return 1 + (segment.zoomScale - 1) * min(max(amount, 0), 1)
         }
-        return 1 + (segment.zoomScale - 1) * min(max(amount, 0), 1)
+        if time > segment.timelineEnd - transition {
+            let target = continuousNextScale ?? 1
+            let amount = (segment.timelineEnd - time) / max(transition, 0.000_1)
+            return target + (segment.zoomScale - target) * min(max(amount, 0), 1)
+        }
+        return segment.zoomScale
     }
 
     private static func videoTransform(

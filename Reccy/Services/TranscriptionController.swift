@@ -73,6 +73,7 @@ final class TranscriptionController: ObservableObject {
     @Published private(set) var documents: [URL: TranscriptDocument] = [:]
     @Published private(set) var liveUpdates: [TranscriptTrackRole: LiveTranscriptUpdate] = [:]
     @Published private(set) var liveNotice: String?
+    @Published private(set) var liveTransportWarning: String?
     @Published private(set) var isLiveCaptureEnabled = false
     @Published private(set) var captureReadiness: CaptureTranscriptionReadiness = .disabled
 
@@ -81,6 +82,7 @@ final class TranscriptionController: ObservableObject {
     private let defaults: UserDefaults
     private let store = TranscriptStore()
     private let modelManager: WhisperModelManager
+    private let engineOverride: ((TranscriptionProvider, String) -> any TranscriptionEngine)?
     private let appleEngine = AppleSpeechTranscriptionEngine()
     private var whisperEngine: (modelIdentifier: String, engine: WhisperKitTranscriptionEngine)?
     private var transcriptionTasks: [URL: Task<Void, Never>] = [:]
@@ -88,10 +90,16 @@ final class TranscriptionController: ObservableObject {
     private var capturePreparationTask: Task<Void, Never>?
     private var capturePreparationID: UUID?
     private var liveSessionID: UUID?
+    private var liveRoute: LiveTranscriptionRoute?
 
-    init(defaults: UserDefaults = .standard, modelManager: WhisperModelManager = WhisperModelManager()) {
+    init(
+        defaults: UserDefaults = .standard,
+        modelManager: WhisperModelManager = WhisperModelManager(),
+        engineOverride: ((TranscriptionProvider, String) -> any TranscriptionEngine)? = nil
+    ) {
         self.defaults = defaults
         self.modelManager = modelManager
+        self.engineOverride = engineOverride
         isEnabledForCapture = defaults.object(forKey: Keys.captureEnabled) as? Bool ?? true
         provider = TranscriptionProvider(rawValue: defaults.string(forKey: Keys.provider) ?? "") ?? .appleSpeech
         automaticallyTranscribe = defaults.object(forKey: Keys.automaticallyTranscribe) as? Bool ?? true
@@ -516,12 +524,17 @@ final class TranscriptionController: ObservableObject {
     func beginLive(
         configuration: CaptureTranscriptionConfiguration,
         microphoneName: String
-    ) {
+    ) async -> LiveTranscriptionRoute? {
         liveSetupTask?.cancel()
+        if let liveRoute {
+            await liveRouter.cancel(route: liveRoute)
+        }
+        liveRoute = nil
         let sessionID = UUID()
         liveSessionID = sessionID
         liveUpdates = [:]
         liveNotice = nil
+        liveTransportWarning = nil
         let selectedProvider = configuration.provider
         let selectedLocale = configuration.localeIdentifier
         let roles: [(TranscriptTrackRole, String)] = [
@@ -532,8 +545,11 @@ final class TranscriptionController: ObservableObject {
         guard configuration.createsLiveTranscript, !roles.isEmpty else {
             liveSetupTask = nil
             liveSessionID = nil
-            return
+            return nil
         }
+        let route = LiveTranscriptionRoute()
+        liveRoute = route
+        await liveRouter.begin(route: route)
         liveNotice = "Preparing \(selectedProvider.title) for live transcription…"
         liveSetupTask = Task { [weak self] in
             guard let self else { return }
@@ -571,9 +587,9 @@ final class TranscriptionController: ObservableObject {
                     for session in sessions.values { await session.cancel() }
                     return
                 }
-                await liveRouter.install(sessions)
+                await liveRouter.install(sessions, route: route)
                 guard !Task.isCancelled, liveSessionID == sessionID else {
-                    await liveRouter.cancel()
+                    await liveRouter.cancel(route: route)
                     return
                 }
                 liveNotice = nil
@@ -590,6 +606,7 @@ final class TranscriptionController: ObservableObject {
                 liveNotice = error.localizedDescription
             }
         }
+        return route
     }
 
     func finishLive(
@@ -612,10 +629,12 @@ final class TranscriptionController: ObservableObject {
             ))
         }
         let snapshot = liveUpdates
+        let finishingRoute = liveRoute
+        liveRoute = nil
         liveUpdates = [:]
         liveNotice = nil
+        liveTransportWarning = nil
         isLiveCaptureEnabled = false
-        Task { await liveRouter.cancel() }
         Task { [weak self] in
             guard let self else { return }
             let audioTracks = (try? await AVURLAsset(url: mediaURL).loadTracks(withMediaType: .audio)) ?? []
@@ -628,7 +647,16 @@ final class TranscriptionController: ObservableObject {
             if manifest.includesMicrophone, audioTracks.indices.contains(index) {
                 trackIDs[.microphone] = audioTracks[index].trackID
             }
-            let liveTracks = snapshot.compactMap { role, update -> TranscriptTrack? in
+            let finishedTracks: [TranscriptTrack]
+            if let finishingRoute {
+                finishedTracks = await liveRouter.finish(
+                    trackIDs: trackIDs,
+                    route: finishingRoute
+                )
+            } else {
+                finishedTracks = []
+            }
+            let snapshotTracks = snapshot.compactMap { role, update -> TranscriptTrack? in
                 guard let trackID = trackIDs[role] else { return nil }
                 let segments = (update.finalizedSegments + update.volatileSegments)
                     .sorted { $0.sourceStart < $1.sourceStart }
@@ -647,6 +675,7 @@ final class TranscriptionController: ObservableObject {
                     segments: segments
                 )
             }
+            let liveTracks = finishedTracks.isEmpty ? snapshotTracks : finishedTracks
             if !liveTracks.isEmpty {
                 var document = (try? await store.load(for: mediaURL))
                     ?? TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: [])
@@ -668,13 +697,26 @@ final class TranscriptionController: ObservableObject {
     }
 
     func cancelLive() {
+        let cancellingRoute = liveRoute
+        liveRoute = nil
         liveSessionID = nil
         liveSetupTask?.cancel()
         liveSetupTask = nil
-        Task { await liveRouter.cancel() }
+        if let cancellingRoute {
+            Task { await liveRouter.cancel(route: cancellingRoute) }
+        }
         liveUpdates = [:]
         liveNotice = nil
+        liveTransportWarning = nil
         isLiveCaptureEnabled = false
+    }
+
+    func reportLiveTransportFailure(role: TranscriptTrackRole, message: String) {
+        guard isLiveCaptureEnabled else { return }
+        logger.error(
+            "Live transcript transport failed role=\(role.rawValue, privacy: .public) reason=\(message, privacy: .public)"
+        )
+        liveTransportWarning = "Reccy couldn’t send \(role.title.lowercased()) samples to the live transcript. Recording continues safely."
     }
 
     func export(
@@ -708,6 +750,9 @@ final class TranscriptionController: ObservableObject {
         for provider: TranscriptionProvider,
         whisperModelIdentifier requestedWhisperModel: String
     ) -> any TranscriptionEngine {
+        if let engineOverride {
+            return engineOverride(provider, requestedWhisperModel)
+        }
         switch provider {
         case .appleSpeech: return appleEngine
         case .whisperKit:
@@ -848,11 +893,27 @@ final class TranscriptionController: ObservableObject {
 }
 
 actor LiveTranscriptionRouter {
+    private var activeRoute: LiveTranscriptionRoute?
     private var sessions: [TranscriptTrackRole: any LiveTranscriptionSession] = [:]
     private var pending: [TranscriptTrackRole: [TimedAudioBuffer]] = [:]
     private let maximumPendingPackets = 1_500
 
-    func install(_ sessions: [TranscriptTrackRole: any LiveTranscriptionSession]) async {
+    func begin(route: LiveTranscriptionRoute) async {
+        let replacedSessions = Array(sessions.values)
+        activeRoute = route
+        sessions.removeAll(keepingCapacity: false)
+        pending.removeAll(keepingCapacity: false)
+        for session in replacedSessions { await session.cancel() }
+    }
+
+    func install(
+        _ sessions: [TranscriptTrackRole: any LiveTranscriptionSession],
+        route: LiveTranscriptionRoute
+    ) async {
+        guard activeRoute == route else {
+            for session in sessions.values { await session.cancel() }
+            return
+        }
         let bufferedPackets = pending
         pending.removeAll(keepingCapacity: false)
         self.sessions = sessions
@@ -862,7 +923,12 @@ actor LiveTranscriptionRouter {
         }
     }
 
-    func ingest(_ packet: TimedAudioBuffer, role: TranscriptTrackRole) async {
+    func ingest(
+        _ packet: TimedAudioBuffer,
+        role: TranscriptTrackRole,
+        route: LiveTranscriptionRoute
+    ) async {
+        guard activeRoute == route else { return }
         if let session = sessions[role] {
             await session.ingest(packet)
             return
@@ -875,8 +941,13 @@ actor LiveTranscriptionRouter {
         pending[role] = packets
     }
 
-    func finish(trackIDs: [TranscriptTrackRole: Int32]) async -> [TranscriptTrack] {
+    func finish(
+        trackIDs: [TranscriptTrackRole: Int32],
+        route: LiveTranscriptionRoute
+    ) async -> [TranscriptTrack] {
+        guard activeRoute == route else { return [] }
         let activeSessions = sessions
+        activeRoute = nil
         sessions.removeAll(keepingCapacity: false)
         pending.removeAll(keepingCapacity: false)
         var tracks: [TranscriptTrack] = []
@@ -890,8 +961,10 @@ actor LiveTranscriptionRouter {
         return tracks
     }
 
-    func cancel() async {
+    func cancel(route: LiveTranscriptionRoute) async {
+        guard activeRoute == route else { return }
         let activeSessions = Array(sessions.values)
+        activeRoute = nil
         sessions.removeAll(keepingCapacity: false)
         pending.removeAll(keepingCapacity: false)
         for session in activeSessions { await session.cancel() }

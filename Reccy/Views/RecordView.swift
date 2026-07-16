@@ -290,14 +290,35 @@ struct RecordView: View {
                         }
                         .frame(maxWidth: 380)
 
-                        Label("Separate editable video track", systemImage: "rectangle.on.rectangle")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Label("Separate editable video track", systemImage: "rectangle.on.rectangle")
+                            Text(cameraEffectsSummary)
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.callout)
                         Spacer(minLength: 0)
+                        Button {
+                            coordinator.openCameraVideoEffects()
+                        } label: {
+                            Label("Camera Effects…", systemImage: "person.crop.rectangle.badge.plus")
+                        }
+                        .disabled(!coordinator.cameraVideoEffects.supportsAnyEffect)
+                        .help("Use macOS Portrait blur or choose a Background Replacement image")
                     }
                 }
             }
         }
+    }
+
+    private var cameraEffectsSummary: String {
+        let active = coordinator.cameraVideoEffects.activeTitles
+        if !active.isEmpty {
+            return "macOS effects active: \(active.joined(separator: ", "))"
+        }
+        if coordinator.cameraVideoEffects.supportsAnyEffect {
+            return "Portrait blur and background images are controlled by macOS"
+        }
+        return "No system camera effects are available for this camera format"
     }
 
     private var mouseFollowZoomCard: some View {

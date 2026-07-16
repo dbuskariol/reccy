@@ -98,15 +98,96 @@ struct ReccyTests {
         buffer.frameLength = 1
         let packet = TimedAudioBuffer(buffer: buffer, startTime: .zero)
         let router = LiveTranscriptionRouter()
+        let route = LiveTranscriptionRoute()
+        await router.begin(route: route)
 
         for _ in 0...1_500 {
-            await router.ingest(packet, role: .microphone)
+            await router.ingest(packet, role: .microphone, route: route)
         }
 
         let session = CountingLiveTranscriptionSession(role: .microphone)
-        await router.install([.microphone: session])
+        await router.install([.microphone: session], route: route)
         #expect(await session.ingestedPacketCount == 1_500)
-        await router.cancel()
+        await router.cancel(route: route)
+    }
+
+    @Test func staleLiveTranscriptionCancellationCannotClearTheNextRecording() async throws {
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1))
+        buffer.frameLength = 1
+        let packet = TimedAudioBuffer(buffer: buffer, startTime: .zero)
+        let router = LiveTranscriptionRouter()
+        let oldRoute = LiveTranscriptionRoute()
+        let currentRoute = LiveTranscriptionRoute()
+        let oldSession = CountingLiveTranscriptionSession(role: .microphone)
+        let currentSession = CountingLiveTranscriptionSession(role: .microphone)
+
+        await router.begin(route: oldRoute)
+        await router.install([.microphone: oldSession], route: oldRoute)
+        await router.begin(route: currentRoute)
+        await router.install([.microphone: currentSession], route: currentRoute)
+        await router.cancel(route: oldRoute)
+        await router.ingest(packet, role: .microphone, route: oldRoute)
+        await router.ingest(packet, role: .microphone, route: currentRoute)
+
+        #expect(await oldSession.ingestedPacketCount == 0)
+        #expect(await currentSession.ingestedPacketCount == 1)
+        await router.cancel(route: currentRoute)
+    }
+
+    @Test @MainActor func transcriptionControllerPublishesRoutedAudioInTheMonitorBeforeFinish() async throws {
+        let suiteName = "ReccyTests.LiveMonitor.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let modelDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Live Monitor Models \(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: modelDirectory) }
+        let engine = EmittingLiveTranscriptionEngine()
+        let controller = TranscriptionController(
+            defaults: defaults,
+            modelManager: WhisperModelManager(baseURL: modelDirectory),
+            engineOverride: { _, _ in engine }
+        )
+        let configuration = CaptureTranscriptionConfiguration(
+            isEnabled: true,
+            provider: .appleSpeech,
+            localeIdentifier: "en-AU",
+            whisperModelIdentifier: WhisperModelManager.defaultModel,
+            createsLiveTranscript: true,
+            automaticallyTranscribes: false,
+            includesSystemAudio: false,
+            includesMicrophone: true
+        )
+        let route = try #require(await controller.beginLive(
+            configuration: configuration,
+            microphoneName: "Test Microphone"
+        ))
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1))
+        buffer.frameLength = 1
+        await controller.liveRouter.ingest(
+            TimedAudioBuffer(buffer: buffer, startTime: .zero),
+            role: .microphone,
+            route: route
+        )
+
+        for _ in 0..<100 where controller.liveUpdates[.microphone] == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let update = try #require(controller.liveUpdates[.microphone])
+        #expect(update.volatileSegments.map(\.text) == ["Visible while recording"])
+        controller.cancelLive()
     }
 
     @Test func transcriptionBatchKeepsSpokenTrackWhenAnotherSourceHasNoSpeech() async throws {
@@ -3212,7 +3293,7 @@ struct ReccyTests {
             zoomScale: 8,
             position: CGPoint(x: -0.2, y: 1.4)
         )
-        #expect(session.currentScale == 4)
+        #expect(session.currentScale == 6)
         session.sample(at: 1.25, position: CGPoint(x: 1, y: 0))
         session.end(at: 2)
         let finishedTrack = session.finish(at: 2)
@@ -3224,12 +3305,37 @@ struct ReccyTests {
         #expect(track.segments.count == 1)
         #expect(segment.timelineStart == 1)
         #expect(segment.duration == 1)
-        #expect(segment.zoomScale == 4)
+        #expect(segment.zoomScale == 6)
         #expect(segment.points.first?.position == CGPoint(x: 0, y: 1))
         #expect(segment.points.last?.timelineTime == 2)
         #expect(segment.points.allSatisfy {
             (0...1).contains($0.x) && (0...1).contains($0.y)
         })
+    }
+
+    @Test func mouseFollowZoomOffersGranularNativeLevelsAndChangesScaleAtTheLiveClock() throws {
+        #expect(MouseFollowZoomLevel.allCases.map(\.rawValue) == [
+            1.25, 1.5, 1.75, 2, 2.25, 2.5, 3, 3.5, 4, 5, 6,
+        ])
+        #expect(MouseFollowZoomLevel.allCases.map(\.title) == [
+            "1.25×", "1.5×", "1.75×", "2×", "2.25×", "2.5×",
+            "3×", "3.5×", "4×", "5×", "6×",
+        ])
+
+        var session = MouseFollowZoomCaptureSession()
+        session.begin(at: 1, zoomScale: 1.5, position: CGPoint(x: 0.2, y: 0.3))
+        session.sample(at: 1.75, position: CGPoint(x: 0.4, y: 0.5))
+        session.changeScale(at: 2, zoomScale: 3.5, position: CGPoint(x: 0.6, y: 0.7))
+        let finishedTrack = session.finish(at: 3)
+        let track = try #require(finishedTrack)
+
+        #expect(track.segments.count == 2)
+        #expect(track.segments.map(\.timelineStart) == [1, 2])
+        #expect(track.segments.map(\.timelineEnd) == [2, 3])
+        #expect(track.segments.map(\.zoomScale) == [1.5, 3.5])
+        let boundary = try #require(track.segments[0].points.last?.position)
+        #expect(boundary == CGPoint(x: 0.264, y: 0.364))
+        #expect(track.segments[1].points.first?.position == boundary)
     }
 
     @Test func mouseFollowZoomFocusInterpolatesAnOrderedDecodedPath() throws {
@@ -3280,7 +3386,7 @@ struct ReccyTests {
 
         #expect(overlappingSegmentID == nil)
         project.setMouseFollowZoomScale(9, segmentID: segmentID)
-        #expect(project.mouseFollowZoomSegment(id: segmentID)?.zoomScale == 4)
+        #expect(project.mouseFollowZoomSegment(id: segmentID)?.zoomScale == 6)
         #expect(project.trimMouseFollowZoomSegment(
             id: segmentID,
             edge: .leading,
@@ -3955,11 +4061,14 @@ struct ReccyTests {
         let postRecordingTrack = try await engine.transcribe(request) { _ in }
         assertSpeechTranscript(postRecordingTrack)
 
+        let liveProbe = LiveTranscriptUpdateProbe()
         let liveSession = try await engine.makeLiveSession(
             role: liveRole,
             name: "Synthesized Speech",
             localeIdentifier: localeIdentifier
-        ) { _ in }
+        ) { update in
+            Task { await liveProbe.record(update) }
+        }
         let sourceFormat = try #require(AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16_000,
@@ -3974,6 +4083,14 @@ struct ReccyTests {
         for try await packet in packets {
             await liveSession.ingest(packet)
         }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while await liveProbe.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(
+            !(await liveProbe.isEmpty),
+            "The live engine must publish words before finish so Monitor can render them during capture."
+        )
         let liveTrack = try await liveSession.finish(sourceTrackID: sourceTrack.trackID)
         assertSpeechTranscript(liveTrack)
     }
@@ -4108,6 +4225,73 @@ private actor CountingLiveTranscriptionSession: LiveTranscriptionSession {
     func cancel() {}
 }
 
+private actor EmittingLiveTranscriptionEngine: TranscriptionEngine {
+    nonisolated let provider = TranscriptionProvider.appleSpeech
+
+    func availability(localeIdentifier: String) -> TranscriptionEngineAvailability { .ready }
+
+    func prepare(
+        localeIdentifier: String,
+        progress: @escaping @Sendable (TranscriptionProgressUpdate) -> Void
+    ) {}
+
+    func transcribe(
+        _ request: TranscriptionTrackRequest,
+        progress: @escaping @Sendable (TranscriptionProgressUpdate) -> Void
+    ) throws -> TranscriptTrack {
+        throw TranscriptionEngineError.providerUnavailable("Not used by this test.")
+    }
+
+    func makeLiveSession(
+        role: TranscriptTrackRole,
+        name: String,
+        localeIdentifier: String,
+        update: @escaping @Sendable (LiveTranscriptUpdate) -> Void
+    ) -> any LiveTranscriptionSession {
+        EmittingLiveTranscriptionSession(role: role, update: update)
+    }
+}
+
+private actor EmittingLiveTranscriptionSession: LiveTranscriptionSession {
+    nonisolated let role: TranscriptTrackRole
+    private let update: @Sendable (LiveTranscriptUpdate) -> Void
+
+    init(
+        role: TranscriptTrackRole,
+        update: @escaping @Sendable (LiveTranscriptUpdate) -> Void
+    ) {
+        self.role = role
+        self.update = update
+    }
+
+    func ingest(_ packet: TimedAudioBuffer) {
+        update(LiveTranscriptUpdate(
+            role: role,
+            finalizedSegments: [],
+            volatileSegments: [TranscriptSegment(
+                text: "Visible while recording",
+                sourceStart: packet.startTime.seconds,
+                duration: 0.5,
+                words: []
+            )]
+        ))
+    }
+
+    func finish(sourceTrackID: Int32) -> TranscriptTrack {
+        TranscriptTrack(
+            sourceTrackID: sourceTrackID,
+            role: role,
+            name: role.title,
+            provider: .appleSpeech,
+            localeIdentifier: "en-AU",
+            modelIdentifier: "test",
+            segments: []
+        )
+    }
+
+    func cancel() {}
+}
+
 private actor SelectiveTranscriptionEngine: TranscriptionEngine {
     nonisolated let provider = TranscriptionProvider.appleSpeech
     private let failingRoles: Set<TranscriptTrackRole>
@@ -4165,4 +4349,14 @@ private enum TestMediaError: Error {
     case cannotCreatePixelBuffer
     case speechSynthesisFailed(Int32)
     case writerFailed
+}
+
+private actor LiveTranscriptUpdateProbe {
+    private var updates: [LiveTranscriptUpdate] = []
+
+    var isEmpty: Bool { updates.isEmpty }
+
+    func record(_ update: LiveTranscriptUpdate) {
+        updates.append(update)
+    }
 }

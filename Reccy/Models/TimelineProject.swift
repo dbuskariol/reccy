@@ -623,7 +623,7 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         let segment = MouseFollowZoomSegment(
             timelineStart: start,
             duration: finalEnd - start,
-            zoomScale: min(max(zoomScale, 1.25), 4),
+            zoomScale: MouseFollowZoomScale.clamped(zoomScale),
             points: [
                 MouseFollowZoomPoint(timelineTime: start, position: position),
                 MouseFollowZoomPoint(timelineTime: finalEnd, position: position),
@@ -648,7 +648,7 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         guard var track = mouseFollowZoomTrack,
               let index = track.segments.firstIndex(where: { $0.id == segmentID })
         else { return }
-        track.segments[index].zoomScale = min(max(scale, 1.25), 4)
+        track.segments[index].zoomScale = MouseFollowZoomScale.clamped(scale)
         mouseFollowZoomTrack = track
         modifiedAt = Date()
     }

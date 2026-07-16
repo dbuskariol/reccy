@@ -73,6 +73,7 @@ enum MultitrackRecorderError: LocalizedError {
     case noVideoFrames
     case couldNotRetimeSample
     case cameraTrackEndedEarly
+    case captureNotPrepared
 
     var errorDescription: String? {
         switch self {
@@ -94,6 +95,8 @@ enum MultitrackRecorderError: LocalizedError {
         case .couldNotRetimeSample: "The recorder couldn’t close the paused section of the media timeline."
         case .cameraTrackEndedEarly:
             "The camera stopped sending video before the screen recording ended. Reccy preserved the recoverable media."
+        case .captureNotPrepared:
+            "The approved capture source wasn’t ready to begin recording. Try starting the recording again."
         }
     }
 }
@@ -163,7 +166,9 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     var onVideoFrame: (@Sendable (CMSampleBuffer) -> Void)?
     var onCameraFrame: (@Sendable (CMSampleBuffer) -> Void)?
     var onCameraPrepared: (@Sendable (WebcamCaptureFormat) -> Void)?
+    var onCameraEffectsChanged: (@Sendable (WebcamVideoEffectsState) -> Void)?
     var onAudioPacket: (@Sendable (TranscriptTrackRole, TimedAudioBuffer) -> Void)?
+    var onAudioPacketFailure: (@Sendable (TranscriptTrackRole, String) -> Void)?
 
     private let sampleQueue = DispatchQueue(
         label: "com.reccy.capture.samples",
@@ -186,6 +191,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     private var cameraInput: AVAssetWriterInput?
     private var systemAudioInput: AVAssetWriterInput?
     private var microphoneInput: AVAssetWriterInput?
+    private var preparedCameraFormat: WebcamCaptureFormat?
+    private var preparedOptions: MultitrackRecordingOptions?
     private var pendingSystemAudio: [CMSampleBuffer] = []
     private var pendingMicrophone: [CMSampleBuffer] = []
     private var pendingCamera: [CMSampleBuffer] = []
@@ -233,6 +240,27 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         outputURL: URL,
         options: MultitrackRecordingOptions
     ) async throws {
+        do {
+            try await prepare(
+                filter: filter,
+                configuration: configuration,
+                options: options
+            )
+            try beginRecording(outputURL: outputURL, options: options)
+        } catch {
+            await cancel()
+            throw error
+        }
+    }
+
+    /// Starts the one authoritative ScreenCaptureKit and AVFoundation session
+    /// in monitor-only mode. Preview and meters are live during the countdown,
+    /// but no writer, file, journal, or transcription packet exists yet.
+    func prepare(
+        filter: SCContentFilter,
+        configuration: SCStreamConfiguration,
+        options: MultitrackRecordingOptions
+    ) async throws {
         try Task.checkCancellation()
         var startingWebcam: WebcamCaptureSession?
         var cameraFormat: WebcamCaptureFormat?
@@ -244,6 +272,9 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                     deliveryQueue: sampleQueue,
                     sampleHandler: { [weak self] sampleBuffer in
                         self?.handleCamera(sampleBuffer)
+                    },
+                    effectsHandler: { [weak self] state in
+                        self?.onCameraEffectsChanged?(state)
                     }
                 )
                 startingWebcam = webcam
@@ -251,7 +282,10 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                 cameraFormat = try await webcam.start()
             }
             try Task.checkCancellation()
-            try configureWriter(outputURL: outputURL, options: options, cameraFormat: cameraFormat)
+            sampleQueue.sync {
+                preparedCameraFormat = cameraFormat
+                preparedOptions = options
+            }
             if let startingWebcam, let cameraFormat {
                 webcamSession = startingWebcam
                 onCameraPrepared?(cameraFormat)
@@ -283,8 +317,31 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             }
             await startingWebcam?.stop()
             webcamSession = nil
-            cancelWriter()
+            sampleQueue.sync { resetPreparedState() }
             throw error
+        }
+    }
+
+    /// Promotes the already-live preview session to recording on the serial
+    /// sample queue. The next complete screen frame becomes the shared timeline
+    /// origin, so countdown samples cannot leak into any source track.
+    func beginRecording(
+        outputURL: URL,
+        options: MultitrackRecordingOptions
+    ) throws {
+        let isPrepared = streamLifecycleLock.withLock {
+            stream != nil && !isStreamCancellationRequested
+        }
+        guard isPrepared else { throw MultitrackRecorderError.captureNotPrepared }
+        try sampleQueue.sync {
+            guard writer == nil, preparedOptions != nil else {
+                throw MultitrackRecorderError.captureNotPrepared
+            }
+            try configureWriter(
+                outputURL: outputURL,
+                options: options,
+                cameraFormat: preparedCameraFormat
+            )
         }
     }
 
@@ -302,6 +359,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             logger.info("Camera samples drained while recording start was settling")
             await waitForStreamStartToSettle()
             let completion = try await finishWriting()
+            sampleQueue.sync { resetPreparedState() }
             logger.info("Recording writer finalized after in-flight start")
             return completion
         }
@@ -326,6 +384,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         logger.info("Camera samples drained")
         do {
             let completion = try await finishWriting()
+            sampleQueue.sync { resetPreparedState() }
             logger.info("Recording writer finalized")
             return completion
         } catch {
@@ -360,6 +419,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             clearStreamIfOwned(stream)
         }
         cancelWriter()
+        sampleQueue.sync { resetPreparedState() }
     }
 
     /// Installs the stream without losing a cancellation that arrived between
@@ -665,6 +725,10 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             return
         }
 
+        // Preview-only countdown samples intentionally stop here. Writer state
+        // is created atomically only after the countdown reaches zero.
+        guard writer != nil else { return }
+
         guard let offset = pauseTimeline.offset(for: presentationTime, isVideo: type == .screen) else {
             return
         }
@@ -713,6 +777,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         else { return }
 
         onCameraFrame?(sampleBuffer)
+        guard writer != nil else { return }
         // Only a complete screen frame may reopen the shared media timeline
         // after pause. Camera frames remain preview-only until that anchor lands.
         guard let offset = pauseTimeline.offset(
@@ -843,10 +908,17 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         let retainedSample = RetainedSampleBuffer(sampleBuffer)
         transcriptionQueue.async {
             let sampleBuffer = retainedSample.value
-            guard let buffer = try? TranscriptionAudioReader.pcmBuffer(from: sampleBuffer) else { return }
-            let relativeTime = CMTimeSubtract(sampleBuffer.presentationTimeStamp, sessionStartTime)
-            guard relativeTime.isValid, CMTimeCompare(relativeTime, .zero) >= 0 else { return }
-            onAudioPacket(role, TimedAudioBuffer(buffer: buffer, startTime: relativeTime))
+            do {
+                let buffer = try TranscriptionAudioReader.pcmBuffer(from: sampleBuffer)
+                let relativeTime = CMTimeSubtract(sampleBuffer.presentationTimeStamp, sessionStartTime)
+                guard relativeTime.isValid, CMTimeCompare(relativeTime, .zero) >= 0 else { return }
+                onAudioPacket(role, TimedAudioBuffer(buffer: buffer, startTime: relativeTime))
+            } catch {
+                self.logger.error(
+                    "Live transcription audio conversion failed role=\(role.rawValue, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+                )
+                self.onAudioPacketFailure?(role, error.localizedDescription)
+            }
         }
     }
 
@@ -1175,6 +1247,11 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         if !keepOutputURL {
             outputURL = nil
         }
+    }
+
+    private func resetPreparedState() {
+        preparedCameraFormat = nil
+        preparedOptions = nil
     }
 }
 
