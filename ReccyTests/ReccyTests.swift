@@ -1254,19 +1254,25 @@ struct ReccyTests {
         #expect(size.height == 1440)
     }
 
-    @Test func applicationCaptureCropsScreenSpaceContentIntoTheSelectedDisplay() {
+    @Test func applicationCaptureFitsVisibleWindowsOnTheSelectedDisplay() {
         let geometry = CaptureStreamGeometry.resolve(
             kind: .application,
-            filterContentRect: CGRect(x: 5_600, y: 220, width: 1_600, height: 900),
+            filterContentRect: CGRect(x: 3_840, y: 0, width: 5_120, height: 2_160),
             displayFrames: [
                 CGRect(x: 0, y: 0, width: 3_840, height: 2_160),
                 CGRect(x: 3_840, y: 0, width: 5_120, height: 2_160),
             ],
-            selectedSourceRect: nil
+            selectedSourceRect: nil,
+            applicationWindowFrames: [
+                CGRect(x: 5_600, y: 220, width: 1_600, height: 900),
+                CGRect(x: 7_040, y: 300, width: 400, height: 500),
+                CGRect(x: 100, y: 100, width: 800, height: 600),
+            ]
         )
 
-        #expect(geometry.contentRect == CGRect(x: 0, y: 0, width: 1_600, height: 900))
-        #expect(geometry.sourceRect == CGRect(x: 1_760, y: 220, width: 1_600, height: 900))
+        #expect(geometry.contentRect == CGRect(x: 0, y: 0, width: 1_840, height: 900))
+        #expect(geometry.sourceRect == CGRect(x: 1_760, y: 220, width: 1_840, height: 900))
+        #expect(geometry.globalRect == CGRect(x: 5_600, y: 220, width: 1_840, height: 900))
     }
 
     @Test func displayAndWindowCaptureKeepScreenCaptureKitsNativeExtent() {
@@ -1288,8 +1294,10 @@ struct ReccyTests {
 
         #expect(display.sourceRect == nil)
         #expect(display.contentRect.size == displayFrame.size)
+        #expect(display.globalRect == displayFrame)
         #expect(window.sourceRect == nil)
         #expect(window.contentRect.size == filterRect.size)
+        #expect(window.globalRect == filterRect)
     }
 
     @Test func portionCaptureRetainsItsDisplayLocalCrop() {
@@ -1303,6 +1311,56 @@ struct ReccyTests {
 
         #expect(geometry.sourceRect == region)
         #expect(geometry.contentRect == CGRect(x: 0, y: 0, width: 1_280, height: 720))
+        #expect(geometry.globalRect == CGRect(x: 4_160, y: 180, width: 1_280, height: 720))
+    }
+
+    @Test("Application mouse zoom uses the encoded global crop")
+    @MainActor
+    func applicationMouseZoomUsesEncodedGlobalCrop() {
+        let source = CaptureSourceDescriptor(
+            kind: .application,
+            name: "Example",
+            applicationName: "Example",
+            applicationBundleIdentifier: "com.example.app",
+            windowName: nil,
+            windowIDs: [],
+            displayID: nil,
+            displayName: nil,
+            region: nil
+        )
+        var mapper = MouseFollowZoomSourceMapper(
+            source: source,
+            fixedCaptureBounds: CGRect(x: 3_840, y: 0, width: 1_600, height: 900)
+        )
+
+        let position = mapper.position(
+            for: CGPoint(x: 4_240, y: 225),
+            now: Date(timeIntervalSince1970: 1)
+        )
+
+        #expect(position == CGPoint(x: 0.25, y: 0.25))
+    }
+
+    @Test func inactiveMouseZoomPreviewIsAlwaysAnIdentityTransform() {
+        let transform = MouseFollowZoomPreviewTransform.resolve(
+            scale: 1,
+            focus: CGPoint(x: 0.12, y: 0.86),
+            viewportSize: CGSize(width: 1_200, height: 800)
+        )
+
+        #expect(transform.scale == 1)
+        #expect(transform.offset == .zero)
+    }
+
+    @Test func activeMouseZoomPreviewCentersItsClampedFocus() {
+        let transform = MouseFollowZoomPreviewTransform.resolve(
+            scale: 3,
+            focus: CGPoint(x: 0.25, y: 1.2),
+            viewportSize: CGSize(width: 1_200, height: 800)
+        )
+
+        #expect(transform.scale == 3)
+        #expect(transform.offset == CGSize(width: 900, height: -1_200))
     }
 
     @Test func resolutionDoesNotUpscaleSmallWindow() {
