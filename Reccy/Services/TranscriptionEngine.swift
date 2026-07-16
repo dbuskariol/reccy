@@ -53,6 +53,17 @@ nonisolated struct LiveTranscriptUpdate: Equatable, Sendable {
     let volatileSegments: [TranscriptSegment]
 }
 
+/// Identifies one recording's live-transcription route. Every setup, packet,
+/// finish, and cancellation operation carries this token so asynchronous work
+/// from an older capture cannot clear or feed a newer capture's sessions.
+nonisolated struct LiveTranscriptionRoute: Equatable, Hashable, Sendable {
+    let id: UUID
+
+    init(id: UUID = UUID()) {
+        self.id = id
+    }
+}
+
 nonisolated struct TimedAudioBuffer: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
     let startTime: CMTime

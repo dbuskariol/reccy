@@ -783,7 +783,7 @@ struct EditorView: View {
                             }
                         } label: {
                             Label(
-                                "Zoom \(segment.zoomScale.formatted(.number.precision(.fractionLength(segment.zoomScale == floor(segment.zoomScale) ? 0 : 1))))×",
+                                "Zoom \(MouseFollowZoomScale.title(segment.zoomScale))",
                                 systemImage: "plus.magnifyingglass"
                             )
                         }
@@ -1672,9 +1672,7 @@ private struct TimelineMouseFollowZoomSegmentView: View {
     }
 
     private var zoomTitle: String {
-        segment.zoomScale.formatted(
-            .number.precision(.fractionLength(segment.zoomScale == floor(segment.zoomScale) ? 0 : 1))
-        ) + "×"
+        MouseFollowZoomScale.title(segment.zoomScale)
     }
 
     private var accessibilityValue: String {

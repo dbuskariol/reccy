@@ -120,6 +120,14 @@ struct MonitorView: View {
                         Text(coordinator.state == .paused ? "PAUSED" : "LIVE")
                     }
                     .foregroundStyle(.white)
+
+                    if !coordinator.cameraVideoEffects.activeTitles.isEmpty {
+                        Label(
+                            coordinator.cameraVideoEffects.activeTitles.joined(separator: " + "),
+                            systemImage: "person.crop.rectangle"
+                        )
+                        .lineLimit(1)
+                    }
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
@@ -202,6 +210,24 @@ struct MonitorView: View {
             Divider()
                 .padding(.vertical, isCompact ? 0 : 2)
 
+            if coordinator.settings.includeCamera {
+                Button {
+                    coordinator.openCameraVideoEffects()
+                } label: {
+                    recordingControlLabel(
+                        coordinator.cameraVideoEffects.activeTitles.isEmpty
+                            ? "Camera Effects…"
+                            : coordinator.cameraVideoEffects.activeTitles.joined(separator: " + "),
+                        systemImage: "person.crop.rectangle",
+                        isCompact: isCompact
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(isCompact ? .regular : .large)
+                .disabled(!coordinator.cameraVideoEffects.supportsAnyEffect)
+                .accessibilityHint("Opens the macOS controls for Portrait blur and Background Replacement images")
+            }
+
             Button {
                 coordinator.toggleMouseFollowZoom()
             } label: {
@@ -220,6 +246,31 @@ struct MonitorView: View {
             .tint(coordinator.isMouseFollowZoomActive ? .purple : .accentColor)
             .disabled(coordinator.state != .recording && coordinator.state != .paused)
             .accessibilityHint("Creates an editable mouse-follow zoom segment in the recording timeline")
+
+            Menu {
+                ForEach(MouseFollowZoomLevel.allCases) { level in
+                    Button {
+                        coordinator.setMouseFollowZoomLevel(level)
+                    } label: {
+                        if coordinator.settings.mouseFollowZoomLevel == level {
+                            Label(level.title, systemImage: "checkmark")
+                        } else {
+                            Text(level.title)
+                        }
+                    }
+                }
+            } label: {
+                recordingControlLabel(
+                    "Zoom Level · \(coordinator.settings.mouseFollowZoomLevel.title)",
+                    systemImage: "plus.magnifyingglass",
+                    isCompact: isCompact
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .controlSize(isCompact ? .regular : .large)
+            .disabled(coordinator.state != .recording && coordinator.state != .paused)
+            .accessibilityLabel("Mouse zoom level")
+            .accessibilityHint("Changes live magnification and starts a new editable effect interval when zoom is active")
 
             Button {
                 coordinator.stopRecording()
@@ -377,6 +428,13 @@ struct MonitorView: View {
                         .frame(maxWidth: .infinity)
                 }
             }
+
+            if let warning = transcription.liveTransportWarning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Live transcript warning. \(warning)")
+            }
         }
     }
 
@@ -482,7 +540,7 @@ nonisolated struct MouseFollowZoomPreviewTransform: Equatable, Sendable {
         focus: CGPoint,
         viewportSize: CGSize
     ) -> MouseFollowZoomPreviewTransform {
-        let clampedScale = CGFloat(min(max(scale, 1), 4))
+        let clampedScale = CGFloat(min(max(scale, 1), MouseFollowZoomScale.maximum))
         guard clampedScale > 1 else {
             return MouseFollowZoomPreviewTransform(scale: 1, offset: .zero)
         }

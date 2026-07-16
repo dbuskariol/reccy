@@ -2,14 +2,33 @@ import CoreGraphics
 import Foundation
 
 enum MouseFollowZoomLevel: Double, CaseIterable, Identifiable, Codable, Sendable {
+    case minimal = 1.25
     case subtle = 1.5
+    case gentle = 1.75
     case standard = 2
+    case focused = 2.25
     case close = 2.5
     case closer = 3
+    case veryClose = 3.5
     case detail = 4
+    case maximum = 5
+    case extreme = 6
 
     var id: Self { self }
-    var title: String { rawValue.formatted(.number.precision(.fractionLength(rawValue == floor(rawValue) ? 0 : 1))) + "×" }
+    var title: String { MouseFollowZoomScale.title(rawValue) }
+}
+
+nonisolated enum MouseFollowZoomScale {
+    static let minimum = 1.25
+    static let maximum = 6.0
+
+    static func clamped(_ value: Double) -> Double {
+        min(max(value, minimum), maximum)
+    }
+
+    static func title(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(0...2))) + "×"
+    }
 }
 
 nonisolated struct MouseFollowZoomPoint: Codable, Hashable, Sendable {
@@ -45,7 +64,7 @@ nonisolated struct MouseFollowZoomSegment: Identifiable, Codable, Hashable, Send
         self.id = id
         self.timelineStart = max(0, timelineStart)
         self.duration = max(0, duration)
-        self.zoomScale = min(max(zoomScale, 1.25), 4)
+        self.zoomScale = MouseFollowZoomScale.clamped(zoomScale)
         self.points = points.deduplicatedMouseZoomPoints()
     }
 
@@ -275,7 +294,7 @@ nonisolated struct MouseFollowZoomCaptureSession: Sendable {
         activeSegment = MouseFollowZoomSegment(
             timelineStart: time,
             duration: 0,
-            zoomScale: min(max(zoomScale, 1.25), 4),
+            zoomScale: MouseFollowZoomScale.clamped(zoomScale),
             points: [MouseFollowZoomPoint(timelineTime: time, position: position)]
         )
     }
@@ -332,6 +351,26 @@ nonisolated struct MouseFollowZoomCaptureSession: Sendable {
         } else {
             begin(at: timelineTime, zoomScale: zoomScale, position: position)
         }
+    }
+
+    /// A live magnification change closes the current edit at the recording
+    /// clock and begins a neighbouring segment at the same pointer position.
+    /// This preserves the user's exact change point instead of retroactively
+    /// changing the complete enabled interval.
+    mutating func changeScale(
+        at timelineTime: TimeInterval,
+        zoomScale: Double,
+        position: CGPoint
+    ) {
+        guard isActive else { return }
+        let scale = MouseFollowZoomScale.clamped(zoomScale)
+        guard abs((currentScale ?? scale) - scale) > 0.000_1 else { return }
+        // Hold the rendered (smoothed) focus at the boundary. Using the latest
+        // raw pointer sample here would introduce a visible jump when only the
+        // magnification changed.
+        let boundaryPosition = smoothedPosition ?? clamped(position)
+        end(at: timelineTime)
+        begin(at: timelineTime, zoomScale: scale, position: boundaryPosition)
     }
 
     mutating func finish(at timelineTime: TimeInterval) -> MouseFollowZoomTrack? {
