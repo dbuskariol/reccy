@@ -278,26 +278,55 @@ struct RecordView: View {
 
                 if coordinator.settings.includeCamera {
                     Divider()
-                    HStack(alignment: .center, spacing: 24) {
-                        settingPicker(
-                            "Camera source",
-                            selection: $coordinator.settings.selectedCameraID
-                        ) {
-                            Text("System Default").tag(String?.none)
-                            ForEach(coordinator.cameraInputDevices) { device in
-                                Text(device.name).tag(Optional(device.id))
-                            }
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .center, spacing: 24) {
+                            cameraSourcePicker
+                            cameraEffectsDescription
+                            Spacer(minLength: 0)
                         }
-                        .frame(maxWidth: 380)
 
-                        Label("Separate editable video track", systemImage: "rectangle.on.rectangle")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
+                        VStack(alignment: .leading, spacing: 14) {
+                            cameraSourcePicker
+                            cameraEffectsDescription
+                        }
                     }
                 }
             }
         }
+    }
+
+    private var cameraSourcePicker: some View {
+        settingPicker(
+            "Camera source",
+            selection: $coordinator.settings.selectedCameraID
+        ) {
+            Text("System Default").tag(String?.none)
+            ForEach(coordinator.cameraInputDevices) { device in
+                Text(device.name).tag(Optional(device.id))
+            }
+        }
+        .frame(maxWidth: 380)
+    }
+
+    private var cameraEffectsDescription: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label("Separate editable video track", systemImage: "rectangle.on.rectangle")
+            Text(cameraEffectsSummary)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .font(.callout)
+    }
+
+    private var cameraEffectsSummary: String {
+        let active = coordinator.cameraVideoEffects.activeTitles
+        if !active.isEmpty {
+            return "\(active.joined(separator: " + ")) enabled · adjust in Live Preview"
+        }
+        if coordinator.cameraVideoEffects.supportsAnyEffect {
+            return "Camera Effects are available in Live Preview"
+        }
+        return "No system camera effects are available for this camera format"
     }
 
     private var mouseFollowZoomCard: some View {
@@ -736,12 +765,12 @@ struct RecordView: View {
                     Text("Get ready")
                         .foregroundStyle(.secondary)
                     Button(coordinator.state.stopButtonTitle) {
-                        coordinator.stopRecording()
+                        coordinator.requestStopRecording()
                     }
                 case .starting:
                     ProgressView("Starting recording…")
                     Button(coordinator.state.stopButtonTitle) {
-                        coordinator.stopRecording()
+                        coordinator.requestStopRecording()
                     }
                 case .stopping:
                     ProgressView("Finishing the file…")
@@ -764,7 +793,7 @@ struct RecordView: View {
                     Text("\(coordinator.formattedFileSize) · \(coordinator.settings.resolution.title) · \(coordinator.settings.frameRate.title)")
                         .foregroundStyle(.secondary)
                     Button {
-                        coordinator.stopRecording()
+                        coordinator.requestStopRecording()
                     } label: {
                         Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
                             .frame(minWidth: 150)

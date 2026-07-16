@@ -91,9 +91,29 @@ final class RecordingLibrary: ObservableObject {
     }
 
     func delete(_ item: RecordingItem) throws {
-        try RecordingArtifactTrashTransaction.perform(item.artifacts.trashOrder)
-        recordings.removeAll { $0.id == item.id }
-        thumbnails[item.url] = nil
+        try delete([item])
+    }
+
+    /// Moves the complete artifact graph for every selected recording as one
+    /// rollback-capable transaction. The Library is updated only after Finder
+    /// accepts the full batch, so a partial failure cannot leave the browser
+    /// claiming that only some selected recordings were deleted.
+    func delete(_ items: [RecordingItem]) throws {
+        var seenItems = Set<URL>()
+        let uniqueItems = items.filter { seenItems.insert($0.id).inserted }
+        guard !uniqueItems.isEmpty else { return }
+
+        var seenArtifacts = Set<URL>()
+        let artifactURLs = uniqueItems
+            .flatMap { $0.artifacts.trashOrder }
+            .filter { seenArtifacts.insert($0).inserted }
+        try RecordingArtifactTrashTransaction.perform(artifactURLs)
+
+        let deletedIDs = Set(uniqueItems.map(\.id))
+        recordings.removeAll { deletedIDs.contains($0.id) }
+        for item in uniqueItems {
+            thumbnails[item.url] = nil
+        }
     }
 
     func reveal(_ item: RecordingItem) {
@@ -214,6 +234,12 @@ final class RecordingLibrary: ObservableObject {
         thumbnails[item.url]
     }
 
+    func refreshThumbnail(for item: RecordingItem) async {
+        let image = await makeThumbnail(item: item)
+        guard recordings.contains(where: { $0.id == item.id }) else { return }
+        thumbnails[item.url] = image
+    }
+
     private func ensureDirectoryExists() throws {
         try FileManager.default.createDirectory(
             at: directoryURL,
@@ -291,15 +317,52 @@ final class RecordingLibrary: ObservableObject {
             if recordings[index].videoCodec == nil { recordings[index].videoCodec = codec }
             recordings[index].audioTrackIDs = audioTracks.map(\.trackID)
 
-            if !videoTracks.isEmpty,
-               let thumbnail = await makeThumbnail(url: url)
-            {
-                thumbnails[url] = thumbnail
+            if !videoTracks.isEmpty {
+                await refreshThumbnail(for: recordings[index])
             }
         }
     }
 
-    private func makeThumbnail(url: URL) async -> NSImage? {
+    /// Library artwork is rendered from the same non-destructive composition
+    /// and saved poster time used by Library and Editor playback. Quick Look is
+    /// retained only as a recovery fallback for a malformed project.
+    private func makeThumbnail(item: RecordingItem) async -> NSImage? {
+        do {
+            let loaded = try await RecordingTimelineProjectLoader.load(for: item)
+            let build = try await TimelineCompositionBuilder.build(loaded.project)
+            guard !build.composition.tracks(withMediaType: .video).isEmpty else {
+                return await makeQuickLookThumbnail(url: item.url)
+            }
+            let generator = AVAssetImageGenerator(asset: build.composition)
+            generator.videoComposition = TimelineCaptionVideoRenderer.applying(
+                loaded.project.captionTrack,
+                to: build.videoComposition,
+                projectDuration: loaded.project.duration
+            )
+            generator.maximumSize = CGSize(width: 640, height: 360)
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            let time = CMTime(
+                seconds: loaded.project.effectivePosterFrameTime,
+                preferredTimescale: 600
+            )
+            let image = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<CGImage, Error>) in
+                generator.generateCGImageAsynchronously(for: time) { image, _, error in
+                    if let image {
+                        continuation.resume(returning: image)
+                    } else {
+                        continuation.resume(throwing: error ?? CocoaError(.fileReadCorruptFile))
+                    }
+                }
+            }
+            return NSImage(cgImage: image, size: .zero)
+        } catch {
+            return await makeQuickLookThumbnail(url: item.url)
+        }
+    }
+
+    private func makeQuickLookThumbnail(url: URL) async -> NSImage? {
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
             size: CGSize(width: 640, height: 360),

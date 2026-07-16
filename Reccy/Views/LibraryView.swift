@@ -12,8 +12,8 @@ struct LibraryView: View {
     let onEdit: (RecordingItem) -> Void
 
     @State private var exportItem: RecordingItem?
-    @State private var selectedID: URL?
-    @State private var pendingDelete: RecordingItem?
+    @State private var selection = LibraryRecordingSelection()
+    @State private var pendingDelete: PendingRecordingDeletion?
     @State private var player = AVPlayer()
     @State private var isPreviewPlaying = false
     @State private var isPreviewLoading = false
@@ -90,36 +90,36 @@ struct LibraryView: View {
             RecordingExportSheet(item: item)
         }
         .alert(
-            "Move Recording to Trash?",
+            pendingDelete?.title ?? "Move Recording to Trash?",
             isPresented: Binding(
                 get: { pendingDelete != nil },
                 set: { if !$0 { pendingDelete = nil } }
             ),
             presenting: pendingDelete
-        ) { item in
+        ) { deletion in
             Button("Cancel", role: .cancel) { pendingDelete = nil }
             Button("Move to Trash", role: .destructive) {
                 pendingDelete = nil
                 do {
-                    try library.delete(item)
+                    try library.delete(deletion.items)
                     selectFirstVisibleRecording()
                 } catch {
                     library.presentNotice(
                         kind: .warning,
-                        title: "Recording Couldn’t Be Moved to Trash",
+                        title: deletion.failureTitle,
                         message: error.localizedDescription,
-                        fileURL: item.url
+                        fileURL: deletion.items.count == 1 ? deletion.items[0].url : nil
                     )
                 }
             }
-        } message: { item in
-            Text("This moves \(item.name), its metadata, and its non-destructive editing project to the Trash.")
+        } message: { deletion in
+            Text(deletion.message)
         }
         .onAppear {
             selectFirstVisibleRecording()
             loadTranscriptDocuments()
         }
-        .onChange(of: selectedID) { _, _ in loadSelectedRecording() }
+        .onChange(of: selection.primaryID) { _, _ in loadSelectedRecording() }
         .onChange(of: library.recordings.map(\.id)) { _, _ in
             selectFirstVisibleRecording()
             loadTranscriptDocuments()
@@ -161,8 +161,8 @@ struct LibraryView: View {
 
             if let fileURL = notice.fileURL {
                 if let recording = library.recordings.first(where: { $0.url == fileURL }) {
-                    if selectedID != recording.id {
-                        Button("View Recording") { load(recording, autoplay: false) }
+                    if selection.primaryID != recording.id {
+                        Button("View Recording") { selectOnly(recording) }
                     }
                 } else {
                     Button("Show in Finder") { library.revealRecoveryItem() }
@@ -215,6 +215,15 @@ struct LibraryView: View {
                     .foregroundStyle(.secondary)
                     .reccyAccessibleControl("Clear Search")
                 }
+
+                Button(role: .destructive) {
+                    requestDeletion(of: selectedItems)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .disabled(selectedItems.isEmpty)
+                .reccyAccessibleControl(deleteSelectionTitle)
             }
             .padding(.horizontal, 12)
             .frame(height: 44)
@@ -222,22 +231,39 @@ struct LibraryView: View {
 
             Divider()
 
-            ScrollView {
-                LazyVStack(spacing: 5) {
-                    ForEach(filteredRecordings) { item in
-                        recordingBrowserRow(item)
+            GeometryReader { geometry in
+                ScrollView {
+                    ZStack(alignment: .top) {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { selection.clear() }
+                            .accessibilityHidden(true)
+
+                        LazyVStack(spacing: 5) {
+                            ForEach(filteredRecordings) { item in
+                                recordingBrowserRow(item)
+                            }
+                        }
+                        .padding(10)
                     }
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: geometry.size.height,
+                        alignment: .top
+                    )
                 }
-                .padding(10)
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
+        .onCommand(#selector(NSResponder.selectAll(_:))) {
+            selection.selectAll(filteredRecordings.map(\.id))
+        }
     }
 
     private func recordingBrowserRow(_ item: RecordingItem) -> some View {
-        let isSelected = selectedID == item.id
+        let isSelected = selection.selectedIDs.contains(item.id)
         return Button {
-            load(item, autoplay: false)
+            select(item, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
         } label: {
             recordingRow(item)
                 .padding(8)
@@ -256,13 +282,18 @@ struct LibraryView: View {
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .onTapGesture(count: 2) { load(item, autoplay: true) }
         .contextMenu {
-            Button("Play") { load(item, autoplay: true) }
+            Button("Play") {
+                selectOnly(item)
+                load(item, autoplay: true)
+            }
             Button("Edit Recording") { onEdit(item) }
             Button("Export Recording…") { exportItem = item }
             transcriptionContextActions(item)
             Button("Show in Finder") { library.reveal(item) }
             Divider()
-            Button("Move to Trash", role: .destructive) { pendingDelete = item }
+            Button(contextDeleteTitle(for: item), role: .destructive) {
+                requestDeletion(of: deletionItems(for: item))
+            }
         }
     }
 
@@ -325,6 +356,12 @@ struct LibraryView: View {
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .background(Color(nsColor: .windowBackgroundColor))
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    selection.clear(keepingPrimary: true)
+                }
+            )
         } else if hasActiveSearch {
             WorkspaceEmptyState(
                 "No Matching Recordings",
@@ -395,15 +432,6 @@ struct LibraryView: View {
                         "Share Source Recording",
                         help: "Share the editable multitrack source recording"
                     )
-
-                    Button(role: .destructive) {
-                        pendingDelete = item
-                    } label: {
-                        Image(systemName: "trash")
-                            .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.bordered)
-                    .reccyAccessibleControl("Move to Trash")
                 }
             }
 
@@ -611,6 +639,18 @@ struct LibraryView: View {
                 Spacer(minLength: 0)
 
                 Button {
+                    useCurrentFrameAsPoster(item)
+                } label: {
+                    Image(systemName: "photo.badge.checkmark")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .reccyAccessibleControl(
+                    "Use Current Frame as Poster",
+                    help: "Use this composed frame for recording previews"
+                )
+
+                Button {
                     library.reveal(item)
                 } label: {
                     Image(systemName: "folder")
@@ -732,6 +772,7 @@ struct LibraryView: View {
                     )
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -748,8 +789,18 @@ struct LibraryView: View {
     }
 
     private var selectedItem: RecordingItem? {
-        guard let selectedID else { return nil }
+        guard let selectedID = selection.primaryID else { return nil }
         return filteredRecordings.first(where: { $0.id == selectedID })
+    }
+
+    private var selectedItems: [RecordingItem] {
+        filteredRecordings.filter { selection.selectedIDs.contains($0.id) }
+    }
+
+    private var deleteSelectionTitle: String {
+        selectedItems.count > 1
+            ? "Move \(selectedItems.count) Recordings to Trash"
+            : "Move to Trash"
     }
 
     private var hasActiveSearch: Bool {
@@ -767,10 +818,41 @@ struct LibraryView: View {
     }
 
     private func selectFirstVisibleRecording() {
-        if let selectedID, filteredRecordings.contains(where: { $0.id == selectedID }) {
-            return
+        selection.reconcile(with: filteredRecordings.map(\.id), selectsFirstIfEmpty: true)
+    }
+
+    private func select(_ item: RecordingItem, modifiers: NSEvent.ModifierFlags) {
+        let standardModifiers = modifiers.intersection(.deviceIndependentFlagsMask)
+        let intent: LibraryRecordingSelection.Intent
+        if standardModifiers.contains(.shift) {
+            intent = .extend(additive: standardModifiers.contains(.command))
+        } else if standardModifiers.contains(.command) {
+            intent = .toggle
+        } else {
+            intent = .replace
         }
-        selectedID = filteredRecordings.first?.id
+        selection.select(item.id, from: filteredRecordings.map(\.id), intent: intent)
+    }
+
+    private func selectOnly(_ item: RecordingItem) {
+        selection.select(item.id, from: filteredRecordings.map(\.id), intent: .replace)
+    }
+
+    private func deletionItems(for item: RecordingItem) -> [RecordingItem] {
+        if selection.selectedIDs.contains(item.id), selectedItems.count > 1 {
+            return selectedItems
+        }
+        return [item]
+    }
+
+    private func contextDeleteTitle(for item: RecordingItem) -> String {
+        let count = deletionItems(for: item).count
+        return count > 1 ? "Move \(count) Recordings to Trash" : "Move to Trash"
+    }
+
+    private func requestDeletion(of items: [RecordingItem]) {
+        guard !items.isEmpty else { return }
+        pendingDelete = PendingRecordingDeletion(items: items)
     }
 
     private func loadSelectedRecording() {
@@ -783,7 +865,9 @@ struct LibraryView: View {
     }
 
     private func load(_ item: RecordingItem, autoplay: Bool) {
-        selectedID = item.id
+        if selection.primaryID != item.id {
+            selectOnly(item)
+        }
         isPreviewPlaying = false
         isPreviewLoading = true
         playbackTime = 0
@@ -800,12 +884,19 @@ struct LibraryView: View {
                 let loadedProject = try await RecordingTimelineProjectLoader.load(for: item)
                 let build = try await TimelineCompositionBuilder.build(loadedProject.project)
                 try Task.checkCancellation()
-                guard selectedID == item.id else { return }
+                guard selection.primaryID == item.id else { return }
 
                 let playerItem = build.makePlayerItem()
                 player.replaceCurrentItem(with: playerItem)
                 previewCaptionTrack = loadedProject.project.captionTrack
                 previewRenderSize = build.renderSize ?? previewRenderSize
+                let posterTime = loadedProject.project.effectivePosterFrameTime
+                playbackTime = posterTime
+                await player.seek(
+                    to: CMTime(seconds: posterTime, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
                 isPreviewLoading = false
                 logger.info(
                     "Prepared composed preview videoTracks=\(build.composition.tracks(withMediaType: .video).count) file=\(item.url.lastPathComponent, privacy: .public)"
@@ -814,7 +905,7 @@ struct LibraryView: View {
             } catch is CancellationError {
                 return
             } catch {
-                guard selectedID == item.id else { return }
+                guard selection.primaryID == item.id else { return }
                 logger.error(
                     "Falling back to source preview file=\(item.url.lastPathComponent, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
                 )
@@ -825,6 +916,29 @@ struct LibraryView: View {
             }
         }
         transcription.loadDocument(for: item.url)
+    }
+
+    private func useCurrentFrameAsPoster(_ item: RecordingItem) {
+        let posterTime = playbackTime
+        Task { @MainActor in
+            do {
+                let loaded = try await RecordingTimelineProjectLoader.load(for: item)
+                var project = loaded.project
+                project.setPosterFrame(at: posterTime)
+                try RecordingTimelineProjectLoader.save(
+                    project,
+                    packageURL: item.artifacts.projectPackageURL
+                )
+                await library.refreshThumbnail(for: item)
+            } catch {
+                library.presentNotice(
+                    kind: .warning,
+                    title: "Poster Frame Couldn’t Be Saved",
+                    message: error.localizedDescription,
+                    fileURL: item.url
+                )
+            }
+        }
     }
 
     private func loadTranscriptDocuments() {
@@ -977,6 +1091,129 @@ struct LibraryView: View {
             : CGSize(width: item.manifest.width, height: item.manifest.height)
         guard size.width > 0, size.height > 0 else { return 16 / 9 }
         return size.width / size.height
+    }
+}
+
+nonisolated struct LibraryRecordingSelection: Equatable, Sendable {
+    enum Intent: Equatable, Sendable {
+        case replace
+        case toggle
+        case extend(additive: Bool)
+    }
+
+    var selectedIDs: Set<URL> = []
+    var primaryID: URL?
+    var anchorID: URL?
+
+    mutating func select(_ id: URL, from orderedIDs: [URL], intent: Intent) {
+        guard let targetIndex = orderedIDs.firstIndex(of: id) else { return }
+
+        switch intent {
+        case .replace:
+            selectedIDs = [id]
+            primaryID = id
+            anchorID = id
+
+        case .toggle:
+            if selectedIDs.remove(id) != nil {
+                if primaryID == id {
+                    primaryID = orderedIDs.first(where: selectedIDs.contains)
+                }
+                if selectedIDs.isEmpty {
+                    anchorID = nil
+                } else if anchorID == id {
+                    anchorID = primaryID
+                }
+            } else {
+                selectedIDs.insert(id)
+                primaryID = id
+                anchorID = id
+            }
+
+        case let .extend(additive):
+            let anchor = anchorID.flatMap { orderedIDs.firstIndex(of: $0) }
+                ?? primaryID.flatMap { orderedIDs.firstIndex(of: $0) }
+                ?? targetIndex
+            let bounds = min(anchor, targetIndex)...max(anchor, targetIndex)
+            let rangeIDs = Set(orderedIDs[bounds])
+            selectedIDs = additive ? selectedIDs.union(rangeIDs) : rangeIDs
+            primaryID = id
+            anchorID = orderedIDs[anchor]
+        }
+    }
+
+    mutating func reconcile(with visibleIDs: [URL], selectsFirstIfEmpty: Bool) {
+        let visibleSet = Set(visibleIDs)
+        selectedIDs.formIntersection(visibleSet)
+
+        if let primaryID, !visibleSet.contains(primaryID) {
+            self.primaryID = visibleIDs.first(where: selectedIDs.contains)
+        }
+        if let anchorID, !visibleSet.contains(anchorID) {
+            self.anchorID = primaryID
+        }
+
+        guard selectedIDs.isEmpty else {
+            if primaryID == nil {
+                primaryID = visibleIDs.first(where: selectedIDs.contains)
+            }
+            return
+        }
+
+        guard selectsFirstIfEmpty, let first = visibleIDs.first else {
+            primaryID = nil
+            anchorID = nil
+            return
+        }
+        selectedIDs = [first]
+        primaryID = first
+        anchorID = first
+    }
+
+    mutating func selectAll(_ orderedIDs: [URL]) {
+        selectedIDs = Set(orderedIDs)
+        guard !orderedIDs.isEmpty else {
+            primaryID = nil
+            anchorID = nil
+            return
+        }
+        if let primaryID, selectedIDs.contains(primaryID) {
+            anchorID = primaryID
+        } else {
+            primaryID = orderedIDs[0]
+            anchorID = orderedIDs[0]
+        }
+    }
+
+    mutating func clear(keepingPrimary: Bool = false) {
+        selectedIDs.removeAll()
+        if !keepingPrimary {
+            primaryID = nil
+        }
+        anchorID = nil
+    }
+}
+
+private struct PendingRecordingDeletion {
+    let items: [RecordingItem]
+
+    var title: String {
+        items.count == 1
+            ? "Move Recording to Trash?"
+            : "Move \(items.count) Recordings to Trash?"
+    }
+
+    var message: String {
+        if let item = items.first, items.count == 1 {
+            return "This moves \(item.name), its metadata, and its non-destructive editing project to the Trash."
+        }
+        return "This moves \(items.count) recordings, their metadata, and their non-destructive editing projects to the Trash."
+    }
+
+    var failureTitle: String {
+        items.count == 1
+            ? "Recording Couldn’t Be Moved to Trash"
+            : "Recordings Couldn’t Be Moved to Trash"
     }
 }
 

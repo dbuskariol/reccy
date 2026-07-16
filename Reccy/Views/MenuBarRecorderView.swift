@@ -435,8 +435,18 @@ struct MenuBarRecorderView: View {
                     coordinator.state == .paused ? "Resume Recording" : "Pause Recording"
                 )
 
-                Button {
-                    coordinator.toggleMouseFollowZoom()
+                Menu {
+                    ForEach(MouseFollowZoomLevel.allCases) { level in
+                        Button {
+                            coordinator.setMouseFollowZoomLevel(level)
+                        } label: {
+                            if coordinator.settings.mouseFollowZoomLevel == level {
+                                Label(level.title, systemImage: "checkmark")
+                            } else {
+                                Text(level.title)
+                            }
+                        }
+                    }
                 } label: {
                     Image(
                         systemName: coordinator.isMouseFollowZoomActive
@@ -444,19 +454,22 @@ struct MenuBarRecorderView: View {
                             : "plus.magnifyingglass"
                     )
                     .frame(width: 18, height: 18)
+                } primaryAction: {
+                    coordinator.toggleMouseFollowZoom()
                 }
+                .menuStyle(.button)
                 .buttonStyle(.bordered)
                 .tint(coordinator.isMouseFollowZoomActive ? .purple : .accentColor)
                 .disabled(coordinator.state != .recording && coordinator.state != .paused)
                 .reccyAccessibleControl(
                     coordinator.isMouseFollowZoomActive
-                        ? "Stop Mouse-follow Zoom"
-                        : "Start Mouse-follow Zoom",
-                    help: "Create an editable mouse-follow zoom effect"
+                        ? "Stop Mouse-follow Zoom at \(coordinator.liveMouseFollowZoomScaleTitle)"
+                        : "Start Mouse-follow Zoom at \(coordinator.settings.mouseFollowZoomLevel.title)",
+                    help: "Press to toggle mouse zoom. Open the menu to choose the live magnification level."
                 )
 
                 Button {
-                    coordinator.stopRecording()
+                    coordinator.requestStopRecording()
                 } label: {
                     Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
                         .frame(maxWidth: .infinity)

@@ -25,9 +25,11 @@ enum TimelineCompositionBuildError: LocalizedError {
         switch kind {
         case .video: "Screen"
         case .camera: "Camera"
+        case .importedVideo: "Imported Video"
         case .systemAudio: "System Audio"
         case .microphone: "Microphone"
         case .voiceover: "Voiceover"
+        case .importedAudio: "Imported Audio"
         }
     }
 
@@ -80,10 +82,14 @@ enum TimelineCompositionBuilder {
         let composition = AVMutableComposition()
         var audioParameters: [AVMutableAudioMixInputParameters] = []
         var primaryVideoTrack: AVMutableCompositionTrack?
-        var videoLayers: [(kind: TimelineLaneKind, instruction: AVVideoCompositionLayerInstruction)] = []
+        var videoLayers: [(
+            kind: TimelineLaneKind,
+            laneOrder: Int,
+            instruction: AVVideoCompositionLayerInstruction
+        )] = []
         let videoRenderSize = try await primaryVideoRenderSize(for: project, sources: sources)
 
-        for lane in project.lanes where !lane.clips.isEmpty {
+        for (laneOrder, lane) in project.lanes.enumerated() where !lane.clips.isEmpty {
             guard let compositionTrack = composition.addMutableTrack(
                 withMediaType: lane.kind.mediaType,
                 preferredTrackID: kCMPersistentTrackID_Invalid
@@ -98,7 +104,7 @@ enum TimelineCompositionBuilder {
             var videoLayerConfiguration = lane.kind.isVideo
                 ? AVVideoCompositionLayerInstruction.Configuration(trackID: compositionTrack.trackID)
                 : nil
-            if lane.kind == .camera,
+            if lane.kind.isOverlayVideo,
                let firstClip = sortedClips.first,
                firstClip.timelineStart > 0
             {
@@ -139,14 +145,23 @@ enum TimelineCompositionBuilder {
                 }
 
                 do {
-                    try compositionTrack.insertTimeRange(
-                        CMTimeRange(
-                            start: timelineTime(clip.sourceStart),
-                            duration: timelineTime(clip.duration)
-                        ),
-                        of: sourceTrack,
-                        at: timelineTime(clip.timelineStart)
-                    )
+                    if clip.stillImageOriginalURL != nil {
+                        try insertStillImage(
+                            clip,
+                            sourceTrack: sourceTrack,
+                            frameDuration: project.frameDuration,
+                            compositionTrack: compositionTrack
+                        )
+                    } else {
+                        try compositionTrack.insertTimeRange(
+                            CMTimeRange(
+                                start: timelineTime(clip.sourceStart),
+                                duration: timelineTime(clip.duration)
+                            ),
+                            of: sourceTrack,
+                            at: timelineTime(clip.timelineStart)
+                        )
+                    }
                 } catch {
                     throw TimelineCompositionBuildError.couldNotInsertClip(clip.name, error)
                 }
@@ -156,7 +171,7 @@ enum TimelineCompositionBuilder {
                     let transform = videoTransform(
                         geometry: geometry,
                         renderSize: videoRenderSize,
-                        layout: lane.kind == .camera
+                        layout: lane.kind.isOverlayVideo
                             ? (clip.videoLayout ?? .defaultCamera)
                             : nil
                     )
@@ -170,7 +185,7 @@ enum TimelineCompositionBuilder {
                             transform: transform
                         ))
                     }
-                    if lane.kind == .camera {
+                    if lane.kind.isOverlayVideo {
                         videoLayerConfiguration?.setOpacity(1, at: timelineTime(clip.timelineStart))
                         videoLayerConfiguration?.setOpacity(0, at: timelineTime(clip.timelineEnd))
                     }
@@ -228,6 +243,7 @@ enum TimelineCompositionBuilder {
                 }
                 videoLayers.append((
                     kind: lane.kind,
+                    laneOrder: laneOrder,
                     instruction: instruction
                 ))
             } else {
@@ -316,7 +332,7 @@ enum TimelineCompositionBuilder {
         focus: CGPoint,
         zoomScale: Double
     ) -> CGAffineTransform {
-        let scale = CGFloat(min(max(zoomScale, 1), 4))
+        let scale = CGFloat(min(max(zoomScale, 1), MouseFollowZoomScale.maximum))
         guard scale > 1,
               renderSize.width > 0,
               renderSize.height > 0
@@ -381,7 +397,7 @@ enum TimelineCompositionBuilder {
                 $0.timelineEnd > base.range.lowerBound
                     && $0.timelineStart < base.range.upperBound
             }
-            for segment in segments {
+            for (segmentIndex, segment) in segments.enumerated() {
                 let start = max(base.range.lowerBound, segment.timelineStart)
                 let end = min(base.range.upperBound, segment.timelineEnd)
                 let duration = end - start
@@ -394,6 +410,18 @@ enum TimelineCompositionBuilder {
                     configuration: &animated
                 )
 
+                let previous = segmentIndex > 0 ? segments[segmentIndex - 1] : nil
+                let next = segments.indices.contains(segmentIndex + 1)
+                    ? segments[segmentIndex + 1]
+                    : nil
+                let continuousPrevious = previous.map {
+                    abs($0.timelineEnd - segment.timelineStart) < 0.000_1
+                } ?? false
+                let continuousNextScale = next.flatMap {
+                    abs(segment.timelineEnd - $0.timelineStart) < 0.000_1
+                        ? $0.zoomScale
+                        : nil
+                }
                 let transition = min(0.2, segment.duration / 3)
                 let zoomStart = segment.timelineStart + transition
                 let zoomEnd = segment.timelineEnd - transition
@@ -418,13 +446,23 @@ enum TimelineCompositionBuilder {
                             baseTransform: base.transform,
                             renderSize: renderSize,
                             focus: segment.focus(at: lower),
-                            zoomScale: zoomScale(for: segment, at: lower)
+                            zoomScale: zoomScale(
+                                for: segment,
+                                at: lower,
+                                hasContinuousPrevious: continuousPrevious,
+                                continuousNextScale: continuousNextScale
+                            )
                         ),
                         end: mouseFollowZoomTransform(
                             baseTransform: base.transform,
                             renderSize: renderSize,
                             focus: segment.focus(at: upper),
-                            zoomScale: zoomScale(for: segment, at: upper)
+                            zoomScale: zoomScale(
+                                for: segment,
+                                at: upper,
+                                hasContinuousPrevious: continuousPrevious,
+                                continuousNextScale: continuousNextScale
+                            )
                         )
                     ))
                 }
@@ -459,18 +497,21 @@ enum TimelineCompositionBuilder {
 
     private static func zoomScale(
         for segment: MouseFollowZoomSegment,
-        at time: TimeInterval
+        at time: TimeInterval,
+        hasContinuousPrevious: Bool,
+        continuousNextScale: Double?
     ) -> Double {
         let transition = min(0.2, segment.duration / 3)
-        let amount: Double
-        if time < segment.timelineStart + transition {
-            amount = (time - segment.timelineStart) / max(transition, 0.000_1)
-        } else if time > segment.timelineEnd - transition {
-            amount = (segment.timelineEnd - time) / max(transition, 0.000_1)
-        } else {
-            amount = 1
+        if !hasContinuousPrevious, time < segment.timelineStart + transition {
+            let amount = (time - segment.timelineStart) / max(transition, 0.000_1)
+            return 1 + (segment.zoomScale - 1) * min(max(amount, 0), 1)
         }
-        return 1 + (segment.zoomScale - 1) * min(max(amount, 0), 1)
+        if time > segment.timelineEnd - transition {
+            let target = continuousNextScale ?? 1
+            let amount = (segment.timelineEnd - time) / max(transition, 0.000_1)
+            return target + (segment.zoomScale - target) * min(max(amount, 0), 1)
+        }
+        return segment.zoomScale
     }
 
     private static func videoTransform(
@@ -629,9 +670,38 @@ enum TimelineCompositionBuilder {
         )
     }
 
+    /// Image imports use a one-frame project proxy and stretch that frame only
+    /// inside the composition. The source image remains untouched in Media/,
+    /// and timeline duration does not increase proxy size or decode work.
+    private static func insertStillImage(
+        _ clip: TimelineClip,
+        sourceTrack: AVAssetTrack,
+        frameDuration: TimeInterval,
+        compositionTrack: AVMutableCompositionTrack
+    ) throws {
+        let insertedDuration = min(max(frameDuration, 1 / 600), clip.duration)
+        let insertedRange = CMTimeRange(
+            start: timelineTime(clip.timelineStart),
+            duration: timelineTime(insertedDuration)
+        )
+        try compositionTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: insertedRange.duration),
+            of: sourceTrack,
+            at: insertedRange.start
+        )
+        compositionTrack.scaleTimeRange(
+            insertedRange,
+            toDuration: timelineTime(clip.duration)
+        )
+    }
+
     private static func makeVideoComposition(
         primaryTrack: AVMutableCompositionTrack?,
-        layers: [(kind: TimelineLaneKind, instruction: AVVideoCompositionLayerInstruction)],
+        layers: [(
+            kind: TimelineLaneKind,
+            laneOrder: Int,
+            instruction: AVVideoCompositionLayerInstruction
+        )],
         renderSize: CGSize?,
         duration: TimeInterval,
         frameDuration: TimeInterval
@@ -651,12 +721,23 @@ enum TimelineCompositionBuilder {
         )
         instructionConfiguration.backgroundColor = CGColor.black
         // AVFoundation defines layerInstructions in top-to-bottom order. Keep
-        // each secondary camera track above the primary screen track.
+        // imported overlays above the camera and primary screen tracks.
         instructionConfiguration.layerInstructions = layers
             .sorted { lhs, rhs in
-                let lhsPriority = lhs.kind == .camera ? 0 : 1
-                let rhsPriority = rhs.kind == .camera ? 0 : 1
-                return lhsPriority < rhsPriority
+                let lhsPriority = switch lhs.kind {
+                case .importedVideo: 0
+                case .camera: 1
+                default: 2
+                }
+                let rhsPriority = switch rhs.kind {
+                case .importedVideo: 0
+                case .camera: 1
+                default: 2
+                }
+                if lhsPriority != rhsPriority {
+                    return lhsPriority < rhsPriority
+                }
+                return lhs.laneOrder > rhs.laneOrder
             }
             .map(\.instruction)
         let instruction = AVVideoCompositionInstruction(configuration: instructionConfiguration)

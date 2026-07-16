@@ -35,11 +35,18 @@ enum RecordingTimelineProjectLoader {
                 throw TimelineEditorError.projectFormatUnsupported
             }
             var savedProject = try decoder.decode(TimelineProject.self, from: data)
+            let needsTimelineBoundsSave = savedProject.normalizeTimelineBounds()
             let needsMigrationSave = savedProject.formatVersion != TimelineProject.currentFormatVersion
+                || needsTimelineBoundsSave
             savedProject.formatVersion = TimelineProject.currentFormatVersion
             var durations: [URL: TimeInterval] = [:]
             for url in Set(savedProject.lanes.flatMap(\.clips).map(\.sourceURL)) {
-                durations[url] = try await AVURLAsset(url: url).load(.duration).seconds
+                let containsStill = savedProject.lanes
+                    .flatMap(\.clips)
+                    .contains { $0.sourceURL == url && $0.stillImageOriginalURL != nil }
+                durations[url] = containsStill
+                    ? 24 * 60 * 60
+                    : try await AVURLAsset(url: url).load(.duration).seconds
             }
             return LoadedTimelineProject(
                 project: savedProject,
@@ -70,6 +77,15 @@ enum RecordingTimelineProjectLoader {
             ),
             audioMix: build.audioMix
         )
+    }
+
+    static func save(_ project: TimelineProject, packageURL: URL) throws {
+        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(project)
+        try data.write(to: packageURL.appendingPathComponent("project.json"), options: .atomic)
     }
 
     private static func makeInitialProject(for item: RecordingItem) async throws -> LoadedTimelineProject {

@@ -5,17 +5,21 @@ import Foundation
 enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
     case video
     case camera
+    case importedVideo
     case systemAudio
     case microphone
     case voiceover
+    case importedAudio
 
     var title: String {
         switch self {
         case .video: "Screen"
         case .camera: "Camera"
+        case .importedVideo: "Imported Video"
         case .systemAudio: "System Audio"
         case .microphone: "Microphone"
         case .voiceover: "Voiceover"
+        case .importedAudio: "Imported Audio"
         }
     }
 
@@ -23,9 +27,11 @@ enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
         switch self {
         case .video: "film"
         case .camera: "web.camera"
+        case .importedVideo: "rectangle.on.rectangle"
         case .systemAudio: "speaker.wave.2"
         case .microphone: "mic"
         case .voiceover: "waveform.badge.mic"
+        case .importedAudio: "waveform.badge.plus"
         }
     }
 
@@ -33,7 +39,8 @@ enum TimelineLaneKind: String, Codable, CaseIterable, Sendable {
         isVideo ? .video : .audio
     }
 
-    nonisolated var isVideo: Bool { self == .video || self == .camera }
+    nonisolated var isVideo: Bool { self == .video || isOverlayVideo }
+    nonisolated var isOverlayVideo: Bool { self == .camera || self == .importedVideo }
     nonisolated var isAudio: Bool { !isVideo }
 }
 
@@ -46,6 +53,29 @@ struct TimelineVideoLayout: Codable, Hashable, Sendable {
     var height: Double
 
     static let defaultCamera = TimelineVideoLayout(x: 0.69, y: 0.69, width: 0.28, height: 0.28)
+
+    nonisolated static func defaultImportedVideo(
+        canvasSize: CGSize,
+        sourceSize: CGSize
+    ) -> TimelineVideoLayout {
+        guard canvasSize.width > 0,
+              canvasSize.height > 0,
+              sourceSize.width > 0,
+              sourceSize.height > 0
+        else { return TimelineVideoLayout(x: 0.2, y: 0.2, width: 0.6, height: 0.6) }
+        let width = 0.6
+        let sourceAspect = sourceSize.width / sourceSize.height
+        let height = min(
+            0.8,
+            width * Double(canvasSize.width / canvasSize.height) / Double(sourceAspect)
+        )
+        return TimelineVideoLayout(
+            x: (1 - width) / 2,
+            y: (1 - height) / 2,
+            width: width,
+            height: height
+        ).clamped()
+    }
 
     static func defaultCamera(canvasSize: CGSize, sourceSize: CGSize) -> TimelineVideoLayout {
         guard canvasSize.width > 0,
@@ -72,7 +102,7 @@ struct TimelineVideoLayout: Codable, Hashable, Sendable {
         CGRect(x: x, y: y, width: width, height: height)
     }
 
-    func clamped(minimumSize: Double = 0.08) -> TimelineVideoLayout {
+    nonisolated func clamped(minimumSize: Double = 0.08) -> TimelineVideoLayout {
         let width = min(max(self.width, minimumSize), 1)
         let height = min(max(self.height, minimumSize), 1)
         return TimelineVideoLayout(
@@ -263,6 +293,9 @@ struct TimelineClip: Identifiable, Codable, Hashable, Sendable {
     var name: String
     var linkedGroupID: UUID?
     var videoLayout: TimelineVideoLayout? = nil
+    /// The project-owned original image for a generated single-frame proxy.
+    /// Presence distinguishes an indefinitely trimmable still from a movie.
+    var stillImageOriginalURL: URL? = nil
 
     var timelineEnd: TimeInterval { timelineStart + duration }
 
@@ -340,7 +373,7 @@ struct TimelineLane: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
-    static let currentFormatVersion = 5
+    static let currentFormatVersion = 6
 
     var formatVersion = currentFormatVersion
     var id = UUID()
@@ -352,6 +385,7 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
     var videoGaps: [TimelineGapSegment]
     var mouseFollowZoomTrack: MouseFollowZoomTrack?
     var captionTrack: TimelineCaptionTrack?
+    var posterFrameTime: TimeInterval?
 
     init(
         name: String,
@@ -359,7 +393,8 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         lanes: [TimelineLane],
         videoGaps: [TimelineGapSegment] = [],
         mouseFollowZoomTrack: MouseFollowZoomTrack? = nil,
-        captionTrack: TimelineCaptionTrack? = nil
+        captionTrack: TimelineCaptionTrack? = nil,
+        posterFrameTime: TimeInterval? = nil
     ) {
         self.name = name
         self.frameRate = max(frameRate, 1)
@@ -367,6 +402,8 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         self.videoGaps = videoGaps
         self.mouseFollowZoomTrack = mouseFollowZoomTrack
         self.captionTrack = captionTrack
+        self.posterFrameTime = posterFrameTime
+        normalizeTimelineBounds()
         reconcileVideoGaps()
     }
 
@@ -375,6 +412,53 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
     }
 
     var frameDuration: TimeInterval { 1 / max(frameRate, 1) }
+
+    var effectivePosterFrameTime: TimeInterval {
+        min(max(posterFrameTime ?? 0, 0), max(0, duration - frameDuration))
+    }
+
+    /// Repairs lane-local time bounds without changing source in-points. Clips
+    /// in one lane are non-overlapping by contract, so this also prevents a
+    /// malformed or older imported clip from rendering before time zero or
+    /// crossing its preceding neighbour when the project is reopened.
+    @discardableResult
+    mutating func normalizeTimelineBounds() -> Bool {
+        var changed = false
+        for laneIndex in lanes.indices {
+            var clips = lanes[laneIndex].clips.sorted {
+                if abs($0.timelineStart - $1.timelineStart) < 0.000_1 {
+                    return $0.id.uuidString < $1.id.uuidString
+                }
+                return $0.timelineStart < $1.timelineStart
+            }
+            var earliestAvailableStart: TimeInterval = 0
+            for clipIndex in clips.indices {
+                let requestedStart = clips[clipIndex].timelineStart
+                let finiteStart = requestedStart.isFinite ? requestedStart : earliestAvailableStart
+                let normalizedStart = max(max(earliestAvailableStart, finiteStart), 0)
+                if abs(normalizedStart - requestedStart) > 0.000_1 || !requestedStart.isFinite {
+                    clips[clipIndex].timelineStart = normalizedStart
+                    changed = true
+                }
+                earliestAvailableStart = clips[clipIndex].timelineEnd
+            }
+            if clips != lanes[laneIndex].clips {
+                lanes[laneIndex].clips = clips
+                changed = true
+            }
+        }
+        if changed {
+            modifiedAt = Date()
+        }
+        return changed
+    }
+
+    mutating func setPosterFrame(at time: TimeInterval) {
+        let clamped = min(max(time, 0), max(0, duration - frameDuration))
+        guard abs((posterFrameTime ?? 0) - clamped) > 0.000_1 else { return }
+        posterFrameTime = clamped
+        modifiedAt = Date()
+    }
 
     func clip(id: UUID) -> TimelineClip? {
         lanes.lazy.flatMap(\.clips).first(where: { $0.id == id })
@@ -451,6 +535,7 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         snapTargets: [TimeInterval] = [],
         snapTolerance: TimeInterval = 0
     ) -> TimeInterval? {
+        normalizeTimelineBounds()
         guard let selected = clip(id: id) else { return nil }
 
         let movingIDs = includeLinked ? linkedClipIDs(matching: selected) : [selected.id]
@@ -623,7 +708,7 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         let segment = MouseFollowZoomSegment(
             timelineStart: start,
             duration: finalEnd - start,
-            zoomScale: min(max(zoomScale, 1.25), 4),
+            zoomScale: MouseFollowZoomScale.clamped(zoomScale),
             points: [
                 MouseFollowZoomPoint(timelineTime: start, position: position),
                 MouseFollowZoomPoint(timelineTime: finalEnd, position: position),
@@ -648,9 +733,36 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         guard var track = mouseFollowZoomTrack,
               let index = track.segments.firstIndex(where: { $0.id == segmentID })
         else { return }
-        track.segments[index].zoomScale = min(max(scale, 1.25), 4)
+        track.segments[index].zoomScale = MouseFollowZoomScale.clamped(scale)
         mouseFollowZoomTrack = track
         modifiedAt = Date()
+    }
+
+    /// Moves an effect as one unit while preserving its captured pointer path.
+    /// Mouse-follow effects share one lane, so movement is bounded by time zero,
+    /// the neighbouring effects, and the end of the underlying media project.
+    @discardableResult
+    mutating func moveMouseFollowZoomSegment(
+        id: UUID,
+        to proposedStart: TimeInterval
+    ) -> TimeInterval? {
+        guard var track = mouseFollowZoomTrack else { return nil }
+        track.segments.sort { $0.timelineStart < $1.timelineStart }
+        guard let index = track.segments.firstIndex(where: { $0.id == id }) else { return nil }
+
+        let segment = track.segments[index]
+        let previousEnd = index > 0 ? track.segments[index - 1].timelineEnd : 0
+        let nextStart = track.segments.indices.contains(index + 1)
+            ? track.segments[index + 1].timelineStart
+            : duration
+        let latestStart = max(previousEnd, nextStart - segment.duration)
+        let finiteStart = proposedStart.isFinite ? proposedStart : segment.timelineStart
+        let finalStart = min(max(finiteStart, previousEnd), latestStart)
+
+        track.segments[index] = segment.shifted(by: finalStart - segment.timelineStart)
+        mouseFollowZoomTrack = track
+        modifiedAt = Date()
+        return finalStart
     }
 
     @discardableResult
@@ -814,7 +926,10 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
             reordered.insert(moving, at: insertionIndex)
             let affectedLower = min(originalIndex, insertionIndex)
             let affectedUpper = max(originalIndex, insertionIndex)
-            let anchor = originalOrder[affectedLower...affectedUpper].map(\.timelineStart).min() ?? 0
+            let anchor = max(
+                0,
+                originalOrder[affectedLower...affectedUpper].map(\.timelineStart).min() ?? 0
+            )
             var cursor = anchor
             for index in affectedLower...affectedUpper {
                 reordered[index].timelineStart = cursor
