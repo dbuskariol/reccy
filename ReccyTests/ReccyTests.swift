@@ -1017,6 +1017,10 @@ struct ReccyTests {
         #expect(CaptureSourceKind.region.pickerMode == nil)
         #expect(CaptureSourceKind.region.contentStyle == nil)
         #expect(CaptureSourceKind.display.pickerMode == .singleDisplay)
+        #expect(CaptureSourceKind.display.pickerSelectionPrompt == "Choose a display in the macOS picker.")
+        #expect(CaptureSourceKind.region.pickerSelectionPrompt == nil)
+        #expect(CaptureSourceKind.application.pickerSelectionPrompt == "Choose an application in the macOS picker.")
+        #expect(CaptureSourceKind.window.pickerSelectionPrompt == "Choose a window in the macOS picker.")
     }
 
     @Test @MainActor func deniedPortionSelectionUsesTheSharedPermissionPresentation() {

@@ -37,6 +37,18 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
+    /// The private system picker stays responsible for source approval. Keep
+    /// its progress copy source-specific so articles and terminology remain
+    /// correct everywhere the selection state is surfaced.
+    var pickerSelectionPrompt: String? {
+        switch self {
+        case .display: "Choose a display in the macOS picker."
+        case .region: nil
+        case .application: "Choose an application in the macOS picker."
+        case .window: "Choose a window in the macOS picker."
+        }
+    }
+
     var systemImage: String {
         switch self {
         case .display: "display"
