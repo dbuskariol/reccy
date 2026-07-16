@@ -3,6 +3,7 @@ import SwiftUI
 struct MonitorView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
     @EnvironmentObject private var transcription: TranscriptionController
+    @EnvironmentObject private var navigation: AppNavigationModel
 
     var body: some View {
         Group {
@@ -12,89 +13,43 @@ struct MonitorView: View {
                 WorkspaceEmptyState(
                     "No Active Recording",
                     systemImage: "waveform.path.ecg.rectangle",
-                    description: "Choose a source in Record, then start recording. Reccy opens this monitor automatically."
-                )
+                    description: "Choose a source in Record, then start recording. Reccy opens this monitor automatically.",
+                    actionTitle: "Choose a Source"
+                ) {
+                    navigation.section = .record
+                }
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("Monitor")
-        .toolbar {
-            if coordinator.state.isRecording {
-                ToolbarItem {
-                    HStack {
-                        Button(
-                            coordinator.state == .paused ? "Resume" : "Pause",
-                            systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill"
-                        ) {
-                            coordinator.toggleRecordingPause()
-                        }
-                        .disabled(coordinator.state != .recording && coordinator.state != .paused)
-
-                        Button("Stop", systemImage: "stop.fill") {
-                            coordinator.stopRecording()
-                        }
-                        .tint(.red)
-                    }
-                }
-            }
-        }
     }
 
     private var activeMonitor: some View {
-        VStack(spacing: 0) {
-            header
-                .padding(.horizontal, 28)
-                .padding(.vertical, 20)
-
-            Divider()
-
-            ReccySplitView(
-                axis: .vertical,
-                autosaveName: "monitor.overview-details",
-                initialFraction: 0.54,
-                firstMinimum: 260,
-                secondMinimum: 220,
-                firstPaneName: "recording overview",
-                secondPaneName: "recording details",
-                first: {
-                    monitoringOverview
-                        .padding(20)
-                },
-                second: {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 18) {
-                            audioSection
-                            if transcription.isLiveCaptureEnabled {
-                                liveTranscriptSection
-                            }
+        ReccySplitView(
+            axis: .vertical,
+            autosaveName: "monitor.overview-details",
+            initialFraction: 0.54,
+            firstMinimum: 260,
+            secondMinimum: 220,
+            firstPaneName: "recording overview",
+            secondPaneName: "recording details",
+            first: {
+                monitoringOverview
+                    .padding(20)
+            },
+            second: {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        audioSection
+                        if transcription.isLiveCaptureEnabled {
+                            liveTranscriptSection
                         }
-                        .padding(28)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
+                    .padding(28)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-            )
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 9) {
-                    Circle()
-                        .fill(coordinator.state == .paused ? .orange : .red)
-                        .frame(width: 10, height: 10)
-                        .shadow(color: .red.opacity(0.55), radius: 4)
-                    Text(statusTitle)
-                        .font(.largeTitle.weight(.bold))
-                }
-                Text("Keep this window open on another display while Reccy captures your selected source.")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
             }
-            Spacer()
-            Text(coordinator.formattedDuration)
-                .font(.title2.monospacedDigit().weight(.semibold))
-        }
+        )
     }
 
     private var monitoringOverview: some View {

@@ -2,6 +2,107 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct RecordingExportSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let item: RecordingItem
+
+    @State private var source: ExportSource?
+    @State private var errorMessage: String?
+    @State private var preparationID = 0
+
+    var body: some View {
+        Group {
+            if let source {
+                ExportSheet(source: source)
+            } else {
+                preparationView
+            }
+        }
+        .task(id: preparationID) { await prepareSource() }
+    }
+
+    private var preparationView: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.tint)
+                    .frame(width: 42, height: 42)
+                    .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Export")
+                        .font(.title2.weight(.bold))
+                    Text(item.name)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 17)
+
+            Divider()
+
+            VStack(spacing: 14) {
+                if let errorMessage {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 34))
+                        .foregroundStyle(.orange)
+                    Text("Recording Couldn’t Be Prepared")
+                        .font(.title3.weight(.semibold))
+                    Text(errorMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 430)
+                    Button("Try Again") {
+                        self.errorMessage = nil
+                        preparationID += 1
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text("Preparing the visible recording…")
+                        .font(.headline)
+                    Text("Applying camera placement, captions, edits, and the audio mix.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 15)
+            .background(.bar)
+        }
+        .frame(width: 650, height: 600)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func prepareSource() async {
+        guard source == nil, errorMessage == nil else { return }
+        do {
+            let source = try await RecordingTimelineProjectLoader.exportSource(for: item)
+            try Task.checkCancellation()
+            self.source = source
+        } catch is CancellationError {
+            return
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
 struct ExportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var workflow: ExportWorkflow

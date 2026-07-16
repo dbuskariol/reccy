@@ -115,8 +115,6 @@ struct MenuBarRecorderView: View {
                     systemImage: "exclamationmark.triangle.fill",
                     color: .orange
                 )
-            } else if !coordinator.directCapturePermission.isGranted {
-                permissionNotice
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -167,29 +165,6 @@ struct MenuBarRecorderView: View {
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 9))
     }
 
-    private var permissionNotice: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "rectangle.inset.filled.and.person.filled")
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Portion access not yet allowed")
-                    .font(.subheadline.weight(.semibold))
-                Text("Display, Application, and Window still use Apple’s private picker.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Review") {
-                navigation.openSettings(.permissions)
-                showMain(.settings)
-            }
-            .controlSize(.small)
-        }
-        .padding(11)
-        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
-    }
-
     private func compactNotice(
         title: String,
         detail: String,
@@ -215,7 +190,9 @@ struct MenuBarRecorderView: View {
     }
 
     private func sourceButton(_ kind: CaptureSourceKind) -> some View {
-        Button {
+        let needsDirectAccess = kind.requiresDirectCapturePermission
+            && !coordinator.directCapturePermission.isGranted
+        return Button {
             chooseSource(kind)
         } label: {
             HStack(spacing: 9) {
@@ -226,7 +203,11 @@ struct MenuBarRecorderView: View {
                 Text(kind.title)
                     .font(.subheadline.weight(.medium))
                 Spacer(minLength: 0)
-                if coordinator.hasSelectedSource, coordinator.selectedSourceKind == kind {
+                if needsDirectAccess {
+                    Image(systemName: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if coordinator.hasSelectedSource, coordinator.selectedSourceKind == kind {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.caption)
                         .foregroundStyle(.green)
@@ -243,7 +224,16 @@ struct MenuBarRecorderView: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Choose \(kind.title)")
+        .accessibilityLabel(
+            needsDirectAccess
+                ? "Review permissions for \(kind.title) capture"
+                : "Choose \(kind.title)"
+        )
+        .accessibilityHint(
+            needsDirectAccess
+                ? "Portion capture requires Direct Screen & System Audio Access"
+                : ""
+        )
     }
 
     private func selectedSourceCard(_ source: CaptureSourceDescriptor) -> some View {
@@ -275,35 +265,36 @@ struct MenuBarRecorderView: View {
                 )
             }
 
-            if captureTranscriptionNeedsAttention {
+            if capturePermissionNeedsAttention {
+                menuPermissionReadiness
+            } else if captureTranscriptionNeedsAttention {
                 menuTranscriptionReadiness
             }
 
             HStack(spacing: 8) {
-                Button {
-                    if captureTranscriptionNeedsAttention {
-                        if !transcription.captureReadiness.isPreparing {
-                            transcription.prepareSelectedCaptureEngine()
-                        }
-                        showMain(.record)
-                    } else {
+                if canStartFromMenu {
+                    Button {
                         coordinator.startRecording()
                         dismiss()
+                    } label: {
+                        Label("Start Recording", systemImage: "record.circle")
+                            .frame(maxWidth: .infinity)
                     }
-                } label: {
-                    Label(menuRecordActionTitle, systemImage: menuRecordActionImage)
-                        .frame(maxWidth: .infinity)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .disabled(transcription.captureReadiness.isPreparing && captureTranscriptionNeedsAttention)
 
                 Button {
                     coordinator.captureScreenshot()
                     dismiss()
                 } label: {
-                    Image(systemName: "camera")
-                        .frame(width: 18, height: 18)
+                    if canStartFromMenu {
+                        Image(systemName: "camera")
+                            .frame(width: 18, height: 18)
+                    } else {
+                        Label("Capture Screenshot", systemImage: "camera")
+                            .frame(maxWidth: .infinity)
+                    }
                 }
                 .buttonStyle(.bordered)
                 .disabled(coordinator.isCapturingScreenshot)
@@ -325,6 +316,31 @@ struct MenuBarRecorderView: View {
         captureTranscriptionConfiguration.isEnabled && !transcription.captureReadiness.isReady
     }
 
+    private var capturePermissionNeedsAttention: Bool {
+        coordinator.capturePermissionReadiness.needsAttention
+    }
+
+    private var canStartFromMenu: Bool {
+        coordinator.canStartRecording
+    }
+
+    private var menuPermissionReadiness: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Label(
+                coordinator.capturePermissionReadiness.detail,
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Review Permissions") {
+                navigation.openSettings(.permissions)
+                showMain(.settings)
+            }
+            .controlSize(.small)
+        }
+    }
+
     @ViewBuilder
     private var menuTranscriptionReadiness: some View {
         switch transcription.captureReadiness {
@@ -338,31 +354,35 @@ struct MenuBarRecorderView: View {
                     .lineLimit(2)
             }
         case .unavailable(let message):
-            Label(message, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .lineLimit(3)
+            HStack(alignment: .top, spacing: 8) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Transcription Settings") {
+                    navigation.openSettings(.transcription)
+                    showMain(.settings)
+                }
+                .controlSize(.small)
+            }
         case .disabled:
-            Label("Prepare the selected transcription engine before recording.", systemImage: "waveform.badge.magnifyingglass")
+            HStack(spacing: 8) {
+                Label(
+                    "Prepare the selected transcription engine before recording.",
+                    systemImage: "waveform.badge.magnifyingglass"
+                )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Prepare") {
+                    transcription.prepareSelectedCaptureEngine()
+                }
+                .controlSize(.small)
+            }
         case .ready:
             EmptyView()
         }
-    }
-
-    private var menuRecordActionTitle: String {
-        guard captureTranscriptionNeedsAttention else { return "Start Recording" }
-        return switch transcription.captureReadiness {
-        case .preparing: "Preparing Transcription…"
-        case .unavailable: "Review Transcription"
-        case .disabled: "Prepare Transcription"
-        case .ready: "Start Recording"
-        }
-    }
-
-    private var menuRecordActionImage: String {
-        captureTranscriptionNeedsAttention ? "waveform.badge.magnifyingglass" : "record.circle"
     }
 
     private var activeRecording: some View {
@@ -493,11 +513,6 @@ struct MenuBarRecorderView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
-                Spacer()
-                Button("Library") { showMain(.library) }
-                    .buttonStyle(.plain)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.tint)
             }
 
             VStack(spacing: 2) {
@@ -537,12 +552,12 @@ struct MenuBarRecorderView: View {
 
     private var footer: some View {
         HStack(spacing: 5) {
-            footerButton("Open Reccy", systemImage: "macwindow") { showMain(.record) }
             footerButton("Open Library", systemImage: "rectangle.stack") { showMain(.library) }
             footerButton("Open Folder", systemImage: "folder") {
                 coordinator.library.revealDirectory()
                 dismiss()
             }
+            .disabled(!coordinator.library.availability.isAvailable)
             footerButton("Settings", systemImage: "gearshape") {
                 navigation.openSettings(.general)
                 showMain(.settings)

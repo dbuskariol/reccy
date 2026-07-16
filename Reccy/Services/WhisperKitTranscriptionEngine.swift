@@ -124,11 +124,14 @@ actor WhisperKitTranscriptionEngine: TranscriptionEngine {
         let chunkStepSamples = 16_000 * 298
         var samples: [Float] = []
         samples.reserveCapacity(chunkSamples)
+        var totalSampleCount = 0
         var offset: TimeInterval = 0
         var segments: [TranscriptSegment] = []
 
         for try await packet in packets {
-            samples.append(contentsOf: try TranscriptionAudioReader.monoFloatSamples(from: packet))
+            let packetSamples = try TranscriptionAudioReader.monoFloatSamples(from: packet)
+            totalSampleCount += packetSamples.count
+            samples.append(contentsOf: packetSamples)
             progress(.init(
                 phase: .readingAudio,
                 fractionCompleted: duration.isFinite && duration > 0 ? min(1, packet.startTime.seconds / duration) : nil,
@@ -144,7 +147,8 @@ actor WhisperKitTranscriptionEngine: TranscriptionEngine {
         if !samples.isEmpty {
             segments.append(contentsOf: try await decode(samples, offset: offset, localeIdentifier: request.localeIdentifier, progress: progress))
         }
-        segments = Self.normalized(segments)
+        let sourceDuration = Double(totalSampleCount) / format.sampleRate
+        segments = Self.normalized(segments, sourceRange: 0..<sourceDuration)
         guard !segments.isEmpty else { throw TranscriptionEngineError.noSpeechRecognized }
         return TranscriptTrack(
             sourceTrackID: request.sourceTrackID,
@@ -209,8 +213,17 @@ actor WhisperKitTranscriptionEngine: TranscriptionEngine {
         return WhisperKitSegmentMapper.transcriptSegments(results.flatMap(\.segments), offset: offset)
     }
 
-    fileprivate nonisolated static func normalized(_ segments: [TranscriptSegment]) -> [TranscriptSegment] {
-        segments.sorted { $0.sourceStart < $1.sourceStart }.reduce(into: []) { result, segment in
+    nonisolated static func normalized(
+        _ segments: [TranscriptSegment],
+        sourceRange: Range<TimeInterval>? = nil
+    ) -> [TranscriptSegment] {
+        TranscriptSegmentSanitizer.sanitize(
+            segments,
+            sourceRange: sourceRange,
+            removesWhisperSilencePlaceholders: true
+        )
+        .sorted { $0.sourceStart < $1.sourceStart }
+        .reduce(into: []) { result, segment in
             if let last = result.last,
                last.displayText.caseInsensitiveCompare(segment.displayText) == .orderedSame,
                abs(last.sourceStart - segment.sourceStart) < 1.5 { return }
@@ -417,9 +430,9 @@ private actor WhisperKitNativeResultAccumulator {
     }
 
     func accept(finalized: [TranscriptSegment], volatile: [TranscriptSegment]) {
-        self.finalized = finalized
-        self.volatile = volatile
-        update(.init(role: role, finalizedSegments: finalized, volatileSegments: volatile))
+        self.finalized = WhisperKitTranscriptionEngine.normalized(finalized)
+        self.volatile = WhisperKitTranscriptionEngine.normalized(volatile)
+        update(.init(role: role, finalizedSegments: self.finalized, volatileSegments: self.volatile))
     }
 
     var allSegments: [TranscriptSegment] {
@@ -705,17 +718,22 @@ private actor WhisperKitExternalLiveSession: LiveTranscriptionSession {
             decodeTask = nil
             return
         }
+        let snapshotEnd = offset + Double(snapshot.count) / 16_000
+        let normalized = WhisperKitTranscriptionEngine.normalized(
+            decoded,
+            sourceRange: offset..<snapshotEnd
+        )
         if final {
             finalized.removeAll { $0.sourceStart >= offset }
-            finalized.append(contentsOf: decoded)
+            finalized.append(contentsOf: normalized)
             finalized.sort { $0.sourceStart < $1.sourceStart }
             volatile = []
         } else {
-            let confirmationBoundary = max(offset, offset + Double(snapshot.count) / 16_000 - 2.5)
+            let confirmationBoundary = max(offset, snapshotEnd - 2.5)
             finalized.removeAll { $0.sourceStart >= offset }
-            finalized.append(contentsOf: decoded.filter { $0.sourceEnd <= confirmationBoundary })
+            finalized.append(contentsOf: normalized.filter { $0.sourceEnd <= confirmationBoundary })
             finalized.sort { $0.sourceStart < $1.sourceStart }
-            volatile = decoded.filter { $0.sourceEnd > confirmationBoundary }
+            volatile = normalized.filter { $0.sourceEnd > confirmationBoundary }
         }
         update(.init(role: role, finalizedSegments: finalized, volatileSegments: volatile))
         decodeTask = nil

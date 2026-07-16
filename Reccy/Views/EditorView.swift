@@ -4,8 +4,10 @@ import AppKit
 import SwiftUI
 
 struct EditorView: View {
+    @Environment(\.undoManager) private var undoManager
     @EnvironmentObject private var editor: TimelineEditorController
     @EnvironmentObject private var transcription: TranscriptionController
+    @EnvironmentObject private var navigation: AppNavigationModel
     @State private var exportSource: ExportSource?
     @State private var exportError: String?
     @State private var showsTranscript = false
@@ -14,8 +16,8 @@ struct EditorView: View {
     @State private var transcriptCorrection: ProjectedTranscriptSegment?
     @State private var confirmsCaptionReplacement = false
     @State private var showsVoiceoverInputPopover = false
+    @State private var playbackSyncTask: Task<Void, Never>?
 
-    private let playbackTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
     private let trackHeaderWidth: CGFloat = 176
     private let rulerHeight: CGFloat = 32
     private let laneHeight: CGFloat = 68
@@ -32,8 +34,11 @@ struct EditorView: View {
                 WorkspaceEmptyState(
                     "Open a Recording",
                     systemImage: "timeline.selection",
-                    description: "Choose Edit in the Library to create a non-destructive project."
-                )
+                    description: "Choose Edit in the Library to create a non-destructive project.",
+                    actionTitle: "Open Library"
+                ) {
+                    navigation.section = .library
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -41,7 +46,6 @@ struct EditorView: View {
         .toolbar {
             ToolbarSpacer(.flexible)
             ToolbarItemGroup(placement: .primaryAction) {
-                saveToolbarButton
                 exportToolbarButton
             }
         }
@@ -60,11 +64,15 @@ struct EditorView: View {
             }
         }
         .onAppear {
+            editor.connectUndoManager(undoManager)
             editor.refreshVoiceoverInputDevices()
             loadProjectTranscripts()
         }
         .onChange(of: editor.project) { _, _ in loadProjectTranscripts() }
-        .onReceive(playbackTimer) { _ in editor.syncPlayheadFromPlayer() }
+        .onDisappear {
+            playbackSyncTask?.cancel()
+            playbackSyncTask = nil
+        }
         .alert("Export Failed", isPresented: Binding(
             get: { exportError != nil },
             set: { if !$0 { exportError = nil } }
@@ -122,6 +130,26 @@ struct EditorView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .onReceive(editor.player.publisher(for: \.timeControlStatus)) { status in
+            updatePlaybackSync(for: status)
+        }
+    }
+
+    private func updatePlaybackSync(for status: AVPlayer.TimeControlStatus) {
+        playbackSyncTask?.cancel()
+        playbackSyncTask = nil
+        guard status == .playing else { return }
+
+        playbackSyncTask = Task { @MainActor in
+            while !Task.isCancelled, editor.player.timeControlStatus == .playing {
+                editor.syncPlayheadFromPlayer()
+                do {
+                    try await Task.sleep(for: .milliseconds(100))
+                } catch {
+                    return
+                }
+            }
+        }
     }
 
     private func editorCore(_ project: TimelineProject) -> some View {
@@ -701,6 +729,7 @@ struct EditorView: View {
         systemImage: String,
         help: String,
         tint: Color? = nil,
+        isSelected: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -714,6 +743,7 @@ struct EditorView: View {
         .frame(width: timelineToolbarControlSize, height: timelineToolbarControlSize)
         .tint(tint)
         .reccyAccessibleControl(title)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         .reccyTooltip(help)
     }
 
@@ -724,7 +754,8 @@ struct EditorView: View {
             help: editor.moveLinkedClips
                 ? "Linked movement is on — video and matching audio move or trim together"
                 : "Independent movement is on — each audio or video clip moves and trims separately",
-            tint: editor.moveLinkedClips ? .accentColor : nil
+            tint: editor.moveLinkedClips ? .accentColor : nil,
+            isSelected: editor.moveLinkedClips
         ) {
             editor.moveLinkedClips.toggle()
         }
@@ -735,7 +766,8 @@ struct EditorView: View {
             mode.title,
             systemImage: mode.systemImage,
             help: "\(mode.title). \(gapFillHelp)",
-            tint: editor.selectedGapFillMode == mode ? .accentColor : nil
+            tint: editor.selectedGapFillMode == mode ? .accentColor : nil,
+            isSelected: editor.selectedGapID != nil && editor.selectedGapFillMode == mode
         ) {
             editor.setSelectedGapFillMode(mode)
         }
@@ -802,22 +834,11 @@ struct EditorView: View {
             title,
             systemImage: systemImage,
             help: "Show or hide the \(title.lowercased()) panel",
-            tint: showsTranscript && inspectorMode == mode ? .accentColor : nil
+            tint: showsTranscript && inspectorMode == mode ? .accentColor : nil,
+            isSelected: showsTranscript && inspectorMode == mode
         ) {
             toggleInspector(mode)
         }
-    }
-
-    private var saveToolbarButton: some View {
-        Button {
-            do { try editor.save() } catch { exportError = error.localizedDescription }
-        } label: {
-            Label("Save", systemImage: "square.and.arrow.down")
-                .labelStyle(.iconOnly)
-        }
-        .disabled(!editor.hasProject)
-        .reccyAccessibleControl("Save")
-        .reccyTooltip("Save the current project")
     }
 
     private var exportToolbarButton: some View {
@@ -915,7 +936,7 @@ struct EditorView: View {
                 Divider()
 
                 HStack(spacing: 8) {
-                    Button("Add", systemImage: "plus") {
+                    Button("Add Caption", systemImage: "plus") {
                         addCaptionAtPlayhead()
                     }
                     .buttonStyle(.borderedProminent)
@@ -955,17 +976,17 @@ struct EditorView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                    Button("Add Transcript Captions", systemImage: "text.badge.plus") {
-                        installTranscriptCaptions(project)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(projectedTranscriptSegments.isEmpty)
-
                     if projectedTranscriptSegments.isEmpty {
-                        Button("Transcribe Sources") {
+                        Button("Transcribe Sources", systemImage: "waveform.badge.magnifyingglass") {
                             transcription.transcribeMissingSources(in: project)
                             inspectorMode = .transcript
                         }
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Button("Add Transcript Captions", systemImage: "text.badge.plus") {
+                            installTranscriptCaptions(project)
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
 
                     Button("Add Manually", systemImage: "plus") {
@@ -996,7 +1017,7 @@ struct EditorView: View {
                 .menuStyle(.borderlessButton)
                 .frame(width: 28)
                 .disabled(projectedTranscriptSegments.isEmpty)
-                .reccyTooltip("Export transcript or captions")
+                .reccyAccessibleControl("Export Transcript or Captions")
 
                 Button {
                     showsTranscript = false
@@ -1026,6 +1047,7 @@ struct EditorView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
+                    .reccyAccessibleControl("Clear Transcript Search")
                 }
             }
             .padding(.horizontal, 12)
@@ -1087,6 +1109,10 @@ struct EditorView: View {
                                     .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityLabel(
+                                        "Play transcript from \(timecode(segment.timelineStart)): \(segment.text)"
+                                    )
+                                    .accessibilityHint("Seek the editor to this transcript segment")
 
                                     Button {
                                         transcriptCorrection = segment
@@ -1095,11 +1121,12 @@ struct EditorView: View {
                                             .frame(width: 18, height: 18)
                                     }
                                     .buttonStyle(.borderless)
-                                    .reccyAccessibleControl("Correct transcript text")
+                                    .reccyAccessibleControl(
+                                        "Correct \(segment.role.title) transcript at \(timecode(segment.timelineStart))"
+                                    )
                                     .padding(.top, 8)
                                 }
                                 .id(segment.id)
-                                .accessibilityLabel("\(segment.role.title), \(segment.text), at \(timecode(segment.timelineStart))")
                             }
                         }
                         .padding(8)

@@ -183,6 +183,7 @@ nonisolated enum ExportServiceError: LocalizedError, Equatable {
     case sourceWouldBeOverwritten
     case missingVideo
     case missingAudio
+    case audioMixPreparationFailed
     case invalidOutput
     case durationMismatch(expected: TimeInterval, actual: TimeInterval)
     case capacityUnavailable
@@ -198,6 +199,8 @@ nonisolated enum ExportServiceError: LocalizedError, Equatable {
             return "The finished export doesn’t contain the expected video track. The destination was left unchanged."
         case .missingAudio:
             return "This recording doesn’t contain audio that can be exported with the selected preset."
+        case .audioMixPreparationFailed:
+            return "Reccy couldn’t prepare the recording’s delivery audio mix. The destination was left unchanged."
         case .invalidOutput:
             return "The finished export could not be validated as playable. The destination was left unchanged."
         case let .durationMismatch(expected, actual):
@@ -297,15 +300,22 @@ struct ExportService {
         defer { try? fileManager.removeItem(at: workDirectory) }
 
         progress(ExportProgressUpdate(phase: .preparing, fractionCompleted: nil))
-        let session = try await makeSession(source: source, preset: preset)
-        session.directoryForTemporaryFiles = workDirectory
+        let estimateSession = try await makeSession(source: source, preset: preset)
         let estimate = try await estimatedFileSize(
             source: source,
             preset: preset,
-            session: session
+            session: estimateSession
         )
         try validateCapacity(estimate: estimate, directory: directory)
         try Task.checkCancellation()
+
+        let deliverySource = try await prepareDeliverySource(
+            source,
+            preset: preset,
+            workDirectory: workDirectory
+        )
+        let session = try await makeSession(source: deliverySource, preset: preset)
+        session.directoryForTemporaryFiles = workDirectory
 
         let stagedURL = workDirectory
             .appendingPathComponent("Export")
@@ -352,6 +362,94 @@ struct ExportService {
             fileSize: result.fileSize,
             videoTrackCount: result.videoTrackCount,
             audioTrackCount: result.audioTrackCount
+        )
+    }
+
+    /// Delivery files must expose one audible program. `AVAssetExportSession`
+    /// preserves multiple source audio tracks in video containers even when an
+    /// `AVAudioMix` is attached, which lets common players silently select only
+    /// the system or microphone track. Apple's M4A preset does render those
+    /// tracks and their mix parameters into one AAC track, so stage that mix and
+    /// recombine it with the untouched video tracks before the delivery encode.
+    private func prepareDeliverySource(
+        _ source: ExportSource,
+        preset: ExportPreset,
+        workDirectory: URL
+    ) async throws -> ExportSource {
+        guard preset.includesVideo else { return source }
+        let sourceAudioTracks = try await source.asset.loadTracks(withMediaType: .audio)
+        guard sourceAudioTracks.count > 1 else { return source }
+        try Task.checkCancellation()
+
+        let mixedAudioURL = workDirectory.appendingPathComponent("Delivery Audio Mix.m4a")
+        guard await AVAssetExportSession.compatibility(
+            ofExportPreset: AVAssetExportPresetAppleM4A,
+            with: source.asset,
+            outputFileType: .m4a
+        ), let mixSession = AVAssetExportSession(
+            asset: source.asset,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            throw ExportServiceError.audioMixPreparationFailed
+        }
+        mixSession.audioMix = source.audioMix
+        mixSession.directoryForTemporaryFiles = workDirectory
+        do {
+            try await mixSession.export(to: mixedAudioURL, as: .m4a)
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            throw ExportServiceError.audioMixPreparationFailed
+        }
+        try Task.checkCancellation()
+
+        let mixedAudioAsset = AVURLAsset(url: mixedAudioURL)
+        let mixedAudioTracks = try await mixedAudioAsset.loadTracks(withMediaType: .audio)
+        guard mixedAudioTracks.count == 1, let mixedAudioTrack = mixedAudioTracks.first else {
+            throw ExportServiceError.audioMixPreparationFailed
+        }
+
+        let composition = AVMutableComposition()
+        do {
+            for sourceVideoTrack in try await source.asset.loadTracks(withMediaType: .video) {
+                guard let targetVideoTrack = composition.addMutableTrack(
+                    withMediaType: .video,
+                    preferredTrackID: sourceVideoTrack.trackID
+                ) else {
+                    throw ExportServiceError.audioMixPreparationFailed
+                }
+                let timeRange = try await sourceVideoTrack.load(.timeRange)
+                try targetVideoTrack.insertTimeRange(
+                    timeRange,
+                    of: sourceVideoTrack,
+                    at: timeRange.start
+                )
+                targetVideoTrack.preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
+                targetVideoTrack.naturalTimeScale = try await sourceVideoTrack.load(.naturalTimeScale)
+            }
+
+            guard let targetAudioTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                throw ExportServiceError.audioMixPreparationFailed
+            }
+            let mixedAudioRange = try await mixedAudioTrack.load(.timeRange)
+            try targetAudioTrack.insertTimeRange(
+                mixedAudioRange,
+                of: mixedAudioTrack,
+                at: .zero
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw ExportServiceError.audioMixPreparationFailed
+        }
+
+        return ExportSource(
+            name: source.name,
+            asset: composition,
+            sourceURL: source.sourceURL,
+            videoComposition: source.videoComposition
         )
     }
 
@@ -470,13 +568,18 @@ struct ExportService {
         async let outputDuration = asset.load(.duration)
         async let videoTracks = asset.loadTracks(withMediaType: .video)
         async let audioTracks = asset.loadTracks(withMediaType: .audio)
+        async let sourceAudioTracks = source.asset.loadTracks(withMediaType: .audio)
         guard try await isPlayable else { throw ExportServiceError.invalidOutput }
         let duration = try await outputDuration.seconds
         let videos = try await videoTracks
         let audio = try await audioTracks
+        let sourceAudio = try await sourceAudioTracks
         guard duration.isFinite, duration > 0 else { throw ExportServiceError.invalidOutput }
         if preset.includesVideo, videos.isEmpty { throw ExportServiceError.missingVideo }
-        if preset.requiresAudio, audio.isEmpty { throw ExportServiceError.missingAudio }
+        if preset.requiresAudio || !sourceAudio.isEmpty {
+            guard !audio.isEmpty else { throw ExportServiceError.missingAudio }
+            guard audio.count == 1 else { throw ExportServiceError.invalidOutput }
+        }
 
         let expectedDuration = try await source.asset.load(.duration).seconds
         if expectedDuration.isFinite, expectedDuration > 0 {

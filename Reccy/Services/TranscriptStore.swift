@@ -1,3 +1,4 @@
+@preconcurrency import AVFoundation
 import Foundation
 
 nonisolated enum TranscriptStoreError: LocalizedError {
@@ -12,7 +13,7 @@ nonisolated enum TranscriptStoreError: LocalizedError {
 }
 
 actor TranscriptStore {
-    func load(for mediaURL: URL) throws -> TranscriptDocument? {
+    func load(for mediaURL: URL) async throws -> TranscriptDocument? {
         let url = Self.sidecarURL(for: mediaURL)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let data = try Data(contentsOf: url)
@@ -22,7 +23,9 @@ actor TranscriptStore {
         guard document.formatVersion == TranscriptDocument.currentFormatVersion else {
             throw TranscriptStoreError.unsupportedFormat
         }
-        return document
+        let duration = try? await AVURLAsset(url: mediaURL).load(.duration).seconds
+        guard let duration else { return document }
+        return document.sanitized(sourceDuration: duration)
     }
 
     func save(_ document: TranscriptDocument, for mediaURL: URL) throws {

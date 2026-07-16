@@ -7,11 +7,56 @@ import Foundation
 import IOSurface
 import Speech
 import Testing
+import UniformTypeIdentifiers
 import VideoToolbox
 @testable import Reccy
 
 @Suite("Reccy")
 struct ReccyTests {
+    @Test func screenshotWriterPersistsAndValidatesNativeImage() throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Screenshot Writer \(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let screenshotURL = directoryURL.appendingPathComponent("test.png")
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let context = try #require(CGContext(
+            data: nil,
+            width: 2,
+            height: 2,
+            bitsPerComponent: 8,
+            bytesPerRow: 8,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        let image = try #require(context.makeImage())
+
+        try ScreenshotFileWriter.write(image, to: screenshotURL, contentType: .png)
+
+        #expect(ScreenshotFileWriter.isValidImageFile(at: screenshotURL))
+        #expect((try screenshotURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) > 0)
+    }
+
+    @Test func hdrScreenshotsRequestBothRepresentationsForReliableFileFallback() {
+        #expect(ScreenshotRange.sdr.screenCaptureRange == .sdr)
+        #expect(ScreenshotRange.hdr.screenCaptureRange == .bothSDRAndHDR)
+    }
+
+    @Test func hdrScreenshotFailureExplainsTheSupportedRecovery() {
+        let message = ScreenshotFileWriterError.hdrUnavailable.errorDescription
+
+        #expect(message?.contains("HDR") == true)
+        #expect(message?.contains("SDR") == true)
+        #expect(message?.contains("another display") == true)
+    }
+
+    @Test func screenshotFailuresHaveAnOperationSpecificTitle() {
+        #expect(CaptureFailureContext.capture.title == "Reccy couldn’t continue")
+        #expect(CaptureFailureContext.screenshot.title == "Screenshot couldn’t be saved")
+    }
+
     @Test func audioReaderProducesExactTrackPCMForTranscription() async throws {
         let url = try makeWaveformTestAudio(duration: 1) { frame, sampleRate in
             Float(sin(2 * Double.pi * 440 * Double(frame) / sampleRate) * 0.25)
@@ -96,6 +141,84 @@ struct ReccyTests {
             message: TranscriptionEngineError.noSpeechRecognized.localizedDescription
         )])
         #expect(await engine.attemptedRoles == [.systemAudio, .microphone])
+    }
+
+    @Test func transcriptionBatchSeparatesSilenceFromProviderFailures() {
+        let noSpeech = TranscriptionEngineError.noSpeechRecognized.localizedDescription
+        let silent = TranscriptionBatchResult(
+            tracks: [],
+            failures: [TranscriptionTrackFailure(
+                role: .systemAudio,
+                name: "System Audio",
+                message: noSpeech
+            )]
+        )
+        let unavailable = TranscriptionBatchResult(
+            tracks: [],
+            failures: [TranscriptionTrackFailure(
+                role: .microphone,
+                name: "Microphone",
+                message: "The transcription provider is unavailable."
+            )]
+        )
+        let mixed = TranscriptionBatchResult(
+            tracks: [],
+            failures: silent.failures + unavailable.failures
+        )
+
+        #expect(silent.containsOnlyNoSpeechFailures)
+        #expect(!unavailable.containsOnlyNoSpeechFailures)
+        #expect(!mixed.containsOnlyNoSpeechFailures)
+    }
+
+    @Test func whisperSegmentsStayInsideRealAudioAndDiscardSilencePlaceholders() {
+        let segments = [
+            TranscriptSegment(
+                text: "Spoken phrase",
+                sourceStart: 8,
+                duration: 4,
+                words: [
+                    TranscriptWord(text: "Spoken", sourceStart: 8, duration: 1),
+                    TranscriptWord(text: " phrase", sourceStart: 9.5, duration: 1),
+                    TranscriptWord(text: " padded", sourceStart: 10.5, duration: 1),
+                ]
+            ),
+            TranscriptSegment(
+                text: "[BLANK_AUDIO]",
+                sourceStart: 5,
+                duration: 1,
+                words: []
+            ),
+            TranscriptSegment(
+                text: "[ Silence ]",
+                sourceStart: 6,
+                duration: 1,
+                words: []
+            ),
+            TranscriptSegment(
+                text: "[no audio]",
+                sourceStart: 7,
+                duration: 1,
+                words: []
+            ),
+            TranscriptSegment(
+                text: "Padded hallucination",
+                sourceStart: 12,
+                duration: 2,
+                words: []
+            ),
+        ]
+
+        let normalized = WhisperKitTranscriptionEngine.normalized(
+            segments,
+            sourceRange: 0..<10
+        )
+
+        #expect(normalized.map(\.displayText) == ["Spoken phrase"])
+        #expect(normalized[0].sourceStart == 8)
+        #expect(normalized[0].duration == 2)
+        #expect(normalized[0].words.map(\.text) == ["Spoken", " phrase"])
+        #expect(normalized[0].words[1].duration == 0.5)
     }
 
     @Test func appleSpeechAdvertisesAPlatformSupportedLocaleWhenAvailable() async {
@@ -584,6 +707,22 @@ struct ReccyTests {
         #expect(FileManager.default.fileExists(atPath: TranscriptStore.sidecarURL(for: mediaURL).path))
     }
 
+    @Test func emptyTranscriptDocumentDurablyRepresentsNoSpeech() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Silent Transcript \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mediaURL = directory.appendingPathComponent("Silent Recording.mov")
+        let document = TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: [])
+        let store = TranscriptStore()
+
+        try await store.save(document, for: mediaURL)
+        let restored = try #require(try await store.load(for: mediaURL))
+
+        #expect(!restored.hasRecognizedSpeech)
+        #expect(restored.tracks.isEmpty)
+    }
+
     @Test @MainActor func transcriptCorrectionsPersistAndRemainReversible() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Transcript Correction \(UUID().uuidString)", isDirectory: true)
@@ -664,6 +803,66 @@ struct ReccyTests {
         #expect(CaptureSourceKind.region.pickerMode == nil)
         #expect(CaptureSourceKind.region.contentStyle == nil)
         #expect(CaptureSourceKind.display.pickerMode == .singleDisplay)
+    }
+
+    @Test @MainActor func deniedPortionSelectionUsesTheSharedPermissionPresentation() {
+        let coordinator = CaptureCoordinator()
+        coordinator.installPermissionsQAScenario()
+
+        coordinator.chooseSource(.region)
+
+        #expect(coordinator.selectedSourceKind == .region)
+        #expect(!coordinator.hasSelectedSource)
+        #expect(coordinator.sourceSelectionMessage == nil)
+    }
+
+    @Test func capturePermissionReadinessCombinesEveryActiveRequirement() {
+        let readiness = CapturePermissionReadiness(
+            directCaptureIssue: .restartRequired,
+            needsCameraAccess: true,
+            needsMicrophoneAccess: true
+        )
+
+        #expect(readiness.needsAttention)
+        #expect(readiness.detail == [
+            "Quit and reopen Reccy to finish enabling Portion capture.",
+            "Camera recording is enabled but camera access is not allowed.",
+            "Microphone recording is enabled but microphone access is not allowed.",
+        ].joined(separator: " "))
+        #expect(!CapturePermissionReadiness(
+            directCaptureIssue: nil,
+            needsCameraAccess: false,
+            needsMicrophoneAccess: false
+        ).needsAttention)
+    }
+
+    @Test func captureStartReadinessRequiresEveryPrerequisite() {
+        let ready = CaptureStartReadiness(
+            hasSelectedSource: true,
+            canChangeSettings: true,
+            permissionNeedsAttention: false,
+            transcriptionNeedsAttention: false
+        )
+        #expect(ready.canStart)
+
+        #expect(!CaptureStartReadiness(
+            hasSelectedSource: false,
+            canChangeSettings: true,
+            permissionNeedsAttention: false,
+            transcriptionNeedsAttention: false
+        ).canStart)
+        #expect(!CaptureStartReadiness(
+            hasSelectedSource: true,
+            canChangeSettings: true,
+            permissionNeedsAttention: true,
+            transcriptionNeedsAttention: false
+        ).canStart)
+        #expect(!CaptureStartReadiness(
+            hasSelectedSource: true,
+            canChangeSettings: true,
+            permissionNeedsAttention: false,
+            transcriptionNeedsAttention: true
+        ).canStart)
     }
 
     @Test func regionSelectionConvertsFromAppKitToCaptureCoordinates() {
@@ -1380,6 +1579,31 @@ struct ReccyTests {
         #expect(compression[kVTCompressionPropertyKey_RealTime as String] as? Bool == true)
     }
 
+    @Test func cameraTailPaddingClosesOnlyMaterialEndDrift() throws {
+        let frameDuration = CMTime(value: 1, timescale: 30)
+        let recordingEnd = CMTime(seconds: 10, preferredTimescale: 600)
+        let lastPresentation = CMTime(seconds: 5.6, preferredTimescale: 600)
+        let paddedPresentation = try #require(
+            MultitrackRecorder.cameraTailPaddingPresentationTime(
+                cameraEnd: CMTime(seconds: 5.633, preferredTimescale: 600),
+                recordingEnd: recordingEnd,
+                sampleDuration: frameDuration,
+                lastPresentationTime: lastPresentation
+            )
+        )
+
+        #expect(CMTimeCompare(
+            CMTimeAdd(paddedPresentation, frameDuration),
+            recordingEnd
+        ) == 0)
+        #expect(MultitrackRecorder.cameraTailPaddingPresentationTime(
+            cameraEnd: CMTime(seconds: 9.8, preferredTimescale: 600),
+            recordingEnd: recordingEnd,
+            sampleDuration: frameDuration,
+            lastPresentationTime: CMTime(seconds: 9.767, preferredTimescale: 600)
+        ) == nil)
+    }
+
     @Test func exportCompatibilityIsDeterminedFromTheActualAsset() async throws {
         let videoURL = try await makeColorTestVideo()
         defer { try? FileManager.default.removeItem(at: videoURL) }
@@ -1443,6 +1667,115 @@ struct ReccyTests {
             includingPropertiesForKeys: nil
         ).filter { $0.lastPathComponent.hasPrefix(".reccy-export-") }
         #expect(leftovers.isEmpty)
+    }
+
+    @Test func deliveryVideoExportsOneAudibleMixContainingEverySource() async throws {
+        let fixtureURL = try await makeExportFixture(audioTrackCount: 2)
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Delivery Audio Mix \(UUID().uuidString)")
+            .appendingPathExtension("mp4")
+        defer {
+            try? FileManager.default.removeItem(at: fixtureURL)
+            try? FileManager.default.removeItem(at: destination)
+        }
+
+        let sourceAsset = AVURLAsset(url: fixtureURL)
+        #expect(try await sourceAsset.loadTracks(withMediaType: .audio).count == 2)
+        let result = try await ExportService().export(
+            source: ExportSource(
+                name: "Two-Source Audio",
+                asset: sourceAsset,
+                sourceURL: fixtureURL
+            ),
+            destinationURL: destination,
+            preset: .h264720
+        )
+
+        #expect(result.audioTrackCount == 1)
+        let outputAsset = AVURLAsset(url: destination)
+        let outputTrack = try #require(try await outputAsset.loadTracks(withMediaType: .audio).first)
+        let firstSourceWindow = try await WaveformRepository.shared.samples(
+            for: WaveformSliceRequest(
+                sourceURL: destination,
+                sourceTrackID: outputTrack.trackID,
+                sourceStart: 0.2,
+                duration: 0.8,
+                sampleCount: 180
+            )
+        )
+        let secondSourceWindow = try await WaveformRepository.shared.samples(
+            for: WaveformSliceRequest(
+                sourceURL: destination,
+                sourceTrackID: outputTrack.trackID,
+                sourceStart: 2,
+                duration: 0.8,
+                sampleCount: 180
+            )
+        )
+        #expect(mean(firstSourceWindow) < 0.5)
+        #expect(mean(secondSourceWindow) < 0.5)
+    }
+
+    @Test func deliveryAudioFlatteningPreservesTimelineVideoInstructions() async throws {
+        let fixtureURL = try await makeExportFixture(audioTrackCount: 2)
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Timeline Delivery Mix \(UUID().uuidString)")
+            .appendingPathExtension("mp4")
+        defer {
+            try? FileManager.default.removeItem(at: fixtureURL)
+            try? FileManager.default.removeItem(at: destination)
+        }
+
+        let asset = AVURLAsset(url: fixtureURL)
+        let duration = try await asset.load(.duration).seconds
+        let videoTrack = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        #expect(audioTracks.count == 2)
+        let project = TimelineProject(
+            name: "Timeline Delivery Mix",
+            lanes: [
+                TimelineLane(kind: .video, name: "Screen", clips: [TimelineClip(
+                    sourceURL: fixtureURL,
+                    sourceTrackID: videoTrack.trackID,
+                    sourceStart: 0,
+                    timelineStart: 0,
+                    duration: duration,
+                    name: "Screen"
+                )]),
+                TimelineLane(kind: .systemAudio, name: "System Audio", clips: [TimelineClip(
+                    sourceURL: fixtureURL,
+                    sourceTrackID: audioTracks[0].trackID,
+                    sourceStart: 0,
+                    timelineStart: 0,
+                    duration: duration,
+                    name: "System Audio"
+                )]),
+                TimelineLane(kind: .microphone, name: "Microphone", clips: [TimelineClip(
+                    sourceURL: fixtureURL,
+                    sourceTrackID: audioTracks[1].trackID,
+                    sourceStart: 0,
+                    timelineStart: 0,
+                    duration: duration,
+                    name: "Microphone"
+                )]),
+            ]
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        let result = try await ExportService().export(
+            source: ExportSource(
+                name: project.name,
+                asset: build.composition,
+                sourceURL: fixtureURL,
+                videoComposition: build.videoComposition,
+                audioMix: build.audioMix
+            ),
+            destinationURL: destination,
+            preset: .h264720
+        )
+
+        #expect(result.videoTrackCount == 1)
+        #expect(result.audioTrackCount == 1)
+        #expect(result.duration > 2.8)
     }
 
     @Test func exportAtomicallyReplacesAnExistingDestination() async throws {
@@ -1718,6 +2051,71 @@ struct ReccyTests {
         recoveryLease.release()
     }
 
+    @Test func captureFailureArtifactsDiscardStartupAndRecoverActiveSessions() {
+        #expect(CaptureFailureArtifactDisposition.resolve(
+            state: .starting,
+            hasOutputURL: true
+        ) == .discard)
+        #expect(CaptureFailureArtifactDisposition.resolve(
+            state: .recording,
+            hasOutputURL: true
+        ) == .recover)
+        #expect(CaptureFailureArtifactDisposition.resolve(
+            state: .paused,
+            hasOutputURL: true
+        ) == .recover)
+        #expect(CaptureFailureArtifactDisposition.resolve(
+            state: .stopping,
+            hasOutputURL: true
+        ) == .recover)
+        #expect(CaptureFailureArtifactDisposition.resolve(
+            state: .starting,
+            hasOutputURL: false
+        ) == .none)
+    }
+
+    @Test func incompleteStartupDiscardRemovesMediaAndMatchingJournal() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Startup Failure \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let mediaURL = directory.appendingPathComponent("Never Started.mp4")
+        try Data("partial".utf8).write(to: mediaURL)
+        _ = try RecordingRecoveryJournal.write(
+            mediaURL: mediaURL,
+            manifest: makeRecoveryManifest()
+        )
+
+        try RecordingRecoveryJournal.discardIncompleteRecording(mediaURL: mediaURL)
+
+        #expect(!FileManager.default.fileExists(atPath: mediaURL.path))
+        #expect(try RecordingRecoveryJournal.load(from: directory) == nil)
+    }
+
+    @Test func incompleteStartupDiscardPreservesMismatchedRecoveryArtifacts() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Startup Mismatch \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let journalMediaURL = directory.appendingPathComponent("Existing Recording.mp4")
+        let failedMediaURL = directory.appendingPathComponent("Failed Recording.mp4")
+        try Data("existing".utf8).write(to: journalMediaURL)
+        try Data("failed".utf8).write(to: failedMediaURL)
+        _ = try RecordingRecoveryJournal.write(
+            mediaURL: journalMediaURL,
+            manifest: makeRecoveryManifest()
+        )
+
+        #expect(throws: RecordingRecoveryError.self) {
+            try RecordingRecoveryJournal.discardIncompleteRecording(mediaURL: failedMediaURL)
+        }
+        #expect(FileManager.default.fileExists(atPath: journalMediaURL.path))
+        #expect(FileManager.default.fileExists(atPath: failedMediaURL.path))
+        #expect(try RecordingRecoveryJournal.load(from: directory) != nil)
+    }
+
     @Test func recordingLeaseRejectsAnIndependentWriterProcess() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Cross Process Lease \(UUID().uuidString)", isDirectory: true)
@@ -1834,9 +2232,12 @@ struct ReccyTests {
         let library = RecordingLibrary(directoryURL: fileURL)
 
         #expect(library.recordings.isEmpty)
-        #expect(library.recoveryNotice?.kind == .warning)
-        #expect(library.recoveryNotice?.title == "Recording Folder Is Unavailable")
-        #expect(library.recoveryNotice?.fileURL == fileURL)
+        #expect(library.recoveryNotice == nil)
+        guard case let .unavailable(message) = library.availability else {
+            Issue.record("Expected the recording library to remain unavailable")
+            return
+        }
+        #expect(!message.isEmpty)
     }
 
     @Test func interruptedInvalidMediaIsPreservedForInspection() async throws {
@@ -2483,6 +2884,96 @@ struct ReccyTests {
         #expect(!reloadedProject.needsInitialSave)
     }
 
+    @Test @MainActor func libraryDeliveryRendersSavedCameraLayoutAndCaptionsFromItsPreviewProject() async throws {
+        let mediaURL = try await makeCameraRecordingFixture()
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Library Camera Delivery \(UUID().uuidString)")
+            .appendingPathExtension("mp4")
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+            try? FileManager.default.removeItem(at: destination)
+        }
+        var manifest = makeRecoveryManifest()
+        manifest.width = 64
+        manifest.height = 64
+        manifest.includesSystemAudio = false
+        manifest.camera = RecordingCameraDescriptor(
+            uniqueID: "camera-test",
+            name: "Studio Camera",
+            width: 64,
+            height: 64
+        )
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 1,
+            duration: 1,
+            manifest: manifest,
+            pixelWidth: 64,
+            pixelHeight: 64,
+            frameRate: 30
+        )
+
+        var project = try await RecordingTimelineProjectLoader.initialProject(for: item)
+        let cameraLaneIndex = try #require(project.lanes.firstIndex(where: { $0.kind == .camera }))
+        let savedLayout = TimelineVideoLayout(x: 0.05, y: 0.05, width: 0.35, height: 0.35)
+        project.lanes[cameraLaneIndex].clips[0].videoLayout = savedLayout
+        project.captionTrack = TimelineCaptionTrack(cues: [TimelineCaptionCue(
+            text: "Library delivery",
+            timelineStart: 0.1,
+            duration: 0.7
+        )])
+        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(project).write(
+            to: packageURL.appendingPathComponent("project.json"),
+            options: .atomic
+        )
+
+        let source = try await RecordingTimelineProjectLoader.exportSource(for: item)
+        #expect(source.sourceURL == mediaURL)
+        // `applying` returns an animation tool only when the saved project has
+        // a visible, non-empty caption track. Pixel timing of Core Animation is
+        // covered independently by the dedicated caption burn-in export test.
+        #expect(source.videoComposition?.animationTool != nil)
+        let result = try await ExportService().export(
+            source: source,
+            destinationURL: destination,
+            preset: .h264720
+        )
+
+        #expect(result.videoTrackCount == 1)
+        #expect(result.audioTrackCount == 0)
+        let outputAsset = AVURLAsset(url: destination)
+        let cameraColor = try await renderedColor(
+            at: 0.5,
+            composition: outputAsset,
+            videoComposition: nil,
+            normalizedPoint: CGPoint(
+                x: savedLayout.x + savedLayout.width / 2,
+                y: 1 - (savedLayout.y + savedLayout.height / 2)
+            )
+        )
+        let screenColor = try await renderedColor(
+            at: 0.5,
+            composition: outputAsset,
+            videoComposition: nil,
+            normalizedPoint: CGPoint(x: 0.7, y: 0.5)
+        )
+        // Hardware H.264 encoders can reduce absolute saturation when several
+        // real-media tests encode concurrently. Compare chroma dominance so
+        // this still proves that the saved green camera layer is composited
+        // over the red screen without coupling the assertion to encoder load.
+        #expect(Int(cameraColor.green) > Int(cameraColor.red) + 30)
+        #expect(Int(cameraColor.green) > Int(cameraColor.blue) + 30)
+        #expect(Int(screenColor.red) > Int(screenColor.green) + 30)
+        #expect(Int(screenColor.red) > Int(screenColor.blue) + 30)
+
+    }
+
     @Test func compositionBuilderRendersEveryGapModeFromOneCanonicalSourceAsset() async throws {
         let sourceURL = try await makeColorTestVideo()
         defer { try? FileManager.default.removeItem(at: sourceURL) }
@@ -2672,10 +3163,17 @@ struct ReccyTests {
         return url
     }
 
-    private func makeExportFixture() async throws -> URL {
+    private func makeExportFixture(audioTrackCount: Int = 1) async throws -> URL {
         let videoURL = try await makeColorTestVideo()
-        let audioURL = try makeWaveformTestAudio(duration: 3) { frame, sampleRate in
-            Float(sin(2 * Double.pi * 440 * Double(frame) / sampleRate) * 0.35)
+        let audioURLs = try (0..<audioTrackCount).map { trackIndex in
+            try makeWaveformTestAudio(duration: 3) { frame, sampleRate in
+                let seconds = Double(frame) / sampleRate
+                let isAudible = audioTrackCount == 1
+                    || (trackIndex == 0 ? seconds < 1.4 : seconds >= 1.6)
+                guard isAudible else { return 0 }
+                let frequency = trackIndex == 0 ? 440.0 : 660.0
+                return Float(sin(2 * Double.pi * frequency * Double(frame) / sampleRate) * 0.35)
+            }
         }
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Export Fixture \(UUID().uuidString)")
@@ -2691,14 +3189,16 @@ struct ReccyTests {
             ))
             try targetVideo.insertTimeRange(videoRange, of: videoTrack, at: .zero)
 
-            let audioAsset = AVURLAsset(url: audioURL)
-            let audioTrack = try #require(try await audioAsset.loadTracks(withMediaType: .audio).first)
-            let audioRange = try await audioTrack.load(.timeRange)
-            let targetAudio = try #require(composition.addMutableTrack(
-                withMediaType: .audio,
-                preferredTrackID: kCMPersistentTrackID_Invalid
-            ))
-            try targetAudio.insertTimeRange(audioRange, of: audioTrack, at: .zero)
+            for audioURL in audioURLs {
+                let audioAsset = AVURLAsset(url: audioURL)
+                let audioTrack = try #require(try await audioAsset.loadTracks(withMediaType: .audio).first)
+                let audioRange = try await audioTrack.load(.timeRange)
+                let targetAudio = try #require(composition.addMutableTrack(
+                    withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ))
+                try targetAudio.insertTimeRange(audioRange, of: audioTrack, at: .zero)
+            }
 
             let exporter = try #require(AVAssetExportSession(
                 asset: composition,
@@ -2706,11 +3206,15 @@ struct ReccyTests {
             ))
             try await exporter.export(to: destination, as: .mov)
             try? FileManager.default.removeItem(at: videoURL)
-            try? FileManager.default.removeItem(at: audioURL)
+            for audioURL in audioURLs {
+                try? FileManager.default.removeItem(at: audioURL)
+            }
             return destination
         } catch {
             try? FileManager.default.removeItem(at: videoURL)
-            try? FileManager.default.removeItem(at: audioURL)
+            for audioURL in audioURLs {
+                try? FileManager.default.removeItem(at: audioURL)
+            }
             try? FileManager.default.removeItem(at: destination)
             throw error
         }
