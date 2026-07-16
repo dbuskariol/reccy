@@ -23,6 +23,7 @@ struct LibraryView: View {
     @State private var previewRenderSize = CGSize.zero
     @State private var searchText = ""
     @State private var playbackSyncTask: Task<Void, Never>?
+    @State private var recordingBrowserCommandActivation = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -236,7 +237,10 @@ struct LibraryView: View {
                     ZStack(alignment: .top) {
                         Color.clear
                             .contentShape(Rectangle())
-                            .onTapGesture { selection.clear() }
+                            .onTapGesture {
+                                selection.clear()
+                                activateRecordingBrowserCommands()
+                            }
                             .accessibilityHidden(true)
 
                         LazyVStack(spacing: 5) {
@@ -255,14 +259,21 @@ struct LibraryView: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
-        .onCommand(#selector(NSResponder.selectAll(_:))) {
-            selection.selectAll(filteredRecordings.map(\.id))
+        .background {
+            LibrarySelectionCommandResponder(
+                onSelectAll: selectAllVisibleRecordings,
+                onOutsidePlainClick: { selection.clear(keepingPrimary: true) }
+            )
+            .id(recordingBrowserCommandActivation)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityHidden(true)
         }
     }
 
     private func recordingBrowserRow(_ item: RecordingItem) -> some View {
         let isSelected = selection.selectedIDs.contains(item.id)
         return Button {
+            activateRecordingBrowserCommands()
             select(item, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
         } label: {
             recordingRow(item)
@@ -295,6 +306,14 @@ struct LibraryView: View {
                 requestDeletion(of: deletionItems(for: item))
             }
         }
+    }
+
+    private func selectAllVisibleRecordings() {
+        selection.selectAll(filteredRecordings.map(\.id))
+    }
+
+    private func activateRecordingBrowserCommands() {
+        recordingBrowserCommandActivation &+= 1
     }
 
     private func recordingRow(_ item: RecordingItem) -> some View {
@@ -1214,6 +1233,78 @@ private struct PendingRecordingDeletion {
         items.count == 1
             ? "Recording Couldn’t Be Moved to Trash"
             : "Recordings Couldn’t Be Moved to Trash"
+    }
+}
+
+/// Installs the Library browser as the native responder for Edit > Select All
+/// after a recording row or the browser background is clicked. Text fields keep
+/// their normal first-responder behavior, so Command-A still selects search text
+/// while search is active and selects recordings when the browser is active.
+private struct LibrarySelectionCommandResponder: NSViewRepresentable {
+    let onSelectAll: @MainActor () -> Void
+    let onOutsidePlainClick: @MainActor () -> Void
+
+    func makeNSView(context: Context) -> LibrarySelectionResponderView {
+        let view = LibrarySelectionResponderView()
+        view.onSelectAll = onSelectAll
+        view.onOutsidePlainClick = onOutsidePlainClick
+        return view
+    }
+
+    func updateNSView(_ nsView: LibrarySelectionResponderView, context: Context) {
+        nsView.onSelectAll = onSelectAll
+        nsView.onOutsidePlainClick = onOutsidePlainClick
+    }
+
+    static func dismantleNSView(_ nsView: LibrarySelectionResponderView, coordinator: ()) {
+        nsView.uninstallEventMonitor()
+    }
+}
+
+private final class LibrarySelectionResponderView: NSView {
+    var onSelectAll: (@MainActor () -> Void)?
+    var onOutsidePlainClick: (@MainActor () -> Void)?
+    private var mouseMonitor: Any?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        uninstallEventMonitor()
+        guard let window else { return }
+
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
+            [weak self, weak window] event in
+            guard let self, let window, event.window === window else { return event }
+            let selectionModifiers = event.modifierFlags.intersection([.command, .shift])
+            guard selectionModifiers.isEmpty else { return event }
+
+            let location = convert(event.locationInWindow, from: nil)
+            if !bounds.contains(location) {
+                onOutsidePlainClick?()
+            }
+            return event
+        }
+
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            window.makeFirstResponder(self)
+        }
+    }
+
+    func uninstallEventMonitor() {
+        guard let mouseMonitor else { return }
+        NSEvent.removeMonitor(mouseMonitor)
+        self.mouseMonitor = nil
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func selectAll(_ sender: Any?) {
+        onSelectAll?()
     }
 }
 
