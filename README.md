@@ -1,6 +1,6 @@
 # Reccy
 
-Reccy is a native screen recorder and non-destructive multitrack editor for macOS 26. It combines ScreenCaptureKit capture, an optional native camera track, separate system and microphone audio, live monitoring, a first-class timeline, compact exports, and fast menu-bar controls in one focused Mac app.
+Reccy is a native screen recorder and non-destructive multitrack editor for macOS 26. It combines ScreenCaptureKit capture, an optional native camera track, separate system and microphone audio, live mouse-follow zoom, a first-class timeline, compact exports, and fast menu-bar controls in one focused Mac app.
 
 ![Reccy capture workspace](Documentation/Screenshots/capture-workspace.jpg)
 
@@ -23,7 +23,7 @@ Choose an entire display, every window from one application, or one specific win
 
 ![Reccy live recording monitor](Documentation/Screenshots/live-monitor.jpg)
 
-Monitor shows the exact incoming screen and camera pictures feeding the writer, elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Pause, resume, or stop from this window while it remains open on another display.
+Monitor shows the exact incoming screen and camera pictures feeding the writer, elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Toggle mouse-follow zoom, pause, resume, or stop from this window while it remains open on another display.
 
 ## Transcribe privately on device
 
@@ -81,7 +81,7 @@ Reccy checks each preset against the actual recording or timeline, estimates wor
     <td width="52%"><img src="Documentation/Screenshots/settings-permissions.jpg" alt="Reccy permission settings"></td>
   </tr>
   <tr>
-    <td><strong>Menu bar</strong><br>Start a source-aware capture, monitor timer, safe-write status, and separate audio levels, pause or stop, open Monitor, and return to recent recordings.</td>
+    <td><strong>Menu bar</strong><br>Start a source-aware capture, monitor timer, safe-write status, and separate audio levels, toggle mouse-follow zoom, pause or stop, open Monitor, and return to recent recordings.</td>
     <td><strong>Settings</strong><br>Manage capture defaults, storage, permissions, global shortcuts, tooltips, launch at login, completion behavior, and signed automatic updates.</td>
   </tr>
 </table>
