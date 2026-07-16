@@ -30,6 +30,7 @@ struct RecordView: View {
                         }
                         sourceCard
                         cameraCard
+                        mouseFollowZoomCard
                         optionsCard
                         transcriptionCard
                         outputCard
@@ -294,6 +295,54 @@ struct RecordView: View {
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
                     }
+                }
+            }
+        }
+    }
+
+    private var mouseFollowZoomCard: some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 17) {
+                HStack(alignment: .top, spacing: 16) {
+                    Image(systemName: "cursorarrow.motionlines")
+                        .font(.title2)
+                        .foregroundStyle(.purple)
+                        .frame(width: 32, height: 32)
+                        .accessibilityHidden(true)
+                    SectionHeading(
+                        "Mouse-follow zoom",
+                        subtitle: "Magnify around the pointer live and save every enabled interval as an editable timeline effect."
+                    )
+                    Spacer(minLength: 20)
+                    Toggle(
+                        "Start enabled",
+                        isOn: $coordinator.settings.startsWithMouseFollowZoom
+                    )
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .fixedSize()
+                }
+
+                Divider()
+
+                HStack(alignment: .center, spacing: 24) {
+                    settingPicker(
+                        "Zoom level",
+                        selection: $coordinator.settings.mouseFollowZoomLevel
+                    ) {
+                        ForEach(MouseFollowZoomLevel.allCases) { level in
+                            Text(level.title).tag(level)
+                        }
+                    }
+                    .frame(maxWidth: 380)
+
+                    Label(
+                        "Toggle in Monitor or with the global shortcut",
+                        systemImage: "timeline.selection"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
                 }
             }
         }

@@ -436,6 +436,26 @@ struct MenuBarRecorderView: View {
                 )
 
                 Button {
+                    coordinator.toggleMouseFollowZoom()
+                } label: {
+                    Image(
+                        systemName: coordinator.isMouseFollowZoomActive
+                            ? "cursorarrow.motionlines"
+                            : "plus.magnifyingglass"
+                    )
+                    .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.bordered)
+                .tint(coordinator.isMouseFollowZoomActive ? .purple : .accentColor)
+                .disabled(coordinator.state != .recording && coordinator.state != .paused)
+                .reccyAccessibleControl(
+                    coordinator.isMouseFollowZoomActive
+                        ? "Stop Mouse-follow Zoom"
+                        : "Start Mouse-follow Zoom",
+                    help: "Create an editable mouse-follow zoom effect"
+                )
+
+                Button {
                     coordinator.stopRecording()
                 } label: {
                     Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")

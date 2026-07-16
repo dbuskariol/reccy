@@ -5,6 +5,7 @@ import SwiftUI
 
 struct EditorView: View {
     @Environment(\.undoManager) private var undoManager
+    @EnvironmentObject private var coordinator: CaptureCoordinator
     @EnvironmentObject private var editor: TimelineEditorController
     @EnvironmentObject private var transcription: TranscriptionController
     @EnvironmentObject private var navigation: AppNavigationModel
@@ -321,6 +322,10 @@ struct EditorView: View {
                 Divider()
             }
 
+            mouseFollowZoomLaneHeader(project.mouseFollowZoomTrack)
+                .frame(height: laneHeight)
+            Divider()
+
             captionLaneHeader(project.captionTrack)
                 .frame(height: laneHeight)
             Divider()
@@ -406,11 +411,44 @@ struct EditorView: View {
         .padding(.horizontal, 12)
     }
 
+    private func mouseFollowZoomLaneHeader(_ track: MouseFollowZoomTrack?) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Image(systemName: "cursorarrow.motionlines")
+                    .foregroundStyle(.purple)
+                    .accessibilityHidden(true)
+                Text("Mouse Zoom")
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    editor.addMouseFollowZoom(
+                        at: editor.playhead,
+                        zoomScale: coordinator.settings.mouseFollowZoomLevel.rawValue
+                    )
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.borderless)
+                .reccyAccessibleControl("Add Mouse Zoom at Playhead")
+
+                Text(track?.segments.isEmpty == false ? "Editable effects" : "No effects")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 12)
+    }
+
     private func timelineCanvas(_ project: TimelineProject) -> some View {
         let paddingDuration = max(4, 480 / max(editor.pixelsPerSecond, 1))
         let canvasDuration = max(project.duration + paddingDuration, 12)
         let trackWidth = canvasDuration * editor.pixelsPerSecond
-        let canvasHeight = rulerHeight + CGFloat(project.lanes.count + 1) * (laneHeight + 1)
+        let canvasHeight = rulerHeight + CGFloat(project.lanes.count + 2) * (laneHeight + 1)
 
         return ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
@@ -426,6 +464,13 @@ struct EditorView: View {
                         .frame(height: laneHeight)
                     Divider()
                 }
+
+                mouseFollowZoomLaneRow(
+                    project.mouseFollowZoomTrack,
+                    trackWidth: trackWidth
+                )
+                .frame(height: laneHeight)
+                Divider()
 
                 captionLaneRow(
                     project.captionTrack,
@@ -445,6 +490,61 @@ struct EditorView: View {
         }
         .frame(width: trackWidth, height: canvasHeight, alignment: .topLeading)
         .coordinateSpace(name: "timelineCanvas")
+    }
+
+    private func mouseFollowZoomLaneRow(
+        _ track: MouseFollowZoomTrack?,
+        trackWidth: Double
+    ) -> some View {
+        ZStack(alignment: .leading) {
+            Rectangle()
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
+                        .onChanged { value in
+                            editor.seek(to: value.location.x / editor.pixelsPerSecond)
+                        }
+                )
+
+            if track?.segments.isEmpty != false {
+                Text("Toggle during recording or add an effect at the playhead")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 12)
+                    .allowsHitTesting(false)
+            }
+
+            ForEach(track?.segments ?? []) { segment in
+                TimelineMouseFollowZoomSegmentView(
+                    segment: segment,
+                    pixelsPerSecond: editor.pixelsPerSecond,
+                    frameRate: editor.project?.frameRate ?? 30,
+                    isSelected: editor.selectedMouseFollowZoomSegmentID == segment.id,
+                    onSelect: { time in editor.select(segment, at: time) },
+                    onTrim: { edge, time in
+                        editor.trimMouseFollowZoomSegment(id: segment.id, edge: edge, to: time)
+                    },
+                    onNudgeTrim: { edge, frames in
+                        editor.nudgeMouseFollowZoomBoundary(
+                            id: segment.id,
+                            edge: edge,
+                            byFrames: frames
+                        )
+                    },
+                    onDelete: {
+                        editor.select(segment)
+                        editor.deleteSelection()
+                    }
+                )
+                .frame(
+                    width: max(segment.duration * editor.pixelsPerSecond, 18),
+                    height: laneHeight - 12
+                )
+                .offset(x: segment.timelineStart * editor.pixelsPerSecond)
+            }
+        }
+        .frame(width: trackWidth, alignment: .leading)
     }
 
     private func captionLaneRow(
@@ -632,14 +732,17 @@ struct EditorView: View {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
 
                     timelineToolbarButton(
-                        "Delete Clip",
+                        "Delete Selection",
                         systemImage: "trash",
-                        help: "Delete the selected clip",
+                        help: "Delete the selected clip or effect",
                         tint: .red
                     ) {
                         editor.deleteSelection()
                     }
-                    .disabled(editor.selectedClipID == nil)
+                    .disabled(
+                        editor.selectedClipID == nil
+                            && editor.selectedMouseFollowZoomSegmentID == nil
+                    )
                     .keyboardShortcut(.delete, modifiers: [])
 
                     timelineToolbarButton(
@@ -660,6 +763,33 @@ struct EditorView: View {
                         ) {
                             editor.resetVideoLayout(clipID: selectedClipID)
                         }
+                    }
+
+                    if let segment = editor.selectedMouseFollowZoomSegment {
+                        Menu {
+                            ForEach(MouseFollowZoomLevel.allCases) { level in
+                                Button {
+                                    editor.setMouseFollowZoomScale(
+                                        level.rawValue,
+                                        segmentID: segment.id
+                                    )
+                                } label: {
+                                    if abs(segment.zoomScale - level.rawValue) < 0.001 {
+                                        Label(level.title, systemImage: "checkmark")
+                                    } else {
+                                        Text(level.title)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label(
+                                "Zoom \(segment.zoomScale.formatted(.number.precision(.fractionLength(segment.zoomScale == floor(segment.zoomScale) ? 0 : 1))))×",
+                                systemImage: "plus.magnifyingglass"
+                            )
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .accessibilityLabel("Mouse zoom level")
                     }
 
                     Divider().frame(height: 20)
@@ -1445,6 +1575,128 @@ private struct TimelineGapView: View {
     private var accessibilityDuration: String {
         gap.duration.formatted(
             .number.precision(.fractionLength(gap.duration < 1 ? 2 : 1))
+        )
+    }
+}
+
+private struct TimelineMouseFollowZoomSegmentView: View {
+    let segment: MouseFollowZoomSegment
+    let pixelsPerSecond: Double
+    let frameRate: Double
+    let isSelected: Bool
+    let onSelect: (TimeInterval) -> Void
+    let onTrim: (TimelineTrimEdge, TimeInterval) -> Void
+    let onNudgeTrim: (TimelineTrimEdge, Int) -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "cursorarrow.motionlines")
+            Text("\(zoomTitle) Mouse Follow")
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 9)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.purple.gradient)
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(
+                    isSelected ? Color.white : Color.white.opacity(0.16),
+                    lineWidth: isSelected ? 2 : 1
+                )
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .shadow(color: isSelected ? Color.purple.opacity(0.5) : .clear, radius: 5)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            SpatialTapGesture().onEnded { value in
+                let localTime = min(max(value.location.x / pixelsPerSecond, 0), segment.duration)
+                onSelect(segment.timelineStart + localTime)
+            }
+        )
+        .overlay {
+            HStack(spacing: 0) {
+                trimHandle(.leading)
+                Spacer(minLength: 0)
+                trimHandle(.trailing)
+            }
+        }
+        .reccyTooltip("Click to seek • Drag either edge to resize the zoom effect")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Mouse-follow zoom effect")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityHint("Activate to select. Additional actions resize or delete this effect.")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { onSelect(segment.timelineStart) }
+        .accessibilityAction(named: "Move Start Earlier by One Frame") {
+            onNudgeTrim(.leading, -1)
+        }
+        .accessibilityAction(named: "Move Start Later by One Frame") {
+            onNudgeTrim(.leading, 1)
+        }
+        .accessibilityAction(named: "Move End Earlier by One Frame") {
+            onNudgeTrim(.trailing, -1)
+        }
+        .accessibilityAction(named: "Move End Later by One Frame") {
+            onNudgeTrim(.trailing, 1)
+        }
+        .accessibilityAction(named: "Delete Mouse Zoom", onDelete)
+    }
+
+    private func trimHandle(_ edge: TimelineTrimEdge) -> some View {
+        Rectangle()
+            .fill(.clear)
+            .frame(width: 12)
+            .contentShape(Rectangle())
+            .overlay(alignment: edge == .leading ? .leading : .trailing) {
+                Capsule()
+                    .fill(isSelected ? Color.white.opacity(0.95) : Color.white.opacity(0.4))
+                    .frame(width: isSelected ? 3 : 2, height: 28)
+                    .padding(edge == .leading ? .leading : .trailing, 3)
+            }
+            .onHover { hovering in
+                if hovering { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
+            }
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
+                    .onEnded { value in
+                        let original = edge == .leading
+                            ? segment.timelineStart
+                            : segment.timelineEnd
+                        onTrim(edge, original + value.translation.width / pixelsPerSecond)
+                    }
+            )
+    }
+
+    private var zoomTitle: String {
+        segment.zoomScale.formatted(
+            .number.precision(.fractionLength(segment.zoomScale == floor(segment.zoomScale) ? 0 : 1))
+        ) + "×"
+    }
+
+    private var accessibilityValue: String {
+        let selection = isSelected ? "Selected" : "Not selected"
+        let duration = segment.duration.formatted(.number.precision(.fractionLength(1)))
+        return "\(selection), \(zoomTitle), starts at \(timecode), \(duration) seconds"
+    }
+
+    private var timecode: String {
+        let safeTime = max(0, segment.timelineStart)
+        let seconds = Int(safeTime.rounded(.down))
+        let safeFrameRate = max(frameRate, 1)
+        let frames = min(
+            Int((safeTime - floor(safeTime)) * safeFrameRate),
+            Int(safeFrameRate) - 1
+        )
+        return String(
+            format: "%02d:%02d:%02d:%02d",
+            seconds / 3_600,
+            (seconds % 3_600) / 60,
+            seconds % 60,
+            frames
         )
     }
 }

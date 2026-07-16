@@ -35,6 +35,7 @@ final class TimelineEditorController: ObservableObject {
     @Published var selectedClipID: UUID?
     @Published var selectedGapID: UUID?
     @Published var selectedCaptionID: UUID?
+    @Published var selectedMouseFollowZoomSegmentID: UUID?
     @Published var playhead: TimeInterval = 0
     @Published var pixelsPerSecond: Double = 72
     @Published var errorMessage: String?
@@ -89,6 +90,10 @@ final class TimelineEditorController: ObservableObject {
     var selectedGap: TimelineGapSegment? {
         guard let selectedGapID else { return nil }
         return project?.videoGap(id: selectedGapID)
+    }
+    var selectedMouseFollowZoomSegment: MouseFollowZoomSegment? {
+        guard let selectedMouseFollowZoomSegmentID else { return nil }
+        return project?.mouseFollowZoomSegment(id: selectedMouseFollowZoomSegmentID)
     }
     var canSplitSelection: Bool { selectedClip?.contains(playhead) == true }
     var canSplitAll: Bool {
@@ -186,6 +191,7 @@ final class TimelineEditorController: ObservableObject {
             selectedClipID: selectedClipID,
             selectedGapID: selectedGapID,
             selectedCaptionID: selectedCaptionID,
+            selectedMouseFollowZoomSegmentID: selectedMouseFollowZoomSegmentID,
             playhead: playhead
         )
 
@@ -196,6 +202,7 @@ final class TimelineEditorController: ObservableObject {
         selectedClipID = loaded.project.lanes.flatMap(\.clips).first?.id
         selectedGapID = nil
         selectedCaptionID = nil
+        selectedMouseFollowZoomSegmentID = nil
 
         do {
             try await rebuildComposition()
@@ -210,6 +217,7 @@ final class TimelineEditorController: ObservableObject {
             selectedClipID = previous.selectedClipID
             selectedGapID = previous.selectedGapID
             selectedCaptionID = previous.selectedCaptionID
+            selectedMouseFollowZoomSegmentID = previous.selectedMouseFollowZoomSegmentID
             playhead = previous.playhead
 
             if previous.project != nil {
@@ -249,7 +257,16 @@ final class TimelineEditorController: ObservableObject {
 
     func deleteSelection() {
         let undoSnapshot = currentSnapshot()
-        guard var project, let selectedClipID else { return }
+        guard var project else { return }
+        if let selectedMouseFollowZoomSegmentID {
+            project.deleteMouseFollowZoomSegment(id: selectedMouseFollowZoomSegmentID)
+            self.project = project
+            self.selectedMouseFollowZoomSegmentID = nil
+            registerUndo(undoSnapshot, actionName: "Delete Mouse Zoom")
+            rebuildAndSave()
+            return
+        }
+        guard let selectedClipID else { return }
         project.deleteClip(id: selectedClipID)
         self.project = project
         self.selectedClipID = nil
@@ -277,6 +294,7 @@ final class TimelineEditorController: ObservableObject {
         selectedClipID = clip.id
         selectedGapID = nil
         selectedCaptionID = nil
+        selectedMouseFollowZoomSegmentID = nil
         seek(to: time ?? clip.timelineStart)
     }
 
@@ -284,7 +302,83 @@ final class TimelineEditorController: ObservableObject {
         selectedClipID = nil
         selectedGapID = gap.id
         selectedCaptionID = nil
+        selectedMouseFollowZoomSegmentID = nil
         seek(to: time ?? gap.timelineStart)
+    }
+
+    func select(_ segment: MouseFollowZoomSegment, at time: TimeInterval? = nil) {
+        selectedClipID = nil
+        selectedGapID = nil
+        selectedCaptionID = nil
+        selectedMouseFollowZoomSegmentID = segment.id
+        seek(to: time ?? segment.timelineStart)
+    }
+
+    @discardableResult
+    func addMouseFollowZoom(at time: TimeInterval, zoomScale: Double = 2) -> UUID? {
+        let undoSnapshot = currentSnapshot()
+        guard var project,
+              let id = project.addMouseFollowZoomSegment(at: time, zoomScale: zoomScale)
+        else {
+            errorMessage = "There isn’t enough empty effect-track space at the playhead. Move the playhead or resize the neighbouring mouse zoom."
+            return nil
+        }
+        self.project = project
+        selectedClipID = nil
+        selectedGapID = nil
+        selectedCaptionID = nil
+        selectedMouseFollowZoomSegmentID = id
+        registerUndo(undoSnapshot, actionName: "Add Mouse Zoom")
+        rebuildAndSave()
+        return id
+    }
+
+    func setMouseFollowZoomScale(_ scale: Double, segmentID: UUID) {
+        let undoSnapshot = currentSnapshot()
+        guard var project,
+              project.mouseFollowZoomSegment(id: segmentID)?.zoomScale != scale
+        else { return }
+        project.setMouseFollowZoomScale(scale, segmentID: segmentID)
+        self.project = project
+        selectedMouseFollowZoomSegmentID = segmentID
+        registerUndo(undoSnapshot, actionName: "Change Mouse Zoom")
+        rebuildAndSave()
+    }
+
+    func trimMouseFollowZoomSegment(
+        id: UUID,
+        edge: TimelineTrimEdge,
+        to timelineTime: TimeInterval
+    ) {
+        let undoSnapshot = currentSnapshot()
+        guard var project,
+              let boundary = project.trimMouseFollowZoomSegment(
+                  id: id,
+                  edge: edge,
+                  to: timelineTime
+              )
+        else { return }
+        self.project = project
+        selectedMouseFollowZoomSegmentID = id
+        playhead = boundary
+        registerUndo(undoSnapshot, actionName: "Resize Mouse Zoom")
+        rebuildAndSave()
+    }
+
+    func nudgeMouseFollowZoomBoundary(
+        id: UUID,
+        edge: TimelineTrimEdge,
+        byFrames frames: Int
+    ) {
+        guard frames != 0,
+              let segment = project?.mouseFollowZoomSegment(id: id)
+        else { return }
+        let boundary = edge == .leading ? segment.timelineStart : segment.timelineEnd
+        trimMouseFollowZoomSegment(
+            id: id,
+            edge: edge,
+            to: boundary + Double(frames) * frameDuration
+        )
     }
 
     func beginClipMove(id: UUID, anchorTime: TimeInterval) {
@@ -363,6 +457,7 @@ final class TimelineEditorController: ObservableObject {
         self.project = project
         selectedClipID = id
         selectedGapID = nil
+        selectedMouseFollowZoomSegmentID = nil
         playhead = finalStart
         registerUndo(undoSnapshot, actionName: "Move Clip")
         rebuildAndSave()
@@ -385,6 +480,7 @@ final class TimelineEditorController: ObservableObject {
         self.project = project
         selectedClipID = id
         selectedGapID = nil
+        selectedMouseFollowZoomSegmentID = nil
         playhead = finalBoundary
         registerUndo(undoSnapshot, actionName: "Trim Clip")
         rebuildAndSave()
@@ -434,6 +530,7 @@ final class TimelineEditorController: ObservableObject {
         self.project = project
         selectedClipID = clipID
         selectedGapID = nil
+        selectedMouseFollowZoomSegmentID = nil
         registerUndo(undoSnapshot, actionName: "Move Camera Overlay")
         rebuildAndSave()
     }
@@ -531,6 +628,7 @@ final class TimelineEditorController: ObservableObject {
         selectedCaptionID = cue.id
         selectedClipID = nil
         selectedGapID = nil
+        selectedMouseFollowZoomSegmentID = nil
         seek(to: cue.timelineStart)
     }
 
@@ -550,6 +648,7 @@ final class TimelineEditorController: ObservableObject {
         selectedCaptionID = cueID
         selectedClipID = nil
         selectedGapID = nil
+        selectedMouseFollowZoomSegmentID = nil
         seek(to: start)
     }
 
@@ -683,6 +782,7 @@ final class TimelineEditorController: ObservableObject {
             selectedClipID: selectedClipID,
             selectedGapID: selectedGapID,
             selectedCaptionID: selectedCaptionID,
+            selectedMouseFollowZoomSegmentID: selectedMouseFollowZoomSegmentID,
             playhead: playhead
         )
     }
@@ -704,6 +804,7 @@ final class TimelineEditorController: ObservableObject {
         selectedClipID = snapshot.selectedClipID
         selectedGapID = snapshot.selectedGapID
         selectedCaptionID = snapshot.selectedCaptionID
+        selectedMouseFollowZoomSegmentID = snapshot.selectedMouseFollowZoomSegmentID
         playhead = min(max(snapshot.playhead, 0), duration)
         registerUndo(inverse, actionName: actionName)
         rebuildAndSave()
@@ -860,6 +961,7 @@ final class TimelineEditorController: ObservableObject {
         interactionPreviewVideoID = previewVideoClipID(for: clip, in: project)
         selectedClipID = id
         selectedGapID = nil
+        selectedMouseFollowZoomSegmentID = nil
 
         if let previewID = interactionPreviewVideoID,
            let videoClip = project.clip(id: previewID)
@@ -955,6 +1057,7 @@ private struct EditorProjectSnapshot {
     let selectedClipID: UUID?
     let selectedGapID: UUID?
     let selectedCaptionID: UUID?
+    let selectedMouseFollowZoomSegmentID: UUID?
     let playhead: TimeInterval
 }
 

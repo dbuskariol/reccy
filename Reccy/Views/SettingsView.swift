@@ -322,6 +322,28 @@ struct SettingsView: View {
                     isDisabled: coordinator.settings.useHDR
                 )
                 SettingsDivider()
+                SettingsToggleRow(
+                    title: "Start with mouse-follow zoom",
+                    detail: "Begin each recording magnified around the pointer; toggles become editable effect segments.",
+                    systemImage: "cursorarrow.motionlines",
+                    isOn: $coordinator.settings.startsWithMouseFollowZoom
+                )
+                SettingsDivider()
+                SettingsValueRow(
+                    title: "Mouse-follow zoom level",
+                    detail: "The default magnification for new live and editor-created zoom segments.",
+                    systemImage: "plus.magnifyingglass"
+                ) {
+                    Picker("Zoom level", selection: $coordinator.settings.mouseFollowZoomLevel) {
+                        ForEach(MouseFollowZoomLevel.allCases) { level in
+                            Text(level.title).tag(level)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 96)
+                }
+                SettingsDivider()
                 SettingsValueRow(
                     title: "Screenshot defaults",
                     detail: "HEIC provides excellent quality at compact sizes.",
@@ -835,6 +857,7 @@ struct SettingsView: View {
         switch shortcut {
         case .toggleRecording: "Starts with the current source, or stops the active recording."
         case .toggleRecordingPause: "Pauses or resumes writing while keeping the live monitor available."
+        case .toggleMouseFollowZoom: "Starts or ends an editable mouse-follow zoom segment during recording."
         case .chooseDisplay: "Open the native picker for an entire display."
         case .choosePortion: "Choose a display, then drag out the exact capture area."
         case .chooseApplication: "Open the native picker for all windows from one app."
@@ -847,6 +870,7 @@ struct SettingsView: View {
         switch shortcut {
         case .toggleRecording: "record.circle"
         case .toggleRecordingPause: "pause.circle"
+        case .toggleMouseFollowZoom: "cursorarrow.motionlines"
         case .chooseDisplay: "display"
         case .choosePortion: "viewfinder.rectangular"
         case .chooseApplication: "macwindow.on.rectangle"

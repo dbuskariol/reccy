@@ -163,7 +163,8 @@ enum RecordingTimelineProjectLoader {
             project: TimelineProject(
                 name: item.name,
                 frameRate: Double(item.manifest.frameRate),
-                lanes: lanes
+                lanes: lanes,
+                mouseFollowZoomTrack: item.manifest.mouseFollowZoomTrack
             ),
             sourceDurations: [item.url: duration],
             needsInitialSave: true

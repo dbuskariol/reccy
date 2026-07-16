@@ -282,6 +282,8 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     var selectedCameraID: String?
     var showCursor = true
     var showMouseClicks = true
+    var startsWithMouseFollowZoom = false
+    var mouseFollowZoomLevel: MouseFollowZoomLevel = .standard
     var excludeOwnAudio = true
     var useHDR = false
     var screenshotFormat: ScreenshotFormat = .heic
@@ -304,6 +306,8 @@ struct CaptureSettings: Codable, Equatable, Sendable {
         case selectedCameraID
         case showCursor
         case showMouseClicks
+        case startsWithMouseFollowZoom
+        case mouseFollowZoomLevel
         case excludeOwnAudio
         case useHDR
         case screenshotFormat
@@ -324,6 +328,14 @@ struct CaptureSettings: Codable, Equatable, Sendable {
         selectedCameraID = try container.decodeIfPresent(String.self, forKey: .selectedCameraID)
         showCursor = try container.decodeIfPresent(Bool.self, forKey: .showCursor) ?? true
         showMouseClicks = try container.decodeIfPresent(Bool.self, forKey: .showMouseClicks) ?? true
+        startsWithMouseFollowZoom = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .startsWithMouseFollowZoom
+        ) ?? false
+        mouseFollowZoomLevel = try container.decodeIfPresent(
+            MouseFollowZoomLevel.self,
+            forKey: .mouseFollowZoomLevel
+        ) ?? .standard
         excludeOwnAudio = try container.decodeIfPresent(Bool.self, forKey: .excludeOwnAudio) ?? true
         useHDR = try container.decodeIfPresent(Bool.self, forKey: .useHDR) ?? false
         screenshotFormat = try container.decodeIfPresent(ScreenshotFormat.self, forKey: .screenshotFormat) ?? .heic

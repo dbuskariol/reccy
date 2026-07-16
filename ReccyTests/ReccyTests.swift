@@ -3073,6 +3073,392 @@ struct ReccyTests {
         )
     }
 
+    @Test func mouseFollowZoomCaptureCreatesBoundedEditableSegments() throws {
+        var session = MouseFollowZoomCaptureSession()
+
+        session.begin(
+            at: 1,
+            zoomScale: 8,
+            position: CGPoint(x: -0.2, y: 1.4)
+        )
+        #expect(session.currentScale == 4)
+        session.sample(at: 1.25, position: CGPoint(x: 1, y: 0))
+        session.end(at: 2)
+        let finishedTrack = session.finish(at: 2)
+        let track = try #require(finishedTrack)
+        let segment = try #require(track.segments.first)
+
+        #expect(!session.isActive)
+        #expect(session.currentScale == nil)
+        #expect(track.segments.count == 1)
+        #expect(segment.timelineStart == 1)
+        #expect(segment.duration == 1)
+        #expect(segment.zoomScale == 4)
+        #expect(segment.points.first?.position == CGPoint(x: 0, y: 1))
+        #expect(segment.points.last?.timelineTime == 2)
+        #expect(segment.points.allSatisfy {
+            (0...1).contains($0.x) && (0...1).contains($0.y)
+        })
+    }
+
+    @Test func mouseFollowZoomFocusInterpolatesAnOrderedDecodedPath() throws {
+        let encoded = try JSONEncoder().encode(MouseFollowZoomSegment(
+            timelineStart: 1,
+            duration: 2,
+            zoomScale: 2,
+            points: [
+                MouseFollowZoomPoint(timelineTime: 3, position: CGPoint(x: 1, y: 0)),
+                MouseFollowZoomPoint(timelineTime: 1, position: CGPoint(x: 0, y: 1)),
+            ]
+        ))
+        let segment = try JSONDecoder().decode(MouseFollowZoomSegment.self, from: encoded)
+
+        #expect(segment.points.map(\.timelineTime) == [1, 3])
+        #expect(segment.focus(at: 0) == CGPoint(x: 0, y: 1))
+        #expect(segment.focus(at: 2) == CGPoint(x: 0.5, y: 0.5))
+        #expect(segment.focus(at: 4) == CGPoint(x: 1, y: 0))
+    }
+
+    @Test func mouseFollowZoomSourceMappingUsesAndClampsCaptureCoordinates() {
+        let bounds = CGRect(x: 100, y: 50, width: 800, height: 400)
+
+        #expect(MouseFollowZoomSourceMapper.normalizedPosition(
+            pointer: CGPoint(x: 300, y: 150),
+            sourceBounds: bounds
+        ) == CGPoint(x: 0.25, y: 0.25))
+        #expect(MouseFollowZoomSourceMapper.normalizedPosition(
+            pointer: CGPoint(x: -20, y: 900),
+            sourceBounds: bounds
+        ) == CGPoint(x: 0, y: 1))
+        #expect(MouseFollowZoomSourceMapper.normalizedPosition(
+            pointer: .zero,
+            sourceBounds: .zero
+        ) == CGPoint(x: 0.5, y: 0.5))
+    }
+
+    @Test func timelineMouseZoomEditsSplitAndRippleWithTheProject() throws {
+        var project = makeProject()
+        let addedSegmentID = project.addMouseFollowZoomSegment(
+            at: 2,
+            duration: 6,
+            zoomScale: 2.5,
+            position: CGPoint(x: 0.2, y: 0.8)
+        )
+        let segmentID = try #require(addedSegmentID)
+        let overlappingSegmentID = project.addMouseFollowZoomSegment(at: 3, duration: 1)
+
+        #expect(overlappingSegmentID == nil)
+        project.setMouseFollowZoomScale(9, segmentID: segmentID)
+        #expect(project.mouseFollowZoomSegment(id: segmentID)?.zoomScale == 4)
+        #expect(project.trimMouseFollowZoomSegment(
+            id: segmentID,
+            edge: .leading,
+            to: 1
+        ) == 1)
+        #expect(project.mouseFollowZoomSegment(id: segmentID)?.timelineStart == 1)
+
+        project.splitAll(at: 4)
+        #expect(project.mouseFollowZoomTrack?.segments.count == 2)
+        #expect(project.mouseFollowZoomTrack?.segments.map(\.timelineStart) == [1, 4])
+
+        project.rippleDelete(timeRange: 4..<6)
+        let remaining = try #require(project.mouseFollowZoomTrack?.segments)
+        #expect(project.duration == 8)
+        #expect(remaining.count == 2)
+        #expect(remaining.map(\.timelineStart) == [1, 4])
+        #expect(remaining.map(\.timelineEnd) == [4, 6])
+        #expect(remaining.flatMap(\.points).allSatisfy { $0.timelineTime <= 6 })
+    }
+
+    @Test func legacySettingsAndProjectsDefaultToMouseZoomOff() throws {
+        var settingsObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(CaptureSettings()))
+                as? [String: Any]
+        )
+        settingsObject.removeValue(forKey: "startsWithMouseFollowZoom")
+        settingsObject.removeValue(forKey: "mouseFollowZoomLevel")
+        let settings = try JSONDecoder().decode(
+            CaptureSettings.self,
+            from: JSONSerialization.data(withJSONObject: settingsObject)
+        )
+
+        var projectObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(makeProject()))
+                as? [String: Any]
+        )
+        projectObject["formatVersion"] = 4
+        projectObject.removeValue(forKey: "mouseFollowZoomTrack")
+        let project = try JSONDecoder().decode(
+            TimelineProject.self,
+            from: JSONSerialization.data(withJSONObject: projectObject)
+        )
+
+        #expect(!settings.startsWithMouseFollowZoom)
+        #expect(settings.mouseFollowZoomLevel == .standard)
+        #expect(project.formatVersion == 4)
+        #expect(project.mouseFollowZoomTrack == nil)
+    }
+
+    @Test func recordingManifestVersionTwoDecodesWithoutMouseZoomMetadata() throws {
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(makeRecoveryManifest()))
+                as? [String: Any]
+        )
+        object["version"] = 2
+        object.removeValue(forKey: "mouseFollowZoomTrack")
+
+        let manifest = try JSONDecoder().decode(
+            RecordingManifest.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(manifest.version == 2)
+        #expect(manifest.mouseFollowZoomTrack == nil)
+    }
+
+    @Test func mouseFollowZoomTransformCentersTheFocusAfterTheBaseTransform() {
+        let base = CGAffineTransform(scaleX: 2, y: 2)
+        let renderSize = CGSize(width: 100, height: 80)
+        let focus = CGPoint(x: 0.25, y: 0.75)
+        let sourceFocus = CGPoint(x: 12.5, y: 30)
+        let transform = TimelineCompositionBuilder.mouseFollowZoomTransform(
+            baseTransform: base,
+            renderSize: renderSize,
+            focus: focus,
+            zoomScale: 2
+        )
+        let output = sourceFocus.applying(transform)
+
+        #expect(abs(output.x - renderSize.width / 2) < 0.001)
+        #expect(abs(output.y - renderSize.height / 2) < 0.001)
+    }
+
+    @Test @MainActor func compositionBuildsFiniteMouseZoomInstructions() async throws {
+        let sourceURL = try await makeColorTestVideo()
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let asset = AVURLAsset(url: sourceURL)
+        let sourceTrack = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let project = TimelineProject(
+            name: "Mouse Zoom Instructions",
+            lanes: [TimelineLane(
+                kind: .video,
+                name: "Screen",
+                clips: [TimelineClip(
+                    sourceURL: sourceURL,
+                    sourceTrackID: sourceTrack.trackID,
+                    sourceStart: 0,
+                    timelineStart: 0,
+                    duration: 3,
+                    name: "Screen"
+                )]
+            )],
+            mouseFollowZoomTrack: MouseFollowZoomTrack(segments: [MouseFollowZoomSegment(
+                timelineStart: 0.5,
+                duration: 1.5,
+                zoomScale: 2,
+                points: [
+                    MouseFollowZoomPoint(
+                        timelineTime: 0.5,
+                        position: CGPoint(x: 0.25, y: 0.5)
+                    ),
+                    MouseFollowZoomPoint(
+                        timelineTime: 2,
+                        position: CGPoint(x: 0.25, y: 0.5)
+                    ),
+                ]
+            )])
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        #expect(build.videoComposition != nil)
+    }
+
+    @Test @MainActor func compositionRendersMouseZoomOnlyDuringItsEffectSegment() async throws {
+        let sourceURL = try await makeHorizontalSplitTestVideo()
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let asset = AVURLAsset(url: sourceURL)
+        let sourceTrack = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let segment = MouseFollowZoomSegment(
+            timelineStart: 0.5,
+            duration: 1.5,
+            zoomScale: 2,
+            points: [
+                MouseFollowZoomPoint(timelineTime: 0.5, position: CGPoint(x: 0.25, y: 0.5)),
+                MouseFollowZoomPoint(timelineTime: 2, position: CGPoint(x: 0.25, y: 0.5)),
+            ]
+        )
+        let project = TimelineProject(
+            name: "Mouse Zoom Render",
+            lanes: [TimelineLane(
+                kind: .video,
+                name: "Screen",
+                clips: [TimelineClip(
+                    sourceURL: sourceURL,
+                    sourceTrackID: sourceTrack.trackID,
+                    sourceStart: 0,
+                    timelineStart: 0,
+                    duration: 3,
+                    name: "Screen"
+                )]
+            )],
+            mouseFollowZoomTrack: MouseFollowZoomTrack(segments: [segment])
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        let samplePoint = CGPoint(x: 0.75, y: 0.5)
+        let before = try await renderedColor(
+            at: 0.25,
+            composition: build.composition,
+            videoComposition: build.videoComposition,
+            normalizedPoint: samplePoint
+        )
+        let during = try await renderedColor(
+            at: 1,
+            composition: build.composition,
+            videoComposition: build.videoComposition,
+            normalizedPoint: samplePoint
+        )
+        let after = try await renderedColor(
+            at: 2.5,
+            composition: build.composition,
+            videoComposition: build.videoComposition,
+            normalizedPoint: samplePoint
+        )
+
+        #expect(Int(before.blue) > Int(before.red) + 80)
+        #expect(Int(during.red) > Int(during.blue) + 80)
+        #expect(Int(after.blue) > Int(after.red) + 80)
+    }
+
+    @Test @MainActor func mouseZoomReturnsToBaseTransformInsideAHeldVideoGap() async throws {
+        let sourceURL = try await makeHorizontalSplitTestVideo()
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let asset = AVURLAsset(url: sourceURL)
+        let sourceTrack = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        var project = TimelineProject(
+            name: "Mouse Zoom Gap",
+            lanes: [TimelineLane(
+                kind: .video,
+                name: "Screen",
+                clips: [
+                    TimelineClip(
+                        sourceURL: sourceURL,
+                        sourceTrackID: sourceTrack.trackID,
+                        sourceStart: 0,
+                        timelineStart: 0,
+                        duration: 1,
+                        name: "Before Gap"
+                    ),
+                    TimelineClip(
+                        sourceURL: sourceURL,
+                        sourceTrackID: sourceTrack.trackID,
+                        sourceStart: 2,
+                        timelineStart: 2,
+                        duration: 1,
+                        name: "After Gap"
+                    ),
+                ]
+            )],
+            mouseFollowZoomTrack: MouseFollowZoomTrack(segments: [MouseFollowZoomSegment(
+                timelineStart: 0.5,
+                duration: 1,
+                zoomScale: 2,
+                points: [
+                    MouseFollowZoomPoint(
+                        timelineTime: 0.5,
+                        position: CGPoint(x: 0.25, y: 0.5)
+                    ),
+                    MouseFollowZoomPoint(
+                        timelineTime: 1.5,
+                        position: CGPoint(x: 0.25, y: 0.5)
+                    ),
+                ]
+            )])
+        )
+        project.setGapFillMode(.holdPrevious, gapID: try #require(project.videoGaps.first?.id))
+        let build = try await TimelineCompositionBuilder.build(project)
+        let samplePoint = CGPoint(x: 0.75, y: 0.5)
+        let during = try await renderedColor(
+            at: 0.9,
+            composition: build.composition,
+            videoComposition: build.videoComposition,
+            normalizedPoint: samplePoint
+        )
+        let after = try await renderedColor(
+            at: 1.75,
+            composition: build.composition,
+            videoComposition: build.videoComposition,
+            normalizedPoint: samplePoint
+        )
+
+        #expect(Int(during.red) > Int(during.blue) + 80)
+        #expect(Int(after.blue) > Int(after.red) + 80)
+    }
+
+    @Test @MainActor func mouseZoomKeepsTheCameraOverlayAnchored() async throws {
+        let screenURL = try await makeColorTestVideo(
+            frameCount: 30,
+            solidColor: RGBAColor(red: 255, green: 0, blue: 0)
+        )
+        let cameraURL = try await makeColorTestVideo(
+            frameCount: 30,
+            solidColor: RGBAColor(red: 0, green: 255, blue: 0)
+        )
+        defer {
+            try? FileManager.default.removeItem(at: screenURL)
+            try? FileManager.default.removeItem(at: cameraURL)
+        }
+        let screenTrack = try #require(
+            try await AVURLAsset(url: screenURL).loadTracks(withMediaType: .video).first
+        )
+        let cameraTrack = try #require(
+            try await AVURLAsset(url: cameraURL).loadTracks(withMediaType: .video).first
+        )
+        let cameraLayout = TimelineVideoLayout(x: 0.65, y: 0.65, width: 0.25, height: 0.25)
+        let project = TimelineProject(
+            name: "Anchored Camera",
+            lanes: [
+                TimelineLane(kind: .video, name: "Screen", clips: [TimelineClip(
+                    sourceURL: screenURL,
+                    sourceTrackID: screenTrack.trackID,
+                    sourceStart: 0,
+                    timelineStart: 0,
+                    duration: 1,
+                    name: "Screen"
+                )]),
+                TimelineLane(kind: .camera, name: "Camera", clips: [TimelineClip(
+                    sourceURL: cameraURL,
+                    sourceTrackID: cameraTrack.trackID,
+                    sourceStart: 0,
+                    timelineStart: 0,
+                    duration: 1,
+                    name: "Camera",
+                    videoLayout: cameraLayout
+                )]),
+            ],
+            mouseFollowZoomTrack: MouseFollowZoomTrack(segments: [MouseFollowZoomSegment(
+                timelineStart: 0,
+                duration: 1,
+                zoomScale: 2,
+                points: [
+                    MouseFollowZoomPoint(timelineTime: 0, position: CGPoint(x: 0.25, y: 0.25)),
+                    MouseFollowZoomPoint(timelineTime: 1, position: CGPoint(x: 0.25, y: 0.25)),
+                ]
+            )])
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        let overlay = try await renderedColor(
+            at: 0.5,
+            composition: build.composition,
+            videoComposition: build.videoComposition,
+            normalizedPoint: CGPoint(
+                x: cameraLayout.x + cameraLayout.width / 2,
+                y: 1 - (cameraLayout.y + cameraLayout.height / 2)
+            )
+        )
+
+        #expect(Int(overlay.green) > Int(overlay.red) + 80)
+        #expect(Int(overlay.green) > Int(overlay.blue) + 80)
+    }
+
     private func makeProject() -> TimelineProject {
         let url = URL(fileURLWithPath: "/tmp/source.mov")
         let groupID = UUID()
@@ -3129,6 +3515,57 @@ struct ReccyTests {
             showsCursor: true,
             highlightsClicks: true
         )
+    }
+
+    private func makeHorizontalSplitTestVideo(
+        frameCount: Int = 90,
+        size: CGSize = CGSize(width: 64, height: 64)
+    ) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Mouse Zoom Test \(UUID().uuidString)")
+            .appendingPathExtension("mov")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(
+            mediaType: .video,
+            outputSettings: [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: Int(size.width),
+                AVVideoHeightKey: Int(size.height),
+            ]
+        )
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: Int(size.width),
+                kCVPixelBufferHeightKey as String: Int(size.height),
+            ]
+        )
+        guard writer.canAdd(input) else { throw TestMediaError.cannotAddVideoInput }
+        writer.add(input)
+        guard writer.startWriting() else { throw writer.error ?? TestMediaError.writerFailed }
+        writer.startSession(atSourceTime: .zero)
+
+        for frame in 0..<frameCount {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            guard adaptor.append(
+                try makeHorizontalSplitPixelBuffer(size: size),
+                withPresentationTime: CMTime(value: Int64(frame), timescale: 30)
+            ) else {
+                throw writer.error ?? TestMediaError.writerFailed
+            }
+        }
+        input.markAsFinished()
+        await withCheckedContinuation { continuation in
+            writer.finishWriting { continuation.resume() }
+        }
+        guard writer.status == .completed else {
+            throw writer.error ?? TestMediaError.writerFailed
+        }
+        return url
     }
 
     private func makeColorTestVideo(
@@ -3189,6 +3626,42 @@ struct ReccyTests {
             throw writer.error ?? TestMediaError.writerFailed
         }
         return url
+    }
+
+    private func makeHorizontalSplitPixelBuffer(size: CGSize) throws -> CVPixelBuffer {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            Int(size.width),
+            Int(size.height),
+            kCVPixelFormatType_32BGRA,
+            [
+                kCVPixelBufferCGImageCompatibilityKey: true,
+                kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            ] as CFDictionary,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw TestMediaError.cannotCreatePixelBuffer
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            throw TestMediaError.cannotCreatePixelBuffer
+        }
+        let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        for y in 0..<Int(size.height) {
+            let row = baseAddress.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt8.self)
+            for x in 0..<Int(size.width) {
+                let isLeft = x < Int(size.width) / 2
+                row[x * 4] = isLeft ? 0 : 255
+                row[x * 4 + 1] = 0
+                row[x * 4 + 2] = isLeft ? 255 : 0
+                row[x * 4 + 3] = 255
+            }
+        }
+        return pixelBuffer
     }
 
     private func makeExportFixture(audioTrackCount: Int = 1) async throws -> URL {

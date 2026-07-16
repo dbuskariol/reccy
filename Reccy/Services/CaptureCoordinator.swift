@@ -173,6 +173,8 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var systemAudioHistory: [Double] = []
     @Published private(set) var microphoneAudioHistory: [Double] = []
     @Published private(set) var sessionCompletion: CaptureSessionCompletion?
+    @Published private(set) var isMouseFollowZoomActive = false
+    @Published private(set) var mouseFollowZoomPosition = CGPoint(x: 0.5, y: 0.5)
 
     let library: RecordingLibrary
     let previewPipeline = CapturePreviewPipeline()
@@ -187,6 +189,8 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var activeOutputURL: URL?
     private var activeRecordingManifest: RecordingManifest?
     private var activeTranscriptionConfiguration: CaptureTranscriptionConfiguration?
+    private var mouseFollowZoomCapture = MouseFollowZoomCaptureSession()
+    private var mouseFollowZoomSourceMapper: MouseFollowZoomSourceMapper?
     private var pendingCompletionNotice: String?
     private var countdownTask: Task<Void, Never>?
     private var recordingStartTask: Task<Void, Never>?
@@ -293,6 +297,23 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
     var canStartRecording: Bool { captureStartReadiness.canStart }
 
+    var activeCaptureAspectRatio: CGFloat {
+        guard let manifest = activeRecordingManifest, manifest.height > 0 else { return 16 / 9 }
+        return CGFloat(manifest.width) / CGFloat(manifest.height)
+    }
+
+    var liveMouseFollowZoomScale: Double {
+        mouseFollowZoomCapture.currentScale ?? 1
+    }
+
+    var liveMouseFollowZoomScaleTitle: String {
+        liveMouseFollowZoomScale.formatted(
+            .number.precision(
+                .fractionLength(liveMouseFollowZoomScale == floor(liveMouseFollowZoomScale) ? 0 : 1)
+            )
+        ) + "×"
+    }
+
     private var selectedCameraUniqueID: String {
         settings.selectedCameraID ?? AVCaptureDevice.default(for: .video)?.uniqueID ?? ""
     }
@@ -321,6 +342,9 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
         KeyboardShortcuts.onKeyUp(for: .toggleRecordingPause) { [weak self] in
             Task { @MainActor in self?.toggleRecordingPause() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .toggleMouseFollowZoom) { [weak self] in
+            Task { @MainActor in self?.toggleMouseFollowZoom() }
         }
         KeyboardShortcuts.onKeyUp(for: .chooseDisplay) { [weak self] in
             Task { @MainActor in self?.chooseSource(.display) }
@@ -643,6 +667,19 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
+    func toggleMouseFollowZoom() {
+        guard state == .recording || state == .paused else { return }
+        let time = multitrackRecorder?.metrics.duration ?? recordedDuration
+        let position = currentMouseFollowZoomPosition()
+        mouseFollowZoomCapture.toggle(
+            at: time,
+            zoomScale: settings.mouseFollowZoomLevel.rawValue,
+            position: position
+        )
+        mouseFollowZoomPosition = mouseFollowZoomCapture.currentPosition ?? position
+        isMouseFollowZoomActive = mouseFollowZoomCapture.isActive
+    }
+
     func captureScreenshot() {
         guard let selectedFilter, state.canChangeSettings, !isCapturingScreenshot else {
             if selectedFilter == nil {
@@ -851,6 +888,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                     self.recordingStartTask = nil
                     self.state = .recording
                     self.boundaryController.setRecording(true)
+                    self.beginMouseFollowZoomCapture()
                     self.beginMetering()
                 }
             }
@@ -1028,6 +1066,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 recordedFileSize = metrics.fileSize
                 systemAudioLevel = metrics.systemAudioLevel
                 microphoneAudioLevel = metrics.microphoneLevel
+                sampleMouseFollowZoom(at: metrics.duration)
                 appendLevel(metrics.systemAudioLevel, to: &systemAudioHistory)
                 appendLevel(metrics.microphoneLevel, to: &microphoneAudioHistory)
                 boundaryController.setRecording(
@@ -1082,6 +1121,11 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         multitrackRecorder = nil
         previewPipeline.clear()
         cameraPreviewPipeline.clear()
+
+        activeRecordingManifest?.mouseFollowZoomTrack = mouseFollowZoomCapture.finish(
+            at: completion.durationSeconds
+        )
+        resetMouseFollowZoomCapture()
 
         let completedURL = activeOutputURL
         var indexingError: Error?
@@ -1217,6 +1261,45 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         microphoneAudioLevel = 0
         systemAudioHistory.removeAll(keepingCapacity: true)
         microphoneAudioHistory.removeAll(keepingCapacity: true)
+        resetMouseFollowZoomCapture()
+    }
+
+    private func beginMouseFollowZoomCapture() {
+        mouseFollowZoomCapture = MouseFollowZoomCaptureSession()
+        mouseFollowZoomSourceMapper = selectedSource.map(MouseFollowZoomSourceMapper.init)
+        let position = currentMouseFollowZoomPosition()
+        mouseFollowZoomPosition = position
+        if settings.startsWithMouseFollowZoom {
+            mouseFollowZoomCapture.begin(
+                at: 0,
+                zoomScale: settings.mouseFollowZoomLevel.rawValue,
+                position: position
+            )
+        }
+        isMouseFollowZoomActive = mouseFollowZoomCapture.isActive
+    }
+
+    private func sampleMouseFollowZoom(at timelineTime: TimeInterval) {
+        guard mouseFollowZoomCapture.isActive else { return }
+        let position = currentMouseFollowZoomPosition()
+        mouseFollowZoomCapture.sample(at: timelineTime, position: position)
+        mouseFollowZoomPosition = mouseFollowZoomCapture.currentPosition ?? position
+    }
+
+    private func currentMouseFollowZoomPosition() -> CGPoint {
+        guard var mapper = mouseFollowZoomSourceMapper else {
+            return mouseFollowZoomPosition
+        }
+        let position = mapper.currentPosition()
+        mouseFollowZoomSourceMapper = mapper
+        return position
+    }
+
+    private func resetMouseFollowZoomCapture() {
+        mouseFollowZoomCapture = MouseFollowZoomCaptureSession()
+        mouseFollowZoomSourceMapper = nil
+        isMouseFollowZoomActive = false
+        mouseFollowZoomPosition = CGPoint(x: 0.5, y: 0.5)
     }
 
     /// The shared picker owns macOS's screen-sharing menu-bar and switcher UI.
@@ -1460,6 +1543,13 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             region: nil
         )
         isSimulatingRecordingForQA = true
+        mouseFollowZoomCapture.begin(
+            at: 2,
+            zoomScale: 3,
+            position: CGPoint(x: 0.58, y: 0.43)
+        )
+        isMouseFollowZoomActive = true
+        mouseFollowZoomPosition = CGPoint(x: 0.58, y: 0.43)
         let previewPipeline = previewPipeline
         Task.detached(priority: .userInitiated) {
             try? await Task.sleep(for: .milliseconds(350))
