@@ -51,6 +51,27 @@ enum RecordingTimelineProjectLoader {
         return try await makeInitialProject(for: item)
     }
 
+    /// Builds the same rendered recording that Library previews and Editor
+    /// opens. Direct Library delivery must not bypass this path: doing so drops
+    /// the camera overlay, saved edits, captions, and timeline audio choices.
+    static func exportSource(for item: RecordingItem) async throws -> ExportSource {
+        let loaded = try await load(for: item)
+        try Task.checkCancellation()
+        let build = try await TimelineCompositionBuilder.build(loaded.project)
+        try Task.checkCancellation()
+        return ExportSource(
+            name: item.name,
+            asset: build.composition,
+            sourceURL: item.url,
+            videoComposition: TimelineCaptionVideoRenderer.applying(
+                loaded.project.captionTrack,
+                to: build.videoComposition,
+                projectDuration: loaded.project.duration
+            ),
+            audioMix: build.audioMix
+        )
+    }
+
     private static func makeInitialProject(for item: RecordingItem) async throws -> LoadedTimelineProject {
         let asset = AVURLAsset(url: item.url)
         let duration = try await asset.load(.duration).seconds
@@ -142,7 +163,8 @@ enum RecordingTimelineProjectLoader {
             project: TimelineProject(
                 name: item.name,
                 frameRate: Double(item.manifest.frameRate),
-                lanes: lanes
+                lanes: lanes,
+                mouseFollowZoomTrack: item.manifest.mouseFollowZoomTrack
             ),
             sourceDurations: [item.url: duration],
             needsInitialSave: true

@@ -407,11 +407,19 @@ final class TranscriptionController: ObservableObject {
                 } else if let existing = try await store.load(for: mediaURL), !existing.tracks.isEmpty {
                     documents[mediaURL] = existing
                     jobs[mediaURL] = .ready
+                } else if result.containsOnlyNoSpeechFailures {
+                    try await persistNoSpeechResult(for: mediaURL)
                 } else {
                     jobs[mediaURL] = .failed(result.failureMessage)
                 }
             } catch is CancellationError {
                 jobs[mediaURL] = documents[mediaURL] == nil ? .idle : .ready
+            } catch TranscriptionEngineError.noSpeechRecognized {
+                do {
+                    try await persistNoSpeechResult(for: mediaURL)
+                } catch {
+                    jobs[mediaURL] = .failed(error.localizedDescription)
+                }
             } catch {
                 logger.error(
                     "Post-recording transcription failed reason=\(error.localizedDescription, privacy: .public) file=\(mediaURL.lastPathComponent, privacy: .public)"
@@ -420,6 +428,13 @@ final class TranscriptionController: ObservableObject {
             }
             transcriptionTasks[mediaURL] = nil
         }
+    }
+
+    private func persistNoSpeechResult(for mediaURL: URL) async throws {
+        let document = TranscriptDocument(mediaFileName: mediaURL.lastPathComponent, tracks: [])
+        try await store.save(document, for: mediaURL)
+        documents[mediaURL] = document
+        jobs[mediaURL] = .ready
     }
 
     func cancelTranscription(for mediaURL: URL) {

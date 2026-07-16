@@ -30,6 +30,7 @@ struct RecordView: View {
                         }
                         sourceCard
                         cameraCard
+                        mouseFollowZoomCard
                         optionsCard
                         transcriptionCard
                         outputCard
@@ -154,14 +155,11 @@ struct RecordView: View {
     }
 
     private var needsPermissionAttention: Bool {
-        needsDirectCaptureAccess
-            || (coordinator.settings.includeMicrophone && coordinator.microphonePermission != .authorized)
-            || (coordinator.settings.includeCamera && coordinator.cameraPermission != .authorized)
+        coordinator.capturePermissionReadiness.needsAttention
     }
 
     private var needsDirectCaptureAccess: Bool {
-        coordinator.selectedSourceKind.requiresDirectCapturePermission
-            && !coordinator.directCapturePermission.isGranted
+        coordinator.capturePermissionReadiness.directCaptureIssue != nil
     }
 
     private var permissionWarning: some View {
@@ -191,15 +189,7 @@ struct RecordView: View {
     }
 
     private var permissionAttentionDetail: String {
-        if needsDirectCaptureAccess {
-            return coordinator.directCapturePermission == .restartRequired
-                ? "Quit and reopen Reccy once to finish enabling direct Portion capture."
-                : "Portion uses Reccy’s resizable overlay and needs the one-time Direct Screen & System Audio Access approval."
-        }
-        if coordinator.settings.includeCamera && coordinator.cameraPermission != .authorized {
-            return "Camera access is required because a separate camera video track is enabled."
-        }
-        return "Microphone access is required because microphone recording is enabled."
+        coordinator.capturePermissionReadiness.detail
     }
 
     private var optionsCard: some View {
@@ -305,6 +295,54 @@ struct RecordView: View {
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
                     }
+                }
+            }
+        }
+    }
+
+    private var mouseFollowZoomCard: some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 17) {
+                HStack(alignment: .top, spacing: 16) {
+                    Image(systemName: "cursorarrow.motionlines")
+                        .font(.title2)
+                        .foregroundStyle(.purple)
+                        .frame(width: 32, height: 32)
+                        .accessibilityHidden(true)
+                    SectionHeading(
+                        "Mouse-follow zoom",
+                        subtitle: "Magnify around the pointer live and save every enabled interval as an editable timeline effect."
+                    )
+                    Spacer(minLength: 20)
+                    Toggle(
+                        "Start enabled",
+                        isOn: $coordinator.settings.startsWithMouseFollowZoom
+                    )
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .fixedSize()
+                }
+
+                Divider()
+
+                HStack(alignment: .center, spacing: 24) {
+                    settingPicker(
+                        "Zoom level",
+                        selection: $coordinator.settings.mouseFollowZoomLevel
+                    ) {
+                        ForEach(MouseFollowZoomLevel.allCases) { level in
+                            Text(level.title).tag(level)
+                        }
+                    }
+                    .frame(maxWidth: 380)
+
+                    Label(
+                        "Toggle in Monitor or with the global shortcut",
+                        systemImage: "timeline.selection"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
                 }
             }
         }
@@ -629,11 +667,11 @@ struct RecordView: View {
 
             if let url = coordinator.lastRecordingURL {
                 ShareLink(item: url) {
-                    Label("Share Last Recording", systemImage: "square.and.arrow.up")
+                    Label("Share Last Source Recording", systemImage: "square.and.arrow.up")
                         .labelStyle(.iconOnly)
                 }
                 .controlSize(.large)
-                .reccyTooltip("Share last recording")
+                .reccyTooltip("Share the editable multitrack source recording")
             }
 
             if let url = coordinator.lastScreenshotURL {
@@ -647,54 +685,22 @@ struct RecordView: View {
 
             Spacer()
 
-            Button {
-                performPrimaryRecordAction()
-            } label: {
-                Label(
-                    primaryRecordActionTitle,
-                    systemImage: primaryRecordActionImage
-                )
-                .frame(minWidth: 160)
+            if coordinator.canStartRecording {
+                Button {
+                    coordinator.startRecording()
+                } label: {
+                    Label("2. Start Recording", systemImage: "record.circle.fill")
+                    .frame(minWidth: 160)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(.red)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(.red)
-            .disabled(
-                coordinator.hasSelectedSource
-                    && captureTranscriptionConfiguration.isEnabled
-                    && transcription.captureReadiness.isPreparing
-            )
         }
         .frame(maxWidth: .infinity)
     }
 
-    private var captureTranscriptionConfiguration: CaptureTranscriptionConfiguration {
-        transcription.makeCaptureConfiguration(
-            systemAudio: coordinator.settings.includeSystemAudio,
-            microphone: coordinator.settings.includeMicrophone
-        )
-    }
-
-    private var captureTranscriptionNeedsAttention: Bool {
-        captureTranscriptionConfiguration.isEnabled && !transcription.captureReadiness.isReady
-    }
-
     private var recordControlStatus: String {
-        if needsDirectCaptureAccess {
-            return "Direct Portion access required"
-        }
-        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
-            switch transcription.captureReadiness {
-            case .preparing(let update):
-                return update.detail ?? "Preparing transcription"
-            case .unavailable:
-                return "Transcription needs attention"
-            case .disabled:
-                return "Transcription needs preparation"
-            case .ready:
-                break
-            }
-        }
         if coordinator.hasSelectedSource {
             return "\(coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title) selected"
         }
@@ -702,65 +708,11 @@ struct RecordView: View {
     }
 
     private var recordControlStatusImage: String {
-        if needsDirectCaptureAccess { return "exclamationmark.circle.fill" }
-        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
-            return transcription.captureReadiness.isPreparing
-                ? "waveform.badge.magnifyingglass"
-                : "exclamationmark.triangle.fill"
-        }
         return coordinator.hasSelectedSource ? "checkmark.circle.fill" : "1.circle"
     }
 
     private var recordControlStatusStyle: AnyShapeStyle {
-        if needsDirectCaptureAccess { return AnyShapeStyle(.orange) }
-        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
-            if case .unavailable = transcription.captureReadiness {
-                return AnyShapeStyle(.orange)
-            }
-            return AnyShapeStyle(.secondary)
-        }
         return coordinator.hasSelectedSource ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary)
-    }
-
-    private var primaryRecordActionTitle: String {
-        if needsDirectCaptureAccess { return "Review Permissions" }
-        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
-            switch transcription.captureReadiness {
-            case .preparing:
-                return "Preparing Transcription…"
-            case .unavailable:
-                return "Review Transcription"
-            case .disabled:
-                return "Prepare Transcription"
-            case .ready:
-                break
-            }
-        }
-        return coordinator.hasSelectedSource ? "2. Start Recording" : "Choose Source"
-    }
-
-    private var primaryRecordActionImage: String {
-        if needsDirectCaptureAccess { return "hand.raised.fill" }
-        if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
-            return "waveform.badge.magnifyingglass"
-        }
-        return coordinator.hasSelectedSource ? "record.circle.fill" : "rectangle.dashed.badge.record"
-    }
-
-    private func performPrimaryRecordAction() {
-        if needsDirectCaptureAccess {
-            navigation.openSettings(.permissions)
-        } else if coordinator.hasSelectedSource, captureTranscriptionNeedsAttention {
-            if case .unavailable = transcription.captureReadiness {
-                navigation.openSettings(.transcription)
-            } else {
-                transcription.prepareSelectedCaptureEngine()
-            }
-        } else if coordinator.hasSelectedSource {
-            coordinator.startRecording()
-        } else {
-            coordinator.chooseSource(coordinator.selectedSourceKind)
-        }
     }
 
     private var activeRecordingCard: some View {
@@ -842,7 +794,7 @@ struct RecordView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Reccy couldn’t continue")
+                Text(coordinator.failureContext.title)
                     .font(.headline)
                 Text(message)
                     .font(.callout)

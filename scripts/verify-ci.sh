@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/reccy-release.sh"
 
 DERIVED_DATA="${RECCY_CI_DERIVED_DATA:-$(reccy_default_derived_data CI)}"
+HOST_ARCH="$(/usr/bin/uname -m)"
 
 while IFS= read -r -d '' script; do
   /bin/bash -n "$script"
@@ -23,7 +24,7 @@ reccy_assert_release_metadata "$ROOT_DIR" >/dev/null
   -project "$ROOT_DIR/Reccy.xcodeproj" \
   -scheme Reccy \
   -configuration Debug \
-  -destination 'platform=macOS' \
+  -destination "platform=macOS,arch=$HOST_ARCH" \
   -derivedDataPath "$DERIVED_DATA" \
   test
 /usr/bin/xcodebuild \

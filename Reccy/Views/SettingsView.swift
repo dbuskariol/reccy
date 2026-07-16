@@ -58,6 +58,9 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(navigation.settingsCategory == category ? .primary : .secondary)
+                .accessibilityAddTraits(
+                    navigation.settingsCategory == category ? .isSelected : []
+                )
                 .reccyTooltip(category.title)
             }
             Spacer()
@@ -169,7 +172,8 @@ struct SettingsView: View {
                             Image(systemName: "folder")
                                 .frame(width: 16, height: 16)
                         }
-                        .reccyTooltip("Open recording folder")
+                        .reccyAccessibleControl("Open Recording Folder")
+                        .disabled(!coordinator.library.availability.isAvailable)
                     }
                 }
                 if coordinator.settings.outputFolderPath != nil {
@@ -317,6 +321,28 @@ struct SettingsView: View {
                     isOn: $coordinator.settings.showMouseClicks,
                     isDisabled: coordinator.settings.useHDR
                 )
+                SettingsDivider()
+                SettingsToggleRow(
+                    title: "Start with mouse-follow zoom",
+                    detail: "Begin each recording magnified around the pointer; toggles become editable effect segments.",
+                    systemImage: "cursorarrow.motionlines",
+                    isOn: $coordinator.settings.startsWithMouseFollowZoom
+                )
+                SettingsDivider()
+                SettingsValueRow(
+                    title: "Mouse-follow zoom level",
+                    detail: "The default magnification for new live and editor-created zoom segments.",
+                    systemImage: "plus.magnifyingglass"
+                ) {
+                    Picker("Zoom level", selection: $coordinator.settings.mouseFollowZoomLevel) {
+                        ForEach(MouseFollowZoomLevel.allCases) { level in
+                            Text(level.title).tag(level)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 96)
+                }
                 SettingsDivider()
                 SettingsValueRow(
                     title: "Screenshot defaults",
@@ -629,6 +655,7 @@ struct SettingsView: View {
                         systemImage: shortcutSystemImage(shortcut)
                     ) {
                         KeyboardShortcuts.Recorder(for: shortcut.name)
+                            .accessibilityLabel("\(shortcut.title) shortcut")
                     }
                     if index < ReccyGlobalShortcut.allCases.count - 1 {
                         SettingsDivider()
@@ -718,7 +745,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsCard(title: "Reccy") {
+            SettingsCard(title: "Current Version") {
                 SettingsActionRow(
                     title: appVersion,
                     detail: "Updates are signed and verified by Sparkle before installation.",
@@ -830,6 +857,7 @@ struct SettingsView: View {
         switch shortcut {
         case .toggleRecording: "Starts with the current source, or stops the active recording."
         case .toggleRecordingPause: "Pauses or resumes writing while keeping the live monitor available."
+        case .toggleMouseFollowZoom: "Starts or ends an editable mouse-follow zoom segment during recording."
         case .chooseDisplay: "Open the native picker for an entire display."
         case .choosePortion: "Choose a display, then drag out the exact capture area."
         case .chooseApplication: "Open the native picker for all windows from one app."
@@ -842,6 +870,7 @@ struct SettingsView: View {
         switch shortcut {
         case .toggleRecording: "record.circle"
         case .toggleRecordingPause: "pause.circle"
+        case .toggleMouseFollowZoom: "cursorarrow.motionlines"
         case .chooseDisplay: "display"
         case .choosePortion: "viewfinder.rectangular"
         case .chooseApplication: "macwindow.on.rectangle"
@@ -871,7 +900,7 @@ struct SettingsView: View {
     private var appVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
-        return "Reccy \(version) (\(build))"
+        return "\(version) (\(build))"
     }
 }
 

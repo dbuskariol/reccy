@@ -30,7 +30,10 @@ This creates and validates the universal `.xcarchive`, signed app, dSYM archive,
 notarization ZIP, signed DMG, Sparkle ZIP and feed, checksums, and manifest. It
 exercises the complete local artifact graph but explicitly allows the unstapled
 rehearsal app and DMG at the two notarization gates. It does not contact Apple,
-create a GitHub release, or mutate any publishing state.
+create a GitHub release, or mutate any publishing state. Its `release.json`
+explicitly records `artifactStatus: rehearsal`, `notarized: false`, and whether
+the source worktree was clean, so rehearsal evidence cannot be mistaken for a
+publishable, commit-exact release.
 
 ## Local final release
 

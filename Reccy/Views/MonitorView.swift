@@ -3,6 +3,7 @@ import SwiftUI
 struct MonitorView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
     @EnvironmentObject private var transcription: TranscriptionController
+    @EnvironmentObject private var navigation: AppNavigationModel
 
     var body: some View {
         Group {
@@ -12,98 +13,52 @@ struct MonitorView: View {
                 WorkspaceEmptyState(
                     "No Active Recording",
                     systemImage: "waveform.path.ecg.rectangle",
-                    description: "Choose a source in Record, then start recording. Reccy opens this monitor automatically."
-                )
+                    description: "Choose a source in Record, then start recording. Reccy opens this monitor automatically.",
+                    actionTitle: "Choose a Source"
+                ) {
+                    navigation.section = .record
+                }
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("Monitor")
-        .toolbar {
-            if coordinator.state.isRecording {
-                ToolbarItem {
-                    HStack {
-                        Button(
-                            coordinator.state == .paused ? "Resume" : "Pause",
-                            systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill"
-                        ) {
-                            coordinator.toggleRecordingPause()
-                        }
-                        .disabled(coordinator.state != .recording && coordinator.state != .paused)
-
-                        Button("Stop", systemImage: "stop.fill") {
-                            coordinator.stopRecording()
-                        }
-                        .tint(.red)
-                    }
-                }
-            }
-        }
     }
 
     private var activeMonitor: some View {
-        VStack(spacing: 0) {
-            header
-                .padding(.horizontal, 28)
-                .padding(.vertical, 20)
-
-            Divider()
-
-            ReccySplitView(
-                axis: .vertical,
-                autosaveName: "monitor.overview-details",
-                initialFraction: 0.54,
-                firstMinimum: 260,
-                secondMinimum: 220,
-                firstPaneName: "recording overview",
-                secondPaneName: "recording details",
-                first: {
-                    monitoringOverview
-                        .padding(20)
-                },
-                second: {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 18) {
-                            audioSection
-                            if transcription.isLiveCaptureEnabled {
-                                liveTranscriptSection
-                            }
+        ReccySplitView(
+            axis: .vertical,
+            autosaveName: "monitor.overview-details.v2",
+            initialFraction: 0.60,
+            firstMinimum: 440,
+            secondMinimum: 220,
+            firstPaneName: "recording overview",
+            secondPaneName: "recording details",
+            first: {
+                monitoringOverview
+                    .padding(20)
+            },
+            second: {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        audioSection
+                        if transcription.isLiveCaptureEnabled {
+                            liveTranscriptSection
                         }
-                        .padding(28)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
+                    .padding(28)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-            )
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 9) {
-                    Circle()
-                        .fill(coordinator.state == .paused ? .orange : .red)
-                        .frame(width: 10, height: 10)
-                        .shadow(color: .red.opacity(0.55), radius: 4)
-                    Text(statusTitle)
-                        .font(.largeTitle.weight(.bold))
-                }
-                Text("Keep this window open on another display while Reccy captures your selected source.")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
             }
-            Spacer()
-            Text(coordinator.formattedDuration)
-                .font(.title2.monospacedDigit().weight(.semibold))
-        }
+        )
     }
 
     private var monitoringOverview: some View {
         ReccySplitView(
             axis: .horizontal,
             autosaveName: "monitor.preview-status",
-            initialFraction: 0.72,
+            initialFraction: 0.70,
             firstMinimum: 360,
-            secondMinimum: 240,
+            secondMinimum: 280,
             secondMaximum: 380,
             firstPaneName: "live preview",
             secondPaneName: "recording status",
@@ -115,7 +70,11 @@ struct MonitorView: View {
     private var livePreview: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                CapturePreviewView(pipeline: coordinator.previewPipeline)
+                MouseFollowZoomPreview(
+                    pipeline: coordinator.previewPipeline,
+                    scale: coordinator.liveMouseFollowZoomScale,
+                    focus: coordinator.mouseFollowZoomPosition
+                )
                     .background(.black)
 
                 if coordinator.settings.includeCamera {
@@ -167,7 +126,7 @@ struct MonitorView: View {
                 .padding(10)
             }
         }
-        .aspectRatio(16 / 9, contentMode: .fit)
+        .aspectRatio(coordinator.activeCaptureAspectRatio, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -180,70 +139,127 @@ struct MonitorView: View {
 
     private var recordingStatusCard: some View {
         CardContainer {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Label(statusTitle, systemImage: "record.circle.fill")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.red)
-                        .lineLimit(1)
-                    Spacer()
-                }
-
-                Text(primaryStatusValue)
-                    .font(.system(size: 34, weight: .semibold, design: .monospaced))
-                    .contentTransition(.numericText())
-
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 6) {
-                        metadataPill(coordinator.settings.resolution.title, systemImage: "rectangle.expand.vertical")
-                        metadataPill(coordinator.settings.frameRate.title, systemImage: "speedometer")
-                    }
-                    VStack(alignment: .leading, spacing: 5) {
-                        metadataPill(coordinator.settings.resolution.title, systemImage: "rectangle.expand.vertical")
-                        metadataPill(coordinator.settings.frameRate.title, systemImage: "speedometer")
-                    }
-                }
-
-                Text(coordinator.liveStorageStatus)
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
-
-                Text(activeAudioDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-
-                Spacer(minLength: 16)
-
-                Button {
-                    coordinator.stopRecording()
-                } label: {
-                    recordingControlLabel(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .tint(.red)
-                .disabled(coordinator.state == .stopping)
-
-                Button {
-                    coordinator.toggleRecordingPause()
-                } label: {
-                    recordingControlLabel(
-                        coordinator.state == .paused ? "Resume Recording" : "Pause Recording",
-                        systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill"
-                    )
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(coordinator.state != .recording && coordinator.state != .paused)
+            ViewThatFits(in: .vertical) {
+                recordingStatusContent(isCompact: false)
+                    .fixedSize(horizontal: false, vertical: true)
+                recordingStatusContent(isCompact: true)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .frame(minHeight: 360)
     }
 
-    private func recordingControlLabel(_ title: String, systemImage: String) -> some View {
+    private func recordingStatusContent(isCompact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: isCompact ? 8 : 12) {
+            Label(statusTitle, systemImage: "record.circle.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.red)
+                .lineLimit(1)
+
+            Text(primaryStatusValue)
+                .font(.system(
+                    size: isCompact ? 29 : 34,
+                    weight: .semibold,
+                    design: .monospaced
+                ))
+                .contentTransition(.numericText())
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) {
+                    metadataPill(
+                        coordinator.settings.resolution.title,
+                        systemImage: "rectangle.expand.vertical"
+                    )
+                    metadataPill(
+                        coordinator.settings.frameRate.title,
+                        systemImage: "speedometer"
+                    )
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                    metadataPill(
+                        coordinator.settings.resolution.title,
+                        systemImage: "rectangle.expand.vertical"
+                    )
+                    metadataPill(
+                        coordinator.settings.frameRate.title,
+                        systemImage: "speedometer"
+                    )
+                }
+            }
+
+            Text(coordinator.liveStorageStatus)
+                .font((isCompact ? Font.caption : Font.callout).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(isCompact ? compactAudioDescription : activeAudioDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(isCompact ? 1 : 3)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+                .padding(.vertical, isCompact ? 0 : 2)
+
+            Button {
+                coordinator.toggleMouseFollowZoom()
+            } label: {
+                recordingControlLabel(
+                    coordinator.isMouseFollowZoomActive
+                        ? "Stop Mouse Zoom · \(coordinator.liveMouseFollowZoomScaleTitle)"
+                        : "Start Mouse Zoom",
+                    systemImage: coordinator.isMouseFollowZoomActive
+                        ? "cursorarrow.motionlines"
+                        : "plus.magnifyingglass",
+                    isCompact: isCompact
+                )
+            }
+            .buttonStyle(.bordered)
+            .controlSize(isCompact ? .regular : .large)
+            .tint(coordinator.isMouseFollowZoomActive ? .purple : .accentColor)
+            .disabled(coordinator.state != .recording && coordinator.state != .paused)
+            .accessibilityHint("Creates an editable mouse-follow zoom segment in the recording timeline")
+
+            Button {
+                coordinator.stopRecording()
+            } label: {
+                recordingControlLabel(
+                    coordinator.state.stopButtonTitle,
+                    systemImage: "stop.fill",
+                    isCompact: isCompact
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(isCompact ? .regular : .large)
+            .tint(.red)
+            .disabled(coordinator.state == .stopping)
+
+            Button {
+                coordinator.toggleRecordingPause()
+            } label: {
+                recordingControlLabel(
+                    coordinator.state == .paused ? "Resume Recording" : "Pause Recording",
+                    systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill",
+                    isCompact: isCompact
+                )
+            }
+            .buttonStyle(.bordered)
+            .controlSize(isCompact ? .regular : .large)
+            .disabled(coordinator.state != .recording && coordinator.state != .paused)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func recordingControlLabel(
+        _ title: String,
+        systemImage: String,
+        isCompact: Bool
+    ) -> some View {
         Label(title, systemImage: systemImage)
-            .frame(maxWidth: .infinity, minHeight: 34)
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
+            .frame(maxWidth: .infinity, minHeight: isCompact ? 28 : 34)
             .contentShape(Rectangle())
     }
 
@@ -419,6 +435,40 @@ struct MonitorView: View {
         case (false, true): "Microphone is recording on its own track."
         case (false, false): "This recording has no audio tracks."
         }
+    }
+
+    private var compactAudioDescription: String {
+        switch (coordinator.settings.includeSystemAudio, coordinator.settings.includeMicrophone) {
+        case (true, true): "System + microphone · separate tracks"
+        case (true, false): "System audio · separate track"
+        case (false, true): "Microphone · separate track"
+        case (false, false): "No audio tracks"
+        }
+    }
+}
+
+private struct MouseFollowZoomPreview: View {
+    let pipeline: CapturePreviewPipeline
+    let scale: Double
+    let focus: CGPoint
+
+    var body: some View {
+        GeometryReader { geometry in
+            let clampedScale = min(max(scale, 1), 4)
+            let clampedFocus = CGPoint(
+                x: min(max(focus.x, 0), 1),
+                y: min(max(focus.y, 0), 1)
+            )
+            CapturePreviewView(pipeline: pipeline)
+                .scaleEffect(clampedScale)
+                .offset(
+                    x: (0.5 - clampedFocus.x) * geometry.size.width * clampedScale,
+                    y: (0.5 - clampedFocus.y) * geometry.size.height * clampedScale
+                )
+                .animation(.smooth(duration: 0.14), value: clampedFocus)
+                .animation(.smooth(duration: 0.2), value: clampedScale)
+        }
+        .clipped()
     }
 }
 
