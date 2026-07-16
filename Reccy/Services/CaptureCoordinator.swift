@@ -51,6 +51,10 @@ enum CaptureState: Equatable, Sendable {
         default: "Stop Recording"
         }
     }
+
+    var requiresStopConfirmation: Bool {
+        self == .recording || self == .paused
+    }
 }
 
 enum CaptureFailureContext: Equatable, Sendable {
@@ -214,6 +218,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var activationCancellable: AnyCancellable?
     private let regionSelectionController = RegionSelectionController()
     private let boundaryController = CaptureBoundaryController()
+    private var isPresentingStopRecordingConfirmation = false
 #if DEBUG
     private var suppressesPermissionRefreshForQA = false
     private var isSimulatingRecordingForQA = false
@@ -344,7 +349,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if self.state.isRecording {
-                    self.stopRecording()
+                    self.requestStopRecording()
                 } else {
                     self.startRecording()
                 }
@@ -514,7 +519,18 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     /// Portrait blur and Background Replacement are owned by macOS. Opening
     /// Apple's Video Effects panel is the only authoritative enable/disable and
     /// background-image selection surface; Reccy reflects its result live.
+    var canOpenCameraVideoEffects: Bool {
+        guard settings.includeCamera else { return false }
+        return switch state {
+        case .countingDown, .recording, .paused:
+            true
+        case .idle, .sourceSelected, .starting, .stopping, .failed:
+            false
+        }
+    }
+
     func openCameraVideoEffects() {
+        guard canOpenCameraVideoEffects else { return }
         AVCaptureDevice.showSystemUserInterface(.videoEffects)
     }
 
@@ -613,6 +629,48 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 guard let self else { return }
                 self.handleFailure(error)
             }
+        }
+    }
+
+    /// Routes every user-initiated stop through one native confirmation. Capture
+    /// startup cancellation remains immediate, and automatic safety stops call
+    /// `stopRecording()` directly so low-space or failure recovery cannot wait
+    /// on modal UI while primary media is at risk.
+    func requestStopRecording() {
+        guard state.requiresStopConfirmation else {
+            stopRecording()
+            return
+        }
+        guard !isPresentingStopRecordingConfirmation else { return }
+        isPresentingStopRecordingConfirmation = true
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Stop Recording?"
+        alert.informativeText = "Reccy will finish writing the current recording and add it to your Library."
+
+        let cancelButton = alert.addButton(withTitle: "Cancel")
+        cancelButton.keyEquivalent = "\r"
+        let stopButton = alert.addButton(withTitle: "Stop Recording")
+        stopButton.hasDestructiveAction = true
+        stopButton.keyEquivalent = ""
+
+        let handleResponse: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            self.isPresentingStopRecordingConfirmation = false
+            guard response == .alertSecondButtonReturn,
+                  self.state.requiresStopConfirmation
+            else { return }
+            self.stopRecording()
+        }
+
+        if let window = NSApp.keyWindow,
+           window.isVisible,
+           window.styleMask.contains(.titled)
+        {
+            alert.beginSheetModal(for: window, completionHandler: handleResponse)
+        } else {
+            handleResponse(alert.runModal())
         }
     }
 
@@ -1651,6 +1709,8 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     func installActiveMonitorQAScenario() {
         suppressesPermissionRefreshForQA = true
         directCapturePermission = .granted
+        cameraPermission = .authorized
+        settings.includeCamera = true
         installActiveMenuBarQAScenario()
         recordedDuration = 9
         recordedFileSize = 8_400_000
@@ -1688,6 +1748,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         suppressesPermissionRefreshForQA = true
         directCapturePermission = .granted
         microphonePermission = .authorized
+        cameraPermission = .authorized
         selectedSourceKind = .application
         hasSelectedSource = true
         selectedSource = Self.qaApplicationSource

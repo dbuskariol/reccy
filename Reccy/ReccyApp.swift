@@ -35,6 +35,22 @@ struct ReccyApp: App {
                 transcription: coordinator.transcription
             )
 
+            CommandGroup(replacing: .saveItem) {
+                Button("Save Project") {
+                    editor.saveProject()
+                }
+                .disabled(!editor.hasProject || editor.isRebuilding)
+                .keyboardShortcut("s", modifiers: .command)
+            }
+
+            CommandGroup(after: .importExport) {
+                Button("Import Media…") {
+                    editor.chooseMediaToImport()
+                }
+                .disabled(!editor.hasProject || editor.isRebuilding || editor.isImportingMedia)
+                .keyboardShortcut("i", modifiers: .command)
+            }
+
             CommandMenu("Editor") {
                 Button("Previous Frame") {
                     editor.stepFrames(-1)
@@ -47,6 +63,16 @@ struct ReccyApp: App {
                 }
                 .disabled(!editor.hasProject)
                 .keyboardShortcut(.rightArrow, modifiers: .control)
+
+                Button("Use Current Frame as Poster") {
+                    editor.useCurrentFrameAsPoster()
+                    if let sourceURL = editor.sourceRecordingURL,
+                       let item = coordinator.library.recordings.first(where: { $0.url == sourceURL })
+                    {
+                        Task { await coordinator.library.refreshThumbnail(for: item) }
+                    }
+                }
+                .disabled(!editor.hasProject)
 
                 Divider()
 
@@ -113,6 +139,9 @@ struct ReccyApp: App {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .background(Color(nsColor: .windowBackgroundColor))
                 .task {
+                    if let directory = qaLibraryDirectory {
+                        coordinator.library.setDirectory(directory)
+                    }
                     if presentsActiveMenuBarQAHarness {
                         coordinator.installActiveMenuBarQAScenario()
                     } else if presentsBlockedMenuBarQAHarness {
@@ -165,6 +194,10 @@ struct ReccyApp: App {
 #if DEBUG
     @MainActor
     private func installMainWindowQAScenario() async {
+        if let directory = qaLibraryDirectory {
+            coordinator.library.setDirectory(directory)
+        }
+
         if CommandLine.arguments.contains("-ReccyPortionSelectionQA") {
             coordinator.installPortionSelectionQAScenario()
             navigation.section = .record
@@ -236,6 +269,19 @@ struct ReccyApp: App {
             navigation.openSettings(.permissions)
         }
     }
+
+    private var qaLibraryDirectory: URL? {
+        guard let argumentIndex = CommandLine.arguments.firstIndex(of: "-ReccyQALibraryPath"),
+              CommandLine.arguments.indices.contains(argumentIndex + 1)
+        else {
+            return nil
+        }
+
+        return URL(
+            fileURLWithPath: CommandLine.arguments[argumentIndex + 1],
+            isDirectory: true
+        )
+    }
 #endif
 }
 
@@ -273,7 +319,7 @@ private struct RecordingCommands: Commands {
 
             Button(coordinator.state.isRecording ? coordinator.state.stopButtonTitle : "Start Recording") {
                 if coordinator.state.isRecording {
-                    coordinator.stopRecording()
+                    coordinator.requestStopRecording()
                 } else {
                     coordinator.startRecording()
                 }

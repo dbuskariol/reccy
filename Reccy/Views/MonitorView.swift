@@ -4,6 +4,8 @@ struct MonitorView: View {
     @EnvironmentObject private var coordinator: CaptureCoordinator
     @EnvironmentObject private var transcription: TranscriptionController
     @EnvironmentObject private var navigation: AppNavigationModel
+    @State private var isShowingMouseZoomControls = false
+    @State private var isShowingCameraEffects = false
 
     var body: some View {
         Group {
@@ -113,21 +115,7 @@ struct MonitorView: View {
 
                     Spacer(minLength: 8)
 
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(.red)
-                            .frame(width: 7, height: 7)
-                        Text(coordinator.state == .paused ? "PAUSED" : "LIVE")
-                    }
-                    .foregroundStyle(.white)
-
-                    if !coordinator.cameraVideoEffects.activeTitles.isEmpty {
-                        Label(
-                            coordinator.cameraVideoEffects.activeTitles.joined(separator: " + "),
-                            systemImage: "person.crop.rectangle"
-                        )
-                        .lineLimit(1)
-                    }
+                    previewStateBadge
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
@@ -145,17 +133,34 @@ struct MonitorView: View {
         )
     }
 
+    @ViewBuilder
+    private var previewStateBadge: some View {
+        switch coordinator.state {
+        case let .countingDown(seconds):
+            Label("STARTING IN \(seconds)", systemImage: "timer")
+        case .starting:
+            Label("PREPARING", systemImage: "ellipsis")
+        case .paused:
+            Label("PAUSED", systemImage: "pause.fill")
+        case .stopping:
+            Label("FINISHING", systemImage: "hourglass")
+        default:
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(.red)
+                    .frame(width: 7, height: 7)
+                Text("LIVE")
+            }
+        }
+    }
+
     private var recordingStatusCard: some View {
         CardContainer {
-            ViewThatFits(in: .vertical) {
-                recordingStatusContent(isCompact: false)
-                    .fixedSize(horizontal: false, vertical: true)
-                recordingStatusContent(isCompact: true)
-                    .fixedSize(horizontal: false, vertical: true)
+            GeometryReader { geometry in
+                recordingStatusContent(isCompact: geometry.size.height < 440)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(minHeight: 360)
+        .frame(minHeight: 400)
     }
 
     private func recordingStatusContent(isCompact: Bool) -> some View {
@@ -207,84 +212,16 @@ struct MonitorView: View {
                 .lineLimit(isCompact ? 1 : 3)
                 .fixedSize(horizontal: false, vertical: true)
 
+            Spacer(minLength: isCompact ? 6 : 14)
+
             Divider()
                 .padding(.vertical, isCompact ? 0 : 2)
 
+            mouseFollowZoomControl(isCompact: isCompact)
+
             if coordinator.settings.includeCamera {
-                Button {
-                    coordinator.openCameraVideoEffects()
-                } label: {
-                    recordingControlLabel(
-                        coordinator.cameraVideoEffects.activeTitles.isEmpty
-                            ? "Camera Effects…"
-                            : coordinator.cameraVideoEffects.activeTitles.joined(separator: " + "),
-                        systemImage: "person.crop.rectangle",
-                        isCompact: isCompact
-                    )
-                }
-                .buttonStyle(.bordered)
-                .controlSize(isCompact ? .regular : .large)
-                .disabled(!coordinator.cameraVideoEffects.supportsAnyEffect)
-                .accessibilityHint("Opens the macOS controls for Portrait blur and Background Replacement images")
+                cameraEffectsControl(isCompact: isCompact)
             }
-
-            Button {
-                coordinator.toggleMouseFollowZoom()
-            } label: {
-                recordingControlLabel(
-                    coordinator.isMouseFollowZoomActive
-                        ? "Stop Mouse Zoom · \(coordinator.liveMouseFollowZoomScaleTitle)"
-                        : "Start Mouse Zoom",
-                    systemImage: coordinator.isMouseFollowZoomActive
-                        ? "cursorarrow.motionlines"
-                        : "plus.magnifyingglass",
-                    isCompact: isCompact
-                )
-            }
-            .buttonStyle(.bordered)
-            .controlSize(isCompact ? .regular : .large)
-            .tint(coordinator.isMouseFollowZoomActive ? .purple : .accentColor)
-            .disabled(coordinator.state != .recording && coordinator.state != .paused)
-            .accessibilityHint("Creates an editable mouse-follow zoom segment in the recording timeline")
-
-            Menu {
-                ForEach(MouseFollowZoomLevel.allCases) { level in
-                    Button {
-                        coordinator.setMouseFollowZoomLevel(level)
-                    } label: {
-                        if coordinator.settings.mouseFollowZoomLevel == level {
-                            Label(level.title, systemImage: "checkmark")
-                        } else {
-                            Text(level.title)
-                        }
-                    }
-                }
-            } label: {
-                recordingControlLabel(
-                    "Zoom Level · \(coordinator.settings.mouseFollowZoomLevel.title)",
-                    systemImage: "plus.magnifyingglass",
-                    isCompact: isCompact
-                )
-            }
-            .menuStyle(.borderlessButton)
-            .controlSize(isCompact ? .regular : .large)
-            .disabled(coordinator.state != .recording && coordinator.state != .paused)
-            .accessibilityLabel("Mouse zoom level")
-            .accessibilityHint("Changes live magnification and starts a new editable effect interval when zoom is active")
-
-            Button {
-                coordinator.stopRecording()
-            } label: {
-                recordingControlLabel(
-                    coordinator.state.stopButtonTitle,
-                    systemImage: "stop.fill",
-                    isCompact: isCompact
-                )
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(isCompact ? .regular : .large)
-            .tint(.red)
-            .disabled(coordinator.state == .stopping)
 
             Button {
                 coordinator.toggleRecordingPause()
@@ -298,8 +235,165 @@ struct MonitorView: View {
             .buttonStyle(.bordered)
             .controlSize(isCompact ? .regular : .large)
             .disabled(coordinator.state != .recording && coordinator.state != .paused)
+
+            Button {
+                coordinator.requestStopRecording()
+            } label: {
+                recordingControlLabel(
+                    coordinator.state.stopButtonTitle,
+                    systemImage: "stop.fill",
+                    isCompact: isCompact
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(isCompact ? .regular : .large)
+            .tint(.red)
+            .disabled(coordinator.state == .stopping)
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .buttonBorderShape(.capsule)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func mouseFollowZoomControl(isCompact: Bool) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                coordinator.toggleMouseFollowZoom()
+            } label: {
+                recordingControlLabel(
+                    "Mouse Zoom · \(coordinator.liveMouseFollowZoomScaleTitle)",
+                    systemImage: coordinator.isMouseFollowZoomActive
+                        ? "cursorarrow.motionlines"
+                        : "plus.magnifyingglass",
+                    isCompact: isCompact
+                )
+            }
+            .buttonStyle(.bordered)
+            .controlSize(isCompact ? .regular : .large)
+            .tint(coordinator.isMouseFollowZoomActive ? .green : nil)
+            .accessibilityValue(coordinator.isMouseFollowZoomActive ? "On" : "Off")
+            .accessibilityHint("Toggles the editable mouse-follow zoom effect")
+
+            Button {
+                isShowingMouseZoomControls.toggle()
+            } label: {
+                Image(systemName: "chevron.down")
+                    .frame(minWidth: isCompact ? 22 : 28, minHeight: isCompact ? 28 : 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.bordered)
+            .controlSize(isCompact ? .regular : .large)
+            .tint(coordinator.isMouseFollowZoomActive ? .green : nil)
+            .accessibilityLabel("Change Mouse Zoom Level")
+            .accessibilityHint("Opens the mouse zoom level controls")
+            .popover(isPresented: $isShowingMouseZoomControls, arrowEdge: .trailing) {
+                mouseZoomControlsPopover
+            }
+        }
+        .buttonBorderShape(.capsule)
+        .disabled(coordinator.state != .recording && coordinator.state != .paused)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var mouseZoomControlsPopover: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Label("Mouse Zoom", systemImage: "cursorarrow.motionlines")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    isShowingMouseZoomControls = false
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Close Mouse Zoom Controls")
+                .keyboardShortcut(.cancelAction)
+            }
+
+            Picker(
+                "Zoom level",
+                selection: Binding(
+                    get: { coordinator.settings.mouseFollowZoomLevel },
+                    set: { coordinator.setMouseFollowZoomLevel($0) }
+                )
+            ) {
+                ForEach(MouseFollowZoomLevel.allCases) { level in
+                    Text(level.title).tag(level)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.radioGroup)
+        }
+        .padding(14)
+        .frame(width: 176)
+    }
+
+    private func cameraEffectsControl(isCompact: Bool) -> some View {
+        Button {
+            isShowingCameraEffects.toggle()
+        } label: {
+            recordingControlLabel(
+                "Camera Effects",
+                systemImage: "person.crop.rectangle",
+                isCompact: isCompact
+            )
+        }
+        .buttonStyle(.bordered)
+        .controlSize(isCompact ? .regular : .large)
+        .disabled(!coordinator.canOpenCameraVideoEffects)
+        .popover(isPresented: $isShowingCameraEffects, arrowEdge: .trailing) {
+            cameraEffectsPopover
+        }
+        .accessibilityHint("Opens the native macOS camera controls")
+        .help("Camera Effects")
+    }
+
+    private var cameraEffectsPopover: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Label("Camera Effects", systemImage: "person.crop.rectangle")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    isShowingCameraEffects = false
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Close Camera Effects")
+                .keyboardShortcut(.cancelAction)
+            }
+
+            Text("Reccy uses the effects built into macOS, so the live preview and the independent camera track always match.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                coordinator.openCameraVideoEffects()
+            } label: {
+                Label("Open macOS Camera Effects…", systemImage: "switch.2")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(!coordinator.canOpenCameraVideoEffects)
+
+            Text("Press Escape or click outside the macOS panel when finished.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("Done") {
+                    isShowingCameraEffects = false
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 360)
     }
 
     private func recordingControlLabel(

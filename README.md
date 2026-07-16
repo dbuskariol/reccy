@@ -2,7 +2,7 @@
 
 Reccy is a native screen recorder and non-destructive multitrack editor for macOS 26. It combines ScreenCaptureKit capture, an optional native camera track with system video effects, separate system and microphone audio, live mouse-follow zoom, importable media tracks, a first-class timeline, compact exports, and fast menu-bar controls in one focused Mac app.
 
-![Reccy capture workspace](Documentation/Screenshots/capture-workspace-0.3.2.jpg)
+![Reccy capture workspace](Documentation/Screenshots/capture-workspace-0.3.4.png)
 
 ## Capture the right thing
 
@@ -24,9 +24,9 @@ Every mode preserves its approved geometry end to end: displays keep their full 
 
 ## Monitor without guessing
 
-![Reccy live recording monitor](Documentation/Screenshots/live-monitor-0.3.2.jpg)
+![Reccy live recording monitor](Documentation/Screenshots/live-monitor-0.3.4.png)
 
-Monitor shows the exact incoming screen and camera pictures prepared for the writer during the countdown and throughout recording, plus elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Change or toggle mouse-follow zoom, open macOS camera effects, pause, resume, or stop from this window while it remains open on another display.
+Monitor shows the exact incoming screen and camera pictures prepared for the writer during the countdown and throughout recording, plus elapsed time, committed file size, resolution, frame rate, recording state, separate rolling waveforms, and live source-aligned text for system audio and microphone input. Change or toggle mouse-follow zoom from one full-width native split control, review camera-effect state in a dismissible Reccy popover before opening Apple's authoritative Video Effects panel, or pause, resume, and stop while this window remains open on another display.
 
 ## Transcribe privately on device
 
@@ -41,7 +41,7 @@ Transcript sidecars are written atomically beside their recordings as `.reccytra
 
 ## Edit without flattening the recording
 
-![Reccy multitrack timeline](Documentation/Screenshots/editor-timeline-0.3.2.jpg)
+![Reccy multitrack timeline](Documentation/Screenshots/editor-timeline-0.3.4.png)
 
 Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen video, camera video, system audio, microphone audio, voiceover takes, and imported media stay independent, editable, and removable.
 
@@ -60,12 +60,13 @@ Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen 
 - Select each empty video segment independently and render it as black, the previous held frame, or the next held frame.
 - Edit mouse-follow zooms on their own effect lane: add or delete a segment, resize either boundary, change its magnification, and preview or export the same recorded pointer path while the camera and captions remain anchored.
 - Step the preview with Control–Left/Right, nudge a selected clip by one frame with Option–Left/Right, or use equivalent VoiceOver custom actions for clip, gap-fill, and camera-layout commands.
+- Scroll the track stack vertically without separating its headers from its clips; the native toolbar remains in its own fixed row at every supported window size.
 
 ## A useful recording library
 
-![Reccy recording library](Documentation/Screenshots/library-0.3.2.jpg)
+![Reccy recording library](Documentation/Screenshots/library-0.3.4.png)
 
-The Library combines a compact recording browser with a native, source-aspect preview, saved poster artwork, waveform scrubber, camera, imported-video, and caption overlays, source and application metadata, camera and audio-track details, resolution, frame rate, codec, dynamic range, pointer settings, and direct Edit, Export, source-master Share, Reveal, and Trash actions. Direct Library export builds the same saved project as preview and Editor, so overlay placement, captions, timeline edits, imported media, and the audible mix cannot disappear from the delivery file.
+The Library combines a compact recording browser with a native, source-aspect preview, saved poster artwork, waveform scrubber, camera, imported-video, and caption overlays, source and application metadata, camera and audio-track details, resolution, frame rate, codec, dynamic range, pointer settings, and direct Edit, Export, source-master Share, Reveal, and Trash actions. Use Command-click, Shift-click, Command-Shift-click, or Command-A to select recordings, then move the complete selection to Trash through one count-aware native confirmation; clicking outside the browser rows clears the actionable selection. Direct Library export builds the same saved project as preview and Editor, so overlay placement, captions, timeline edits, imported media, and the audible mix cannot disappear from the delivery file.
 
 Delivery presets cover the common cases without turning export into a codec control panel:
 
@@ -82,8 +83,8 @@ Reccy checks each preset against the actual recording or timeline, estimates wor
 
 <table>
   <tr>
-    <td width="48%"><img src="Documentation/Screenshots/menu-bar-recording-0.3.2.jpg" alt="Active Reccy menu-bar recorder"></td>
-    <td width="52%"><img src="Documentation/Screenshots/settings-permissions-0.3.2.jpg" alt="Reccy permission settings"></td>
+    <td width="48%"><img src="Documentation/Screenshots/menu-bar-recording-0.3.4.png" alt="Active Reccy menu-bar recorder"></td>
+    <td width="52%"><img src="Documentation/Screenshots/settings-permissions-0.3.4.png" alt="Reccy permission settings"></td>
   </tr>
   <tr>
     <td><strong>Menu bar</strong><br>Start a source-aware capture, monitor timer, safe-write status, and separate audio levels, toggle mouse-follow zoom, pause or stop, open Monitor, and return to recent recordings.</td>
@@ -125,7 +126,7 @@ Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repo
 scripts/verify-ci.sh
 ```
 
-The current suite exercises resolution policy, portrait and Retina sources, camera settings compatibility, camera-tail alignment after a material interruption, independent video-track composition, canonical preview track binding, overlay layout rendering, countdown/writer separation, granular live mouse-zoom changes, poster-frame persistence, bounded still-image proxies, linked video/audio imports, caption cue generation and timed burn-in export, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, startup-failure cleanup, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, cancellation, transcript persistence/projection/correction/export, exact-track PCM extraction, and real post-recording plus live inference with every installed transcription engine. Model-backed tests skip cleanly on machines where the corresponding optional language asset or Whisper model is not installed. Installed-app Computer Use QA covers every workspace plus the real Library transport, source-aspect preview, saved caption and poster overlays, native editor toolbar, media import, caption editing, transcript search and seeking, accessible editor actions, menu-bar recording controls, live mouse-follow zoom, camera effects, and end-to-end export progress.
+The current suite exercises resolution policy, portrait and Retina sources, camera settings compatibility, camera-tail alignment after a material interruption, independent video-track composition, canonical preview track binding, overlay layout rendering, countdown/writer separation, granular live mouse-zoom changes, poster-frame persistence, bounded still-image proxies, linked video/audio imports, Library multi-selection and batch-trash policy, caption cue generation and timed burn-in export, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, startup-failure cleanup, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, cancellation, transcript persistence/projection/correction/export, exact-track PCM extraction, and real post-recording plus live inference with every installed transcription engine. Model-backed tests skip cleanly on machines where the corresponding optional language asset or Whisper model is not installed. Installed-app Computer Use QA covers every workspace plus the real Library transport, source-aspect preview, saved caption and poster overlays, native editor toolbar, media import, caption editing, transcript search and seeking, accessible editor actions, menu-bar recording controls, live mouse-follow zoom, camera effects, and end-to-end export progress.
 
 ### Permission identity matters
 
