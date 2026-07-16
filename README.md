@@ -1,6 +1,6 @@
 # Reccy
 
-Reccy is a native screen recorder and non-destructive multitrack editor for macOS 26. It combines ScreenCaptureKit capture, an optional native camera track, separate system and microphone audio, live mouse-follow zoom, a first-class timeline, compact exports, and fast menu-bar controls in one focused Mac app.
+Reccy is a native screen recorder and non-destructive multitrack editor for macOS 26. It combines ScreenCaptureKit capture, an optional native camera track with system video effects, separate system and microphone audio, live mouse-follow zoom, importable media tracks, a first-class timeline, compact exports, and fast menu-bar controls in one focused Mac app.
 
 ![Reccy capture workspace](Documentation/Screenshots/capture-workspace-0.3.2.jpg)
 
@@ -11,11 +11,12 @@ Choose an entire display, every window from one application, or one specific win
 Every mode preserves its approved geometry end to end: displays keep their full extent, applications fit their visible-window envelope, individual windows retain their native aspect, and portions use the exact selected rectangle. Monitor, screenshots, source recordings, Library, Editor, mouse-follow zoom, and exports all consume that same source shape.
 
 - Record a chosen built-in, external, Continuity, or Desk View camera as a separate editable video track.
+- Use macOS Video Effects for supported cameras, including native Portrait background blur and a chosen Background Replacement image, without sending camera frames to another process or service.
 - If a camera stops delivering frames mid-recording, preserve the complete screen and audio program, hold the final camera frame to keep the editable lane aligned, and surface a completion warning.
 - Record system audio and a chosen microphone as separate editable tracks.
-- Monitor the live picture, elapsed time, safe-write status, and detailed audio levels from another display.
+- See the approved screen, camera, and incoming audio before the countdown completes, then monitor elapsed time, safe-write status, and detailed levels from another display.
 - Show or hide the pointer, highlight clicks, exclude Reccy's audio, and pause without leaving dead time in the result.
-- Follow the pointer with a live 1.5×–4× zoom, start or stop it from Monitor, the menu bar, or a global shortcut, and retain each enabled interval as a non-destructive edit rather than cropping the source recording.
+- Follow the pointer with a live 1.25×–6× zoom, change magnification or start and stop it from Monitor, the menu bar, or a global shortcut, and retain every interval and level change as a non-destructive edit rather than cropping the source recording.
 - Capture native resolution or cap output at 4K, 1440p, 1080p, or 720p without upscaling smaller sources.
 - Choose 24, 30, or 60 fps and efficient HEVC, compatible H.264, or editing-oriented MOV capture.
 - Record HDR10 or save native HEIC, JPEG, and PNG screenshots in SDR or HDR.
@@ -25,7 +26,7 @@ Every mode preserves its approved geometry end to end: displays keep their full 
 
 ![Reccy live recording monitor](Documentation/Screenshots/live-monitor-0.3.2.jpg)
 
-Monitor shows the exact incoming screen and camera pictures feeding the writer, elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Toggle mouse-follow zoom, pause, resume, or stop from this window while it remains open on another display.
+Monitor shows the exact incoming screen and camera pictures prepared for the writer during the countdown and throughout recording, plus elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Change or toggle mouse-follow zoom, open macOS camera effects, pause, resume, or stop from this window while it remains open on another display.
 
 ## Transcribe privately on device
 
@@ -42,14 +43,16 @@ Transcript sidecars are written atomically beside their recordings as `.reccytra
 
 ![Reccy multitrack timeline](Documentation/Screenshots/editor-timeline-0.3.2.jpg)
 
-Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen video, camera video, system audio, microphone audio, and voiceover takes stay independent, editable, and removable.
+Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen video, camera video, system audio, microphone audio, voiceover takes, and imported media stay independent, editable, and removable.
 
 - Click or drag the ruler to seek; drag clips to move them with live preview updates.
 - Reorder clips magnetically, snap to useful boundaries, or link matching audio and video when desired.
 - Trim either edge, split one clip, split every lane, delete independently, or close time across the project.
-- Undo and redo clip, track-audio, camera-layout, caption, and voiceover edits through the standard macOS Edit commands and keyboard shortcuts.
+- Undo and redo clip, track-audio, overlay-layout, caption, poster-frame, import, and voiceover edits through the standard macOS Edit commands and keyboard shortcuts.
 - Keep every committed edit atomically autosaved in the project package; source media is never rewritten.
-- Move and resize the camera directly over the player with a pointer or equivalent VoiceOver actions; its normalized layout is reused by preview and export.
+- Move and resize camera and imported video overlays directly over the player with a pointer or equivalent VoiceOver actions; normalized layouts are reused by preview and export.
+- Import movies, audio, or images with Command-I. Reccy copies them into the project package, keeps movie audio on a separate linked lane, and represents a still image with a bounded proxy whose duration remains freely editable.
+- Choose the current composed frame as the project's poster; Editor, Library playback, and Library artwork all reopen on that same saved frame.
 - Generate readable timed captions from the source-aligned transcript, correct recognized text, edit caption copy, or add a manual cue at the playhead.
 - Preview the same caption placement in Editor and Library, then burn it into video through native AVFoundation export rendering.
 - Record voiceover at the playhead with an explicit input-device picker.
@@ -62,7 +65,7 @@ Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen 
 
 ![Reccy recording library](Documentation/Screenshots/library-0.3.2.jpg)
 
-The Library combines a compact recording browser with a native, source-aspect preview, waveform scrubber, saved camera and caption overlays, source and application metadata, camera and audio-track details, resolution, frame rate, codec, dynamic range, pointer settings, and direct Edit, Export, source-master Share, Reveal, and Trash actions. Direct Library export builds the same saved project as preview and Editor, so camera placement, captions, timeline edits, and the audible mix cannot disappear from the delivery file.
+The Library combines a compact recording browser with a native, source-aspect preview, saved poster artwork, waveform scrubber, camera, imported-video, and caption overlays, source and application metadata, camera and audio-track details, resolution, frame rate, codec, dynamic range, pointer settings, and direct Edit, Export, source-master Share, Reveal, and Trash actions. Direct Library export builds the same saved project as preview and Editor, so overlay placement, captions, timeline edits, imported media, and the audible mix cannot disappear from the delivery file.
 
 Delivery presets cover the common cases without turning export into a codec control panel:
 
@@ -100,7 +103,7 @@ Reccy intentionally targets macOS 26 only. There are no availability branches or
 | Capture | `SCStream` screen/system-audio/microphone plus native `AVCaptureSession` camera frames |
 | Recording | `AVAssetWriter`, AAC, HEVC/H.264, VideoToolbox color metadata |
 | Live monitor | IOSurface-backed screen and camera presentation with latest-frame coalescing and no extra capture sessions |
-| Timeline | Serializable media lanes, mouse-follow zoom effects, and editable timed captions materialized as `AVMutableComposition` and `AVVideoComposition` |
+| Timeline | Serializable recorded and imported media lanes, poster frames, mouse-follow zoom effects, and editable timed captions materialized as `AVMutableComposition` and `AVVideoComposition` |
 | Playback and export | AVKit, shared SwiftUI overlays, Core Animation offline caption rendering, `AVAudioMix`, and `AVAssetExportSession` |
 | Transcription | SpeechAnalyzer; WhisperKit 1.0; source-track `.reccytranscript` sidecars |
 | Waveforms | Shared Reccy rendering backed by [DSWaveformImage](https://github.com/dmrschmidt/DSWaveformImage) |
@@ -122,7 +125,7 @@ Open `Reccy.xcodeproj`, select the Reccy scheme, and run on **My Mac**. The repo
 scripts/verify-ci.sh
 ```
 
-The current suite exercises resolution policy, portrait and Retina sources, camera settings compatibility, camera-tail alignment after a material interruption, independent video-track composition, canonical preview track binding, camera layout rendering, mouse-follow capture sampling, effect editing and native transform rendering, caption cue generation and timed burn-in export, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, startup-failure cleanup, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, cancellation, transcript persistence/projection/correction/export, exact-track PCM extraction, and real post-recording plus live inference with every installed transcription engine. Model-backed tests skip cleanly on machines where the corresponding optional language asset or Whisper model is not installed. Installed-app Computer Use QA covers every workspace plus the real Library transport, source-aspect preview, saved caption overlays, native editor toolbar, caption editing, transcript search and seeking, accessible editor actions, menu-bar recording controls, live mouse-follow zoom, and end-to-end export progress.
+The current suite exercises resolution policy, portrait and Retina sources, camera settings compatibility, camera-tail alignment after a material interruption, independent video-track composition, canonical preview track binding, overlay layout rendering, countdown/writer separation, granular live mouse-zoom changes, poster-frame persistence, bounded still-image proxies, linked video/audio imports, caption cue generation and timed burn-in export, independent and linked movement, magnetic reorder, snapping, trimming, split and ripple operations, pause-time removal, track-specific waveforms, persistent per-gap fill choices, held-frame composition, manifests, bitrate-aware storage policy, cross-process recording leases, startup-failure cleanup, interrupted-file recovery, all ten export presets, audio-mix rendering, safe replacement, cancellation, transcript persistence/projection/correction/export, exact-track PCM extraction, and real post-recording plus live inference with every installed transcription engine. Model-backed tests skip cleanly on machines where the corresponding optional language asset or Whisper model is not installed. Installed-app Computer Use QA covers every workspace plus the real Library transport, source-aspect preview, saved caption and poster overlays, native editor toolbar, media import, caption editing, transcript search and seeking, accessible editor actions, menu-bar recording controls, live mouse-follow zoom, camera effects, and end-to-end export progress.
 
 ### Permission identity matters
 
@@ -148,4 +151,4 @@ Capture, editing, projects, thumbnails, transcription inference, transcript text
 
 ## Status
 
-Reccy is in active development at version 0.3.3. The core capture, monitoring, transcription, library, editing, export, settings, menu-bar, update, storage-reserve, accessibility-navigation, and interrupted-recovery architectures are implemented. Local signed acceptance covers the complete source/audio matrix, a ten-minute bounded-drift hardware-encoder run, HDR10 capture, Apple-silicon mixed-audio delivery, independently validated Desk View and standard iPhone Continuity Camera recordings, a complete spoken VoiceOver pass, and large-monitor application capture whose exact fitted extent remains consistent across Monitor, the source recording, Library, Editor, export geometry, and editable mouse-follow zoom. The post-fix Continuity Camera run produced independent screen and camera video plus system and microphone audio with 80 milliseconds maximum track-end drift; Library, Editor, and the rendered delivery retained the live camera picture through 35.0 seconds. A standard Continuity Camera run had previously exposed an early camera-track tail; the writer now aligns a material tail with a held final frame and surfaces a warning, with focused and full-suite regression coverage. HDR screenshots require macOS to provide an HDR representation for the chosen source; when it does not, Reccy keeps the source selected and offers an explicit SDR-or-another-display recovery instead of silently writing mislabeled SDR media. Remaining cross-environment acceptance requires a signed Intel delivery export, controlled external/multichannel microphone signals, and separate SDR/HDR display playback.
+Reccy is in active development at version 0.3.4. The core capture, pre-countdown monitoring, local live transcription, system camera effects, library, poster-frame, imported-media, editing, export, settings, menu-bar, update, storage-reserve, accessibility-navigation, and interrupted-recovery architectures are implemented. Prior local signed acceptance covers the complete source/audio matrix, a ten-minute bounded-drift hardware-encoder run, HDR10 capture, Apple-silicon mixed-audio delivery, independently validated Desk View and standard iPhone Continuity Camera recordings, a complete spoken VoiceOver pass, and large-monitor application capture whose exact fitted extent remains consistent across Monitor, the source recording, Library, Editor, export geometry, and editable mouse-follow zoom. The post-fix Continuity Camera run produced independent screen and camera video plus system and microphone audio with 80 milliseconds maximum track-end drift; Library, Editor, and the rendered delivery retained the live camera picture through 35.0 seconds. HDR screenshots require macOS to provide an HDR representation for the chosen source; when it does not, Reccy keeps the source selected and offers an explicit SDR-or-another-display recovery instead of silently writing mislabeled SDR media. Remaining cross-environment acceptance requires a signed Intel delivery export, controlled external/multichannel microphone signals, and separate SDR/HDR display playback.
