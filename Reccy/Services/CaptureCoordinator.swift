@@ -401,12 +401,15 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             return
         }
 
-        guard let pickerMode = kind.pickerMode, let contentStyle = kind.contentStyle else {
+        guard let pickerMode = kind.pickerMode,
+              let contentStyle = kind.contentStyle,
+              let pickerSelectionPrompt = kind.pickerSelectionPrompt
+        else {
             isSelectingSource = false
             handleFailure(CaptureError.sourceUnavailable)
             return
         }
-        sourceSelectionMessage = "Choose a \(kind.title.lowercased()) in the macOS picker."
+        sourceSelectionMessage = pickerSelectionPrompt
 
         var pickerConfiguration = SCContentSharingPickerConfiguration()
         pickerConfiguration.allowedPickerModes = pickerMode
