@@ -1,35 +1,13 @@
-# Reccy 0.3.2
+# Reccy 0.3.3
 
-This production-readiness release continues Reccy's native macOS polish and reliability work:
+This focused production-readiness update makes selected-source geometry consistent from live capture through final delivery:
 
-- Adds live mouse-follow zoom at 1.5×–4× with start-enabled and level defaults, Monitor and menu-bar controls, and a configurable global shortcut that can start or stop the effect during recording or pause.
-- Preserves every live mouse-follow interval as a non-destructive Editor effect with its recorded pointer path, editable magnification, resizable boundaries, Split All and ripple-delete behavior, undo, and VoiceOver actions.
-- Renders the same mouse-follow zoom in Monitor, Library, Editor, and delivery export through bounded native AVFoundation transform ramps while retaining the full-frame source and keeping camera video and captions anchored.
-- Gives Monitor a taller, reset default overview pane and an adaptive native status card so recording metadata and all three controls remain visible without clipping at supported window sizes.
-- Gives every global-shortcut recorder a unique assistive label so VoiceOver users can identify the action they are assigning.
-- Makes the Editor camera overlay fully operable with VoiceOver actions for selection, movement, aspect-preserving sizing, and reset instead of requiring pointer-only dragging.
-- Gives remaining icon-only folder, search, and transcript-export controls explicit spoken names, and removes the duplicated app name from update status.
-- Consolidates Monitor recording state, elapsed time, and Pause/Stop controls into one authoritative status card instead of duplicating them in the page header and toolbar.
-- Removes the ambiguous duplicate Choose Source footer action and aligns repeated Library command names across the recording row menu and detail pane.
-- Removes duplicate Open Reccy and Library actions from the menu-bar panel while retaining their always-visible routes.
-- Uses one permission and transcription readiness decision across the main recorder, menu-bar recorder, global shortcut, and Recording menu so blocked captures cannot start through a secondary command path.
-- Makes unavailable, empty, recovered, and no-search-result Library states durable and actionable without stale previews or duplicate Finder actions.
-- Streamlines the autosaving Editor around one Export action, exposes selected tools and distinct transcript actions to assistive technology, and clarifies transcript-to-caption creation.
-- Stops Library and Editor playback clocks when media is paused instead of waking the main actor continuously in idle workspaces.
-- Removes the avoidable duplicate-architecture destination warning from local Debug and Release verification.
-- Keeps local verification usable while preparing the next version directly from a tagged release commit, without weakening clean release/tag enforcement.
-- Verifies screenshots were written before exposing Share, with an atomic native-image fallback when ScreenCaptureKit does not persist its requested file.
-- Adds native Undo/Redo coverage across timeline clips, audio controls, camera layout, captions, and voiceover edits.
-- Constrains Whisper transcription to the real audio duration, removes padded silence/no-audio placeholders, and sanitizes older sidecars when they are loaded.
-- Treats a valid silent transcription as “No speech detected” instead of a failed job, and keeps that neutral result durable across relaunches.
-- Renders independent system, microphone, and timeline audio into one validated delivery program so ordinary players cannot silently select only one source.
-- Makes direct Library export render the same saved camera layout, edits, captions, and audio mix visible in Library and Editor instead of exporting the raw screen track alone.
-- Labels native sharing as a source-recording handoff so it cannot be confused with a rendered delivery export.
-- Cleans up startup-only media and recovery metadata after a camera or capture source fails before the first complete video frame, preventing a false interrupted-recording warning while preserving real in-progress writer failures for recovery.
-- Preserves a complete, aligned source master when an optional camera stops mid-recording by holding its final frame to the recording boundary and warning the user; an unwriteable camera tail now follows recovery instead of being silently saved with severe track drift.
-- Passes signed post-fix standard iPhone Continuity Camera acceptance with independent screen, camera, system-audio, and microphone tracks within 80 milliseconds of one another at the end, plus a rendered delivery that retains the live camera picture through the final sampled frame.
-- Keeps one macOS content-picker observer for the recorder lifetime so repeated source selections and native cancellations continue delivering callbacks instead of eventually leaving the picker workflow waiting forever.
-- Requests both ScreenCaptureKit representations for HDR screenshots, reports an actionable limitation instead of silently substituting SDR when macOS provides no HDR image, and keeps the approved source selected if a screenshot-only operation fails.
-- Labels non-publishing release manifests as unnotarized rehearsals and records whether their source worktree was clean, preventing rehearsal provenance from being mistaken for a commit-exact final release.
+- Fits application capture to the selected process's visible windows on the approved display instead of recording a display-sized black canvas with the application offset inside it.
+- Uses one canonical source rectangle for output dimensions, Monitor, screenshots, saved media, Library and Editor playback, export, and mouse-follow zoom.
+- Restores a true identity transform whenever live mouse-follow zoom is off, preventing the ordinary 1× preview from remaining translated or clipped by its last pointer position.
+- Maps recorded mouse-follow motion into the exact application crop encoded by the source recording, so the editable effect targets the same content shown live.
+- Preserves the camera device's negotiated native aspect ratio by configuring its writer track from the first delivered pixel buffer, avoiding stretched external-camera video.
+- Adds regression coverage for display, application, window, and portion extents, application mouse mapping, live zoom reset, and active zoom positioning.
+- Passes signed large-monitor application-capture acceptance across Monitor, saved HEVC media, Library, Editor, and the editable Mouse Zoom effect, plus native 1920×1080 external-camera aspect acceptance.
 
 Requires macOS 26 or later. Download the notarized DMG for a standard drag-to-Applications install, or the signed ZIP for Sparkle-compatible deployment. `SHA256SUMS` and `release.json` provide independent artifact integrity and provenance metadata.
