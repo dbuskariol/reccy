@@ -188,6 +188,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var recordingLease: RecordingSessionLease?
     private var activeOutputURL: URL?
     private var activeRecordingManifest: RecordingManifest?
+    private var activeCaptureGeometry: CaptureStreamGeometry?
     private var activeTranscriptionConfiguration: CaptureTranscriptionConfiguration?
     private var mouseFollowZoomCapture = MouseFollowZoomCaptureSession()
     private var mouseFollowZoomSourceMapper: MouseFollowZoomSourceMapper?
@@ -817,7 +818,12 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             previewPipeline.clear()
             cameraPreviewPipeline.clear()
 
-            let streamConfiguration = makeStreamConfiguration(for: filter)
+            let captureGeometry = captureGeometry(for: filter)
+            let streamConfiguration = makeStreamConfiguration(
+                for: filter,
+                geometry: captureGeometry
+            )
+            activeCaptureGeometry = captureGeometry
             let options = MultitrackRecordingOptions(
                 width: streamConfiguration.width,
                 height: streamConfiguration.height,
@@ -952,7 +958,10 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
-    private func makeStreamConfiguration(for filter: SCContentFilter) -> SCStreamConfiguration {
+    private func makeStreamConfiguration(
+        for filter: SCContentFilter,
+        geometry: CaptureStreamGeometry
+    ) -> SCStreamConfiguration {
         let configuration: SCStreamConfiguration
         if settings.useHDR {
             configuration = SCStreamConfiguration(preset: .captureHDRRecordingPreservedSDRHDR10)
@@ -961,7 +970,6 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             configuration.pixelFormat = kCVPixelFormatType_32BGRA
         }
 
-        let geometry = captureGeometry(for: filter)
         let size = settings.resolution.outputSize(
             contentRect: geometry.contentRect,
             pointPixelScale: CGFloat(filter.pointPixelScale)
@@ -991,11 +999,20 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     }
 
     private func captureGeometry(for filter: SCContentFilter) -> CaptureStreamGeometry {
-        CaptureStreamGeometry.resolve(
+        let applicationWindowFrames: [CGRect]
+        if selectedSourceKind == .application {
+            applicationWindowFrames = CaptureWindowGeometry.visibleApplicationFrames(
+                processIDs: Set(filter.includedApplications.map(\.processID))
+            )
+        } else {
+            applicationWindowFrames = []
+        }
+        return CaptureStreamGeometry.resolve(
             kind: selectedSourceKind,
             filterContentRect: filter.contentRect,
             displayFrames: filter.includedDisplays.map(\.frame),
-            selectedSourceRect: selectedSourceRect
+            selectedSourceRect: selectedSourceRect,
+            applicationWindowFrames: applicationWindowFrames
         )
     }
 
@@ -1271,12 +1288,24 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         microphoneAudioLevel = 0
         systemAudioHistory.removeAll(keepingCapacity: true)
         microphoneAudioHistory.removeAll(keepingCapacity: true)
+        activeCaptureGeometry = nil
         resetMouseFollowZoomCapture()
     }
 
     private func beginMouseFollowZoomCapture() {
         mouseFollowZoomCapture = MouseFollowZoomCaptureSession()
-        mouseFollowZoomSourceMapper = selectedSource.map(MouseFollowZoomSourceMapper.init)
+        mouseFollowZoomSourceMapper = selectedSource.map { source in
+            let fixedCaptureBounds: CGRect?
+            if source.kind == .application {
+                fixedCaptureBounds = activeCaptureGeometry?.globalRect
+            } else {
+                fixedCaptureBounds = nil
+            }
+            return MouseFollowZoomSourceMapper(
+                source: source,
+                fixedCaptureBounds: fixedCaptureBounds
+            )
+        }
         let position = currentMouseFollowZoomPosition()
         mouseFollowZoomPosition = position
         if settings.startsWithMouseFollowZoom {

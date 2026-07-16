@@ -9,16 +9,26 @@ import Foundation
 @MainActor
 struct MouseFollowZoomSourceMapper {
     private let source: CaptureSourceDescriptor
+    private let fixedCaptureBounds: CGRect?
     private var cachedBounds: CGRect?
     private var lastWindowRefresh = Date.distantPast
 
-    init(source: CaptureSourceDescriptor) {
+    init(source: CaptureSourceDescriptor, fixedCaptureBounds: CGRect? = nil) {
         self.source = source
-        cachedBounds = Self.sourceBounds(for: source)
+        self.fixedCaptureBounds = fixedCaptureBounds.flatMap(Self.validBounds)
+        cachedBounds = self.fixedCaptureBounds ?? Self.sourceBounds(for: source)
     }
 
     mutating func currentPosition(now: Date = Date()) -> CGPoint {
-        if source.kind == .application || source.kind == .window,
+        guard let pointer = CGEvent(source: nil)?.location else {
+            return CGPoint(x: 0.5, y: 0.5)
+        }
+        return position(for: pointer, now: now)
+    }
+
+    mutating func position(for pointer: CGPoint, now: Date = Date()) -> CGPoint {
+        if fixedCaptureBounds == nil,
+           (source.kind == .application || source.kind == .window),
            now.timeIntervalSince(lastWindowRefresh) >= 0.5
         {
             cachedBounds = Self.sourceBounds(for: source) ?? cachedBounds
@@ -26,8 +36,7 @@ struct MouseFollowZoomSourceMapper {
         }
         guard let bounds = cachedBounds,
               bounds.width > 0,
-              bounds.height > 0,
-              let pointer = CGEvent(source: nil)?.location
+              bounds.height > 0
         else { return CGPoint(x: 0.5, y: 0.5) }
         return Self.normalizedPosition(pointer: pointer, sourceBounds: bounds)
     }
@@ -111,5 +120,16 @@ struct MouseFollowZoomSourceMapper {
         bounds.height > 0
         else { return nil }
         return bounds
+    }
+
+    private static func validBounds(_ bounds: CGRect) -> CGRect? {
+        guard bounds.minX.isFinite,
+              bounds.minY.isFinite,
+              bounds.width.isFinite,
+              bounds.height.isFinite,
+              bounds.width > 0,
+              bounds.height > 0
+        else { return nil }
+        return bounds.standardized
     }
 }

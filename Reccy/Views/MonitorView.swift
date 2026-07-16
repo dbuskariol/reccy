@@ -454,21 +454,49 @@ private struct MouseFollowZoomPreview: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let clampedScale = min(max(scale, 1), 4)
-            let clampedFocus = CGPoint(
-                x: min(max(focus.x, 0), 1),
-                y: min(max(focus.y, 0), 1)
+            let transform = MouseFollowZoomPreviewTransform.resolve(
+                scale: scale,
+                focus: focus,
+                viewportSize: geometry.size
             )
             CapturePreviewView(pipeline: pipeline)
-                .scaleEffect(clampedScale)
-                .offset(
-                    x: (0.5 - clampedFocus.x) * geometry.size.width * clampedScale,
-                    y: (0.5 - clampedFocus.y) * geometry.size.height * clampedScale
-                )
-                .animation(.smooth(duration: 0.14), value: clampedFocus)
-                .animation(.smooth(duration: 0.2), value: clampedScale)
+                .scaleEffect(transform.scale)
+                .offset(transform.offset)
+                .animation(.smooth(duration: 0.14), value: transform.offset)
+                .animation(.smooth(duration: 0.2), value: transform.scale)
         }
         .clipped()
+    }
+}
+
+/// Resolves the live effect independently from the capture surface. An
+/// inactive 1x effect must be the identity transform regardless of the last
+/// sampled pointer position; otherwise an ended zoom leaves the source shifted
+/// and clipped even though the recording is no longer magnified.
+nonisolated struct MouseFollowZoomPreviewTransform: Equatable, Sendable {
+    let scale: CGFloat
+    let offset: CGSize
+
+    static func resolve(
+        scale: Double,
+        focus: CGPoint,
+        viewportSize: CGSize
+    ) -> MouseFollowZoomPreviewTransform {
+        let clampedScale = CGFloat(min(max(scale, 1), 4))
+        guard clampedScale > 1 else {
+            return MouseFollowZoomPreviewTransform(scale: 1, offset: .zero)
+        }
+        let clampedFocus = CGPoint(
+            x: min(max(focus.x, 0), 1),
+            y: min(max(focus.y, 0), 1)
+        )
+        return MouseFollowZoomPreviewTransform(
+            scale: clampedScale,
+            offset: CGSize(
+                width: (0.5 - clampedFocus.x) * viewportSize.width * clampedScale,
+                height: (0.5 - clampedFocus.y) * viewportSize.height * clampedScale
+            )
+        )
     }
 }
 
