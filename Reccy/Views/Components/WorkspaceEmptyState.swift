@@ -10,11 +10,21 @@ struct WorkspaceEmptyState: View {
     let title: String
     let systemImage: String
     let description: String
+    let actionTitle: String?
+    let action: (() -> Void)?
 
-    init(_ title: String, systemImage: String, description: String) {
+    init(
+        _ title: String,
+        systemImage: String,
+        description: String,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) {
         self.title = title
         self.systemImage = systemImage
         self.description = description
+        self.actionTitle = actionTitle
+        self.action = action
     }
 
     var body: some View {
@@ -36,6 +46,12 @@ struct WorkspaceEmptyState: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: 420)
+
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+            }
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)

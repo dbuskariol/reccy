@@ -26,6 +26,19 @@ SYMBOLS="$ROOT_DIR/dist/symbols/$BASE_NAME.dSYM.zip"
 CHECKSUMS="$UPDATES_DIR/SHA256SUMS"
 MANIFEST="$UPDATES_DIR/release.json"
 MANIFEST_PLIST="$UPDATES_DIR/.release-manifest.plist"
+SOURCE_COMMIT="$(/usr/bin/git -C "$ROOT_DIR" rev-parse HEAD)"
+SOURCE_STATUS="$(/usr/bin/git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)"
+SOURCE_WORKTREE_CLEAN=true
+ARTIFACT_STATUS=release
+NOTARIZED=true
+
+if [[ -n "$SOURCE_STATUS" ]]; then
+  SOURCE_WORKTREE_CLEAN=false
+fi
+if [[ "${RECCY_ALLOW_UNNOTARIZED_PACKAGE:-0}" == "1" ]]; then
+  ARTIFACT_STATUS=rehearsal
+  NOTARIZED=false
+fi
 
 for artifact in "$ARCHIVE" "$DISK_IMAGE" "$NOTES" "$APPCAST"; do
   [[ -f "$artifact" ]] || reccy_fail "release artifact is missing: $artifact"
@@ -49,15 +62,24 @@ fi
 /bin/rm -f "$MANIFEST" "$MANIFEST_PLIST"
 /usr/bin/plutil -create xml1 "$MANIFEST_PLIST"
 trap '/bin/rm -f "$MANIFEST_PLIST"' EXIT
-/usr/bin/plutil -insert schemaVersion -integer 2 "$MANIFEST_PLIST"
+/usr/bin/plutil -insert schemaVersion -integer 3 "$MANIFEST_PLIST"
 /usr/bin/plutil -insert product -string Reccy "$MANIFEST_PLIST"
+/usr/bin/plutil -insert artifactStatus -string "$ARTIFACT_STATUS" "$MANIFEST_PLIST"
+/usr/bin/plutil -insert notarized -bool "$NOTARIZED" "$MANIFEST_PLIST"
 /usr/bin/plutil -insert bundleIdentifier -string "$RECCY_EXPECTED_BUNDLE_ID" "$MANIFEST_PLIST"
 /usr/bin/plutil -insert version -string "$VERSION" "$MANIFEST_PLIST"
 /usr/bin/plutil -insert build -string "$BUILD" "$MANIFEST_PLIST"
 /usr/bin/plutil -insert minimumSystemVersion -string "$RECCY_EXPECTED_MINIMUM_SYSTEM" "$MANIFEST_PLIST"
 /usr/bin/plutil -insert teamIdentifier -string "$TEAM" "$MANIFEST_PLIST"
-/usr/bin/plutil -insert gitCommit -string "$(/usr/bin/git -C "$ROOT_DIR" rev-parse HEAD)" "$MANIFEST_PLIST"
+/usr/bin/plutil -insert gitCommit -string "$SOURCE_COMMIT" "$MANIFEST_PLIST"
 /usr/bin/plutil -insert createdAt -string "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')" "$MANIFEST_PLIST"
+
+/usr/bin/plutil -insert source -dictionary "$MANIFEST_PLIST"
+/usr/bin/plutil -insert source.commit -string "$SOURCE_COMMIT" "$MANIFEST_PLIST"
+/usr/bin/plutil -insert source.worktreeClean -bool "$SOURCE_WORKTREE_CLEAN" "$MANIFEST_PLIST"
+if [[ -n "${RECCY_RELEASE_TAG:-}" ]]; then
+  /usr/bin/plutil -insert source.releaseTag -string "$RECCY_RELEASE_TAG" "$MANIFEST_PLIST"
+fi
 
 /usr/bin/plutil -insert archive -dictionary "$MANIFEST_PLIST"
 /usr/bin/plutil -insert archive.name -string "$(basename "$ARCHIVE")" "$MANIFEST_PLIST"

@@ -82,6 +82,47 @@ struct TimelineVideoLayout: Codable, Hashable, Sendable {
             height: height
         )
     }
+
+    /// Applies a normalized canvas offset while preserving the overlay size.
+    /// This is shared by direct manipulation and non-pointer editor commands.
+    func movedBy(x deltaX: Double, y deltaY: Double) -> TimelineVideoLayout {
+        let original = clamped()
+        return TimelineVideoLayout(
+            x: original.x + deltaX,
+            y: original.y + deltaY,
+            width: original.width,
+            height: original.height
+        ).clamped()
+    }
+
+    /// Resizes around the overlay center without changing its aspect ratio.
+    /// If the requested size reaches a canvas edge, the box moves only as much
+    /// as needed to remain fully visible.
+    func scaledBy(_ requestedScale: Double, minimumSize: Double = 0.08) -> TimelineVideoLayout {
+        let original = clamped(minimumSize: minimumSize)
+        guard requestedScale.isFinite, requestedScale > 0 else { return original }
+
+        let minimumScale = max(
+            minimumSize / original.width,
+            minimumSize / original.height
+        )
+        let maximumScale = min(
+            1 / original.width,
+            1 / original.height
+        )
+        let scale = min(max(requestedScale, minimumScale), maximumScale)
+        let width = original.width * scale
+        let height = original.height * scale
+        let centerX = original.x + original.width / 2
+        let centerY = original.y + original.height / 2
+
+        return TimelineVideoLayout(
+            x: centerX - width / 2,
+            y: centerY - height / 2,
+            width: width,
+            height: height
+        ).clamped(minimumSize: minimumSize)
+    }
 }
 
 enum TimelineCaptionPlacement: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -299,7 +340,7 @@ struct TimelineLane: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
-    static let currentFormatVersion = 4
+    static let currentFormatVersion = 5
 
     var formatVersion = currentFormatVersion
     var id = UUID()
@@ -309,6 +350,7 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
     var frameRate: Double
     var lanes: [TimelineLane]
     var videoGaps: [TimelineGapSegment]
+    var mouseFollowZoomTrack: MouseFollowZoomTrack?
     var captionTrack: TimelineCaptionTrack?
 
     init(
@@ -316,12 +358,14 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         frameRate: Double = 30,
         lanes: [TimelineLane],
         videoGaps: [TimelineGapSegment] = [],
+        mouseFollowZoomTrack: MouseFollowZoomTrack? = nil,
         captionTrack: TimelineCaptionTrack? = nil
     ) {
         self.name = name
         self.frameRate = max(frameRate, 1)
         self.lanes = lanes
         self.videoGaps = videoGaps
+        self.mouseFollowZoomTrack = mouseFollowZoomTrack
         self.captionTrack = captionTrack
         reconcileVideoGaps()
     }
@@ -338,6 +382,10 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
 
     func videoGap(id: UUID) -> TimelineGapSegment? {
         videoGaps.first(where: { $0.id == id })
+    }
+
+    func mouseFollowZoomSegment(id: UUID) -> MouseFollowZoomSegment? {
+        mouseFollowZoomTrack?.segments.first(where: { $0.id == id })
     }
 
     mutating func setGapFillMode(_ mode: TimelineGapFillMode, gapID: UUID) {
@@ -357,6 +405,10 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
                 }
             }
             lanes[laneIndex].clips = updated.sorted { $0.timelineStart < $1.timelineStart }
+        }
+        if var track = mouseFollowZoomTrack {
+            track.split(at: time, minimumDuration: frameDuration)
+            mouseFollowZoomTrack = track
         }
         reconcileVideoGaps()
         modifiedAt = Date()
@@ -523,8 +575,122 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
                 lanes[laneIndex].clips[clipIndex].timelineStart -= removedDuration
             }
         }
+        if var track = mouseFollowZoomTrack {
+            let projectDuration = duration
+            let minimumDuration = frameDuration
+            track.rippleDelete(
+                timeRange: timeRange,
+                projectDuration: projectDuration,
+                minimumDuration: minimumDuration
+            )
+            mouseFollowZoomTrack = track
+        }
+        if mouseFollowZoomTrack?.segments.isEmpty == true {
+            mouseFollowZoomTrack = nil
+        }
         reconcileVideoGaps()
         modifiedAt = Date()
+    }
+
+    @discardableResult
+    mutating func addMouseFollowZoomSegment(
+        at start: TimeInterval,
+        duration requestedDuration: TimeInterval = 2,
+        zoomScale: Double = 2,
+        position: CGPoint = CGPoint(x: 0.5, y: 0.5)
+    ) -> UUID? {
+        let start = min(max(start, 0), max(0, duration - frameDuration))
+        let end = min(duration, start + max(requestedDuration, frameDuration))
+        guard end - start >= frameDuration else { return nil }
+
+        let existing = mouseFollowZoomTrack?.segments ?? []
+        guard !existing.contains(where: {
+            start >= $0.timelineStart - 0.000_1
+                && start < $0.timelineEnd - 0.000_1
+        }) else { return nil }
+        let nextStart = existing
+            .filter { $0.timelineStart > start }
+            .map(\.timelineStart)
+            .min() ?? duration
+        let previousEnd = existing
+            .filter { $0.timelineEnd <= start }
+            .map(\.timelineEnd)
+            .max() ?? 0
+        guard start >= previousEnd - 0.000_1 else { return nil }
+        let finalEnd = min(end, nextStart)
+        guard finalEnd - start >= frameDuration else { return nil }
+
+        let segment = MouseFollowZoomSegment(
+            timelineStart: start,
+            duration: finalEnd - start,
+            zoomScale: min(max(zoomScale, 1.25), 4),
+            points: [
+                MouseFollowZoomPoint(timelineTime: start, position: position),
+                MouseFollowZoomPoint(timelineTime: finalEnd, position: position),
+            ]
+        )
+        var track = mouseFollowZoomTrack ?? MouseFollowZoomTrack(segments: [])
+        track.segments.append(segment)
+        track.normalize(projectDuration: duration, minimumDuration: frameDuration)
+        mouseFollowZoomTrack = track
+        modifiedAt = Date()
+        return segment.id
+    }
+
+    mutating func deleteMouseFollowZoomSegment(id: UUID) {
+        guard var track = mouseFollowZoomTrack else { return }
+        track.segments.removeAll { $0.id == id }
+        mouseFollowZoomTrack = track.segments.isEmpty ? nil : track
+        modifiedAt = Date()
+    }
+
+    mutating func setMouseFollowZoomScale(_ scale: Double, segmentID: UUID) {
+        guard var track = mouseFollowZoomTrack,
+              let index = track.segments.firstIndex(where: { $0.id == segmentID })
+        else { return }
+        track.segments[index].zoomScale = min(max(scale, 1.25), 4)
+        mouseFollowZoomTrack = track
+        modifiedAt = Date()
+    }
+
+    @discardableResult
+    mutating func trimMouseFollowZoomSegment(
+        id: UUID,
+        edge: TimelineTrimEdge,
+        to proposedTime: TimeInterval
+    ) -> TimeInterval? {
+        guard var track = mouseFollowZoomTrack,
+              let index = track.segments.firstIndex(where: { $0.id == id })
+        else { return nil }
+        let segment = track.segments[index]
+        let previousEnd = index > 0 ? track.segments[index - 1].timelineEnd : 0
+        let nextStart = track.segments.indices.contains(index + 1)
+            ? track.segments[index + 1].timelineStart
+            : duration
+
+        let range: Range<TimeInterval>
+        let boundary: TimeInterval
+        switch edge {
+        case .leading:
+            boundary = min(
+                max(proposedTime, previousEnd),
+                segment.timelineEnd - frameDuration
+            )
+            range = boundary..<segment.timelineEnd
+        case .trailing:
+            boundary = min(
+                max(proposedTime, segment.timelineStart + frameDuration),
+                nextStart
+            )
+            range = segment.timelineStart..<boundary
+        }
+        guard let trimmed = segment.resized(to: range, minimumDuration: frameDuration) else {
+            return nil
+        }
+        track.segments[index] = trimmed
+        mouseFollowZoomTrack = track
+        modifiedAt = Date()
+        return boundary
     }
 
     /// Rebuilds visual gap segments from the video layout. Existing fill
@@ -569,6 +735,17 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
             preserved.timelineStart = range.lowerBound
             preserved.duration = range.upperBound - range.lowerBound
             return preserved
+        }
+        if var track = mouseFollowZoomTrack {
+            let minimumDuration = frameDuration
+            track.normalize(
+                projectDuration: projectDuration,
+                minimumDuration: minimumDuration
+            )
+            mouseFollowZoomTrack = track
+        }
+        if mouseFollowZoomTrack?.segments.isEmpty == true {
+            mouseFollowZoomTrack = nil
         }
     }
 

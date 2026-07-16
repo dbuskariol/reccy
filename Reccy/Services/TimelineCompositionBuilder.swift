@@ -94,6 +94,7 @@ enum TimelineCompositionBuilder {
             let sortedClips = lane.clips.sorted(by: { $0.timelineStart < $1.timelineStart })
             var previousVideoSource: (clip: TimelineClip, track: AVAssetTrack)?
             var videoCursor: TimeInterval = 0
+            var primaryVideoTransforms: [(range: Range<TimeInterval>, transform: CGAffineTransform)] = []
             var videoLayerConfiguration = lane.kind.isVideo
                 ? AVVideoCompositionLayerInstruction.Configuration(trackID: compositionTrack.trackID)
                 : nil
@@ -163,6 +164,12 @@ enum TimelineCompositionBuilder {
                         transform,
                         at: timelineTime(clip.timelineStart)
                     )
+                    if lane.kind == .video {
+                        primaryVideoTransforms.append((
+                            range: clip.timelineStart..<clip.timelineEnd,
+                            transform: transform
+                        ))
+                    }
                     if lane.kind == .camera {
                         videoLayerConfiguration?.setOpacity(1, at: timelineTime(clip.timelineStart))
                         videoLayerConfiguration?.setOpacity(0, at: timelineTime(clip.timelineEnd))
@@ -199,11 +206,29 @@ enum TimelineCompositionBuilder {
             }
 
             if let videoLayerConfiguration {
+                let baseInstruction = AVVideoCompositionLayerInstruction(
+                    configuration: videoLayerConfiguration
+                )
+                let instruction: AVVideoCompositionLayerInstruction
+                if lane.kind == .video,
+                   let renderSize = videoRenderSize,
+                   let track = project.mouseFollowZoomTrack
+                {
+                    instruction = applyMouseFollowZoom(
+                        track,
+                        baseTransforms: primaryVideoTransformsCoveringGaps(
+                            primaryVideoTransforms,
+                            project: project
+                        ),
+                        renderSize: renderSize,
+                        instruction: baseInstruction
+                    )
+                } else {
+                    instruction = baseInstruction
+                }
                 videoLayers.append((
                     kind: lane.kind,
-                    instruction: AVVideoCompositionLayerInstruction(
-                        configuration: videoLayerConfiguration
-                    )
+                    instruction: instruction
                 ))
             } else {
                 let parameters = AVMutableAudioMixInputParameters(track: compositionTrack)
@@ -283,6 +308,169 @@ enum TimelineCompositionBuilder {
             renderSize: renderSize,
             layout: layout
         )
+    }
+
+    static func mouseFollowZoomTransform(
+        baseTransform: CGAffineTransform,
+        renderSize: CGSize,
+        focus: CGPoint,
+        zoomScale: Double
+    ) -> CGAffineTransform {
+        let scale = CGFloat(min(max(zoomScale, 1), 4))
+        guard scale > 1,
+              renderSize.width > 0,
+              renderSize.height > 0
+        else { return baseTransform }
+        let focus = CGPoint(
+            x: min(max(focus.x, 0), 1) * renderSize.width,
+            y: min(max(focus.y, 0), 1) * renderSize.height
+        )
+        let viewportTransform = CGAffineTransform(
+            a: scale,
+            b: 0,
+            c: 0,
+            d: scale,
+            tx: renderSize.width / 2 - focus.x * scale,
+            ty: renderSize.height / 2 - focus.y * scale
+        )
+        return baseTransform.concatenating(viewportTransform)
+    }
+
+    private static func primaryVideoTransformsCoveringGaps(
+        _ clipTransforms: [(range: Range<TimeInterval>, transform: CGAffineTransform)],
+        project: TimelineProject
+    ) -> [(range: Range<TimeInterval>, transform: CGAffineTransform)] {
+        var result = clipTransforms
+        for gap in project.videoGaps where gap.duration > 0.000_1 {
+            let previous = clipTransforms
+                .filter { $0.range.upperBound <= gap.timelineStart + 0.000_1 }
+                .max { $0.range.upperBound < $1.range.upperBound }
+            let next = clipTransforms
+                .filter { $0.range.lowerBound >= gap.timelineEnd - 0.000_1 }
+                .min { $0.range.lowerBound < $1.range.lowerBound }
+            let transform = switch gap.fillMode {
+            case .holdPrevious: previous?.transform ?? next?.transform ?? .identity
+            case .holdNext: next?.transform ?? previous?.transform ?? .identity
+            case .black: previous?.transform ?? next?.transform ?? .identity
+            }
+            result.append((
+                range: gap.timelineStart..<gap.timelineEnd,
+                transform: transform
+            ))
+        }
+        return result.sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    private static func applyMouseFollowZoom(
+        _ track: MouseFollowZoomTrack,
+        baseTransforms: [(range: Range<TimeInterval>, transform: CGAffineTransform)],
+        renderSize: CGSize,
+        instruction: AVVideoCompositionLayerInstruction
+    ) -> AVVideoCompositionLayerInstruction {
+        // Use AVFoundation's native ramps between bounded capture samples.
+        // Emitting a transform command for every output frame makes long
+        // projects expensive to build and gives AVFoundation far more state
+        // than it needs to interpolate the same pointer path.
+        var animated = AVVideoCompositionLayerInstruction.Configuration(
+            trackID: instruction.trackID
+        )
+
+        for base in baseTransforms {
+            var cursor = base.range.lowerBound
+            let segments = track.segments.filter {
+                $0.timelineEnd > base.range.lowerBound
+                    && $0.timelineStart < base.range.upperBound
+            }
+            for segment in segments {
+                let start = max(base.range.lowerBound, segment.timelineStart)
+                let end = min(base.range.upperBound, segment.timelineEnd)
+                let duration = end - start
+                guard duration > 0.000_1 else { continue }
+
+                setTransformRamp(
+                    from: base.transform,
+                    to: base.transform,
+                    range: cursor..<start,
+                    configuration: &animated
+                )
+
+                let transition = min(0.2, segment.duration / 3)
+                let zoomStart = segment.timelineStart + transition
+                let zoomEnd = segment.timelineEnd - transition
+                var sampleTimes = [start, end]
+                if zoomStart > start, zoomStart < end { sampleTimes.append(zoomStart) }
+                if zoomEnd > start, zoomEnd < end { sampleTimes.append(zoomEnd) }
+                sampleTimes.append(contentsOf: segment.points.lazy
+                    .map(\.timelineTime)
+                    .filter { $0 > start && $0 < end })
+                sampleTimes = Array(Set(sampleTimes)).sorted()
+
+                for index in 0..<(sampleTimes.count - 1) {
+                    let lower = sampleTimes[index]
+                    let upper = sampleTimes[index + 1]
+                    let timeRange = CMTimeRange(
+                        start: timelineTime(lower),
+                        duration: timelineTime(upper - lower)
+                    )
+                    animated.addTransformRamp(.init(
+                        timeRange: timeRange,
+                        start: mouseFollowZoomTransform(
+                            baseTransform: base.transform,
+                            renderSize: renderSize,
+                            focus: segment.focus(at: lower),
+                            zoomScale: zoomScale(for: segment, at: lower)
+                        ),
+                        end: mouseFollowZoomTransform(
+                            baseTransform: base.transform,
+                            renderSize: renderSize,
+                            focus: segment.focus(at: upper),
+                            zoomScale: zoomScale(for: segment, at: upper)
+                        )
+                    ))
+                }
+                cursor = end
+            }
+            setTransformRamp(
+                from: base.transform,
+                to: base.transform,
+                range: cursor..<base.range.upperBound,
+                configuration: &animated
+            )
+        }
+        return AVVideoCompositionLayerInstruction(configuration: animated)
+    }
+
+    private static func setTransformRamp(
+        from start: CGAffineTransform,
+        to end: CGAffineTransform,
+        range: Range<TimeInterval>,
+        configuration: inout AVVideoCompositionLayerInstruction.Configuration
+    ) {
+        guard range.upperBound - range.lowerBound > 0.000_1 else { return }
+        configuration.addTransformRamp(.init(
+            timeRange: CMTimeRange(
+                start: timelineTime(range.lowerBound),
+                duration: timelineTime(range.upperBound - range.lowerBound)
+            ),
+            start: start,
+            end: end
+        ))
+    }
+
+    private static func zoomScale(
+        for segment: MouseFollowZoomSegment,
+        at time: TimeInterval
+    ) -> Double {
+        let transition = min(0.2, segment.duration / 3)
+        let amount: Double
+        if time < segment.timelineStart + transition {
+            amount = (time - segment.timelineStart) / max(transition, 0.000_1)
+        } else if time > segment.timelineEnd - transition {
+            amount = (segment.timelineEnd - time) / max(transition, 0.000_1)
+        } else {
+            amount = 1
+        }
+        return 1 + (segment.zoomScale - 1) * min(max(amount, 0), 1)
     }
 
     private static func videoTransform(

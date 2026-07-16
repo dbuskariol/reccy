@@ -112,7 +112,10 @@ private func validateCapture(at mediaURL: URL) async throws -> CaptureValidation
     let expectedVideoTracks = camera == nil ? 1 : 2
     let expectedAudioTracks = (includesSystemAudio ? 1 : 0) + (includesMicrophone ? 1 : 0)
 
-    try require(manifestVersion == 2, "Unsupported capture manifest version \(manifestVersion).")
+    try require(
+        (2...3).contains(manifestVersion),
+        "Unsupported capture manifest version \(manifestVersion)."
+    )
     try require(expectedWidth > 0 && expectedHeight > 0, "Manifest dimensions are invalid.")
     try require(expectedFrameRate > 0, "Manifest frame rate is invalid.")
 
