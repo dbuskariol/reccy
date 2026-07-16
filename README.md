@@ -2,7 +2,7 @@
 
 Reccy is a native screen recorder and non-destructive multitrack editor for macOS 26. It combines ScreenCaptureKit capture, an optional native camera track, separate system and microphone audio, live mouse-follow zoom, a first-class timeline, compact exports, and fast menu-bar controls in one focused Mac app.
 
-![Reccy capture workspace](Documentation/Screenshots/capture-workspace.jpg)
+![Reccy capture workspace](Documentation/Screenshots/capture-workspace-0.3.2.jpg)
 
 ## Capture the right thing
 
@@ -21,7 +21,7 @@ Choose an entire display, every window from one application, or one specific win
 
 ## Monitor without guessing
 
-![Reccy live recording monitor](Documentation/Screenshots/live-monitor.jpg)
+![Reccy live recording monitor](Documentation/Screenshots/live-monitor-0.3.2.jpg)
 
 Monitor shows the exact incoming screen and camera pictures feeding the writer, elapsed time, committed file size, resolution, frame rate, recording state, and separate rolling waveforms for system audio and microphone input. Toggle mouse-follow zoom, pause, resume, or stop from this window while it remains open on another display.
 
@@ -38,7 +38,7 @@ Transcript sidecars are written atomically beside their recordings as `.reccytra
 
 ## Edit without flattening the recording
 
-![Reccy multitrack timeline](Documentation/Screenshots/editor-timeline.jpg)
+![Reccy multitrack timeline](Documentation/Screenshots/editor-timeline-0.3.2.jpg)
 
 Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen video, camera video, system audio, microphone audio, and voiceover takes stay independent, editable, and removable.
 
@@ -58,7 +58,7 @@ Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen 
 
 ## A useful recording library
 
-![Reccy recording library](Documentation/Screenshots/library.jpg)
+![Reccy recording library](Documentation/Screenshots/library-0.3.2.jpg)
 
 The Library combines a compact recording browser with a native, source-aspect preview, waveform scrubber, saved camera and caption overlays, source and application metadata, camera and audio-track details, resolution, frame rate, codec, dynamic range, pointer settings, and direct Edit, Export, source-master Share, Reveal, and Trash actions. Direct Library export builds the same saved project as preview and Editor, so camera placement, captions, timeline edits, and the audible mix cannot disappear from the delivery file.
 
@@ -77,8 +77,8 @@ Reccy checks each preset against the actual recording or timeline, estimates wor
 
 <table>
   <tr>
-    <td width="48%"><img src="Documentation/Screenshots/menu-bar-recording.jpg" alt="Active Reccy menu-bar recorder"></td>
-    <td width="52%"><img src="Documentation/Screenshots/settings-permissions.jpg" alt="Reccy permission settings"></td>
+    <td width="48%"><img src="Documentation/Screenshots/menu-bar-recording-0.3.2.jpg" alt="Active Reccy menu-bar recorder"></td>
+    <td width="52%"><img src="Documentation/Screenshots/settings-permissions-0.3.2.jpg" alt="Reccy permission settings"></td>
   </tr>
   <tr>
     <td><strong>Menu bar</strong><br>Start a source-aware capture, monitor timer, safe-write status, and separate audio levels, toggle mouse-follow zoom, pause or stop, open Monitor, and return to recent recordings.</td>
