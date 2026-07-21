@@ -503,9 +503,14 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
         var pickerConfiguration = SCContentSharingPickerConfiguration()
         pickerConfiguration.allowedPickerModes = pickerMode
-        // The picker is used to create a new filter, not to mutate the
-        // recorder's private SCStream after capture has begun.
-        pickerConfiguration.allowsChangingSelectedContent = false
+        // This presentation creates a filter without an associated SCStream.
+        // Keep initial selection mutable through Apple's Share action; setting
+        // this to false can dismiss the macOS 26 application picker without
+        // delivering its initial-filter callback. Reccy deactivates the picker
+        // immediately after the callback and never lets it mutate a recording
+        // stream after capture begins.
+        pickerConfiguration.allowsChangingSelectedContent =
+            CaptureSourcePickerPolicy.allowsChangingSelectedContentForNewFilter
         if let bundleID = Bundle.main.bundleIdentifier {
             pickerConfiguration.excludedBundleIDs = [bundleID]
         }
@@ -513,6 +518,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         let picker = SCContentSharingPicker.shared
         picker.defaultConfiguration = pickerConfiguration
         picker.isActive = true
+        logger.info("Presenting the system source picker for a new filter")
         picker.present(using: contentStyle)
     }
 
@@ -2055,6 +2061,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard isSelectingSource else { return }
+            logger.info("The system source picker cancelled new-filter selection")
             isSelectingSource = false
             deactivateSystemPicker()
             if !hasSelectedSource {
@@ -2072,6 +2079,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard isSelectingSource else { return }
+            logger.info("The system source picker delivered a new approved filter")
             isSelectingSource = false
             deactivateSystemPicker()
             completeSourceSelection(filter: filter)
@@ -2083,6 +2091,9 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard isSelectingSource else { return }
+            logger.error(
+                "The system source picker failed before selection: \(message, privacy: .public)"
+            )
             isSelectingSource = false
             handleFailure(CaptureError.sourcePickerFailed(message))
         }

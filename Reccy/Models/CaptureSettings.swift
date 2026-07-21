@@ -9,6 +9,14 @@ import UniformTypeIdentifiers
 /// with an existing `SCStream` yet.
 nonisolated enum CaptureSourcePickerPolicy {
     static let maximumConcurrentStreams: Int? = nil
+
+    /// A picker without an associated `SCStream` is creating its initial
+    /// filter, not changing an existing capture. ScreenCaptureKit needs this
+    /// enabled through the Share action so application selection can deliver
+    /// its first filter callback. Reccy deactivates the picker as soon as that
+    /// callback arrives, so later source changes still require a new explicit
+    /// approval.
+    static let allowsChangingSelectedContentForNewFilter = true
 }
 
 enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
