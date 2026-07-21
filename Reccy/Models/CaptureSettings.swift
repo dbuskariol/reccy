@@ -293,6 +293,7 @@ struct CaptureSettings: Codable, Equatable, Sendable {
     var selectedMicrophoneID: String?
     var includeCamera = false
     var selectedCameraID: String?
+    var cameraOverlayPosition: CameraOverlayPosition?
     var showCursor = true
     var showMouseClicks = true
     var startsWithMouseFollowZoom = false
@@ -317,6 +318,7 @@ struct CaptureSettings: Codable, Equatable, Sendable {
         case selectedMicrophoneID
         case includeCamera
         case selectedCameraID
+        case cameraOverlayPosition
         case showCursor
         case showMouseClicks
         case startsWithMouseFollowZoom
@@ -339,6 +341,10 @@ struct CaptureSettings: Codable, Equatable, Sendable {
         selectedMicrophoneID = try container.decodeIfPresent(String.self, forKey: .selectedMicrophoneID)
         includeCamera = try container.decodeIfPresent(Bool.self, forKey: .includeCamera) ?? false
         selectedCameraID = try container.decodeIfPresent(String.self, forKey: .selectedCameraID)
+        cameraOverlayPosition = try container.decodeIfPresent(
+            CameraOverlayPosition.self,
+            forKey: .cameraOverlayPosition
+        )
         showCursor = try container.decodeIfPresent(Bool.self, forKey: .showCursor) ?? true
         showMouseClicks = try container.decodeIfPresent(Bool.self, forKey: .showMouseClicks) ?? true
         startsWithMouseFollowZoom = try container.decodeIfPresent(

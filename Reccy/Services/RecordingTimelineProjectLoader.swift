@@ -121,7 +121,7 @@ enum RecordingTimelineProjectLoader {
             let sourceStart = max(0, cameraTimeRange.start.seconds)
             let cameraDuration = min(duration, max(0, cameraTimeRange.duration.seconds))
             if cameraDuration > 0 {
-                let layout = TimelineVideoLayout.defaultCamera(
+                let defaultLayout = TimelineVideoLayout.defaultCamera(
                     canvasSize: CGSize(
                         width: CGFloat(item.manifest.width),
                         height: CGFloat(item.manifest.height)
@@ -131,6 +131,7 @@ enum RecordingTimelineProjectLoader {
                         height: CGFloat(camera.height)
                     )
                 )
+                let layout = camera.overlayPosition?.applying(to: defaultLayout) ?? defaultLayout
                 lanes.append(TimelineLane(
                     kind: .camera,
                     name: camera.name,

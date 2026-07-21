@@ -80,23 +80,14 @@ struct MonitorView: View {
                     .background(.black)
 
                 if coordinator.settings.includeCamera {
-                    CapturePreviewView(pipeline: coordinator.cameraPreviewPipeline)
-                        .background(.black)
-                        .frame(
-                            width: geometry.size.width * 0.28,
-                            height: geometry.size.height * 0.28
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .stroke(.white.opacity(0.8), lineWidth: 1)
-                        }
-                        .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
-                        .position(
-                            x: geometry.size.width * 0.83,
-                            y: geometry.size.height * 0.81
-                        )
-                        .accessibilityLabel("Live camera preview from \(coordinator.selectedCameraName)")
+                    MovableLiveCameraOverlay(
+                        pipeline: coordinator.cameraPreviewPipeline,
+                        cameraName: coordinator.selectedCameraName,
+                        canvasSize: geometry.size,
+                        layout: coordinator.liveCameraOverlayLayout,
+                        onCommit: coordinator.setLiveCameraOverlayLayout,
+                        onReset: coordinator.resetLiveCameraOverlayPosition
+                    )
                 }
 
                 LinearGradient(
@@ -120,6 +111,7 @@ struct MonitorView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
                 .padding(10)
+                .allowsHitTesting(false)
             }
         }
         .aspectRatio(coordinator.activeCaptureAspectRatio, contentMode: .fit)
@@ -128,6 +120,7 @@ struct MonitorView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(.separator.opacity(0.55), lineWidth: 0.5)
         }
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(
             "Live preview of \(coordinator.selectedSource?.name ?? coordinator.selectedSourceKind.title)"
         )
@@ -619,6 +612,123 @@ struct MonitorView: View {
         case (false, true): "Microphone · separate track"
         case (false, false): "No audio tracks"
         }
+    }
+}
+
+/// Direct manipulation for the live camera preview. The independent camera
+/// source is never composited into the recording here; this control commits a
+/// normalized position that the recording manifest and editor compositor use
+/// later. Keeping pointer-rate state local avoids filesystem writes and broad
+/// observable-object invalidation while the user drags.
+private struct MovableLiveCameraOverlay: View {
+    let pipeline: CapturePreviewPipeline
+    let cameraName: String
+    let canvasSize: CGSize
+    let layout: TimelineVideoLayout
+    let onCommit: (TimelineVideoLayout) -> Void
+    let onReset: () -> Void
+
+    @State private var draftLayout: TimelineVideoLayout?
+    @State private var isHovering = false
+    @FocusState private var isFocused: Bool
+
+    private var displayedLayout: TimelineVideoLayout {
+        (draftLayout ?? layout).clamped()
+    }
+
+    private var overlayRect: CGRect {
+        let layout = displayedLayout
+        return CGRect(
+            x: CGFloat(layout.x) * canvasSize.width,
+            y: CGFloat(layout.y) * canvasSize.height,
+            width: CGFloat(layout.width) * canvasSize.width,
+            height: CGFloat(layout.height) * canvasSize.height
+        )
+    }
+
+    var body: some View {
+        let overlayRect = overlayRect
+        CapturePreviewView(pipeline: pipeline)
+            .background(.black)
+            .frame(width: overlayRect.width, height: overlayRect.height)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(
+                        isFocused || isHovering || draftLayout != nil
+                            ? Color.accentColor
+                            : .white.opacity(0.8),
+                        lineWidth: isFocused || draftLayout != nil ? 2 : 1
+                    )
+            }
+            .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
+            .position(x: overlayRect.midX, y: overlayRect.midY)
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .onHover { isHovering = $0 }
+            .simultaneousGesture(TapGesture().onEnded { isFocused = true })
+            .gesture(moveGesture)
+            .pointerStyle(draftLayout == nil ? .grabIdle : .grabActive)
+            .focusable()
+            .focused($isFocused)
+            .onKeyPress(.leftArrow) { commitMove(x: -0.02, y: 0) }
+            .onKeyPress(.rightArrow) { commitMove(x: 0.02, y: 0) }
+            .onKeyPress(.upArrow) { commitMove(x: 0, y: -0.02) }
+            .onKeyPress(.downArrow) { commitMove(x: 0, y: 0.02) }
+            .contextMenu {
+                Button("Reset Camera Position", systemImage: "arrow.counterclockwise") {
+                    onReset()
+                }
+            }
+            .help("Drag to reposition the camera. Use the arrow keys for precise movement.")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Live camera overlay from \(cameraName)")
+            .accessibilityValue(accessibilityValue)
+            .accessibilityHint("Drag to reposition. Arrow keys and additional actions provide precise movement.")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { isFocused = true }
+            .accessibilityActions {
+                Button("Move Left") { commitLayout(layout.movedBy(x: -0.02, y: 0)) }
+                Button("Move Right") { commitLayout(layout.movedBy(x: 0.02, y: 0)) }
+                Button("Move Up") { commitLayout(layout.movedBy(x: 0, y: -0.02)) }
+                Button("Move Down") { commitLayout(layout.movedBy(x: 0, y: 0.02)) }
+                Button("Reset Position", action: onReset)
+            }
+    }
+
+    private var moveGesture: some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                isFocused = true
+                draftLayout = movedLayout(translation: value.translation)
+            }
+            .onEnded { value in
+                commitLayout(movedLayout(translation: value.translation))
+                draftLayout = nil
+            }
+    }
+
+    private func movedLayout(translation: CGSize) -> TimelineVideoLayout {
+        guard canvasSize.width > 0, canvasSize.height > 0 else { return layout.clamped() }
+        return layout.movedBy(
+            x: Double(translation.width / canvasSize.width),
+            y: Double(translation.height / canvasSize.height)
+        )
+    }
+
+    private func commitMove(x: Double, y: Double) -> KeyPress.Result {
+        commitLayout(layout.movedBy(x: x, y: y))
+        return .handled
+    }
+
+    private func commitLayout(_ layout: TimelineVideoLayout) {
+        isFocused = true
+        onCommit(layout.clamped())
+    }
+
+    private var accessibilityValue: String {
+        let layout = displayedLayout
+        let position = CameraOverlayPosition(layout: layout)
+        return "center \(Int(position.centerX * 100)) by \(Int(position.centerY * 100)) percent"
     }
 }
 
