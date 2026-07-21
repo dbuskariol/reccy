@@ -61,6 +61,7 @@ struct ReccyAssetWaveform: View {
     let duration: TimeInterval?
     let color: Color
     var progress: Double? = nil
+    var isReversed = false
 
     @State private var samples: [Float] = []
 
@@ -91,7 +92,8 @@ struct ReccyAssetWaveform: View {
             }
             .task(id: request) {
                 do {
-                    samples = try await WaveformRepository.shared.samples(for: request)
+                    let loaded = try await WaveformRepository.shared.samples(for: request)
+                    samples = isReversed ? Array(loaded.reversed()) : loaded
                 } catch is CancellationError {
                     return
                 } catch {

@@ -265,7 +265,7 @@ nonisolated enum TranscriptProjection {
                         ?? document.track(sourceTrackID: clip.sourceTrackID)
                 else { continue }
 
-                let clipSourceEnd = clip.sourceStart + clip.duration
+                let clipSourceEnd = clip.sourceEnd
                 for segment in track.segments {
                     let intersectionStart = max(segment.sourceStart, clip.sourceStart)
                     let intersectionEnd = min(segment.sourceEnd, clipSourceEnd)
@@ -286,7 +286,15 @@ nonisolated enum TranscriptProjection {
                     }
                     guard !text.isEmpty else { continue }
 
-                    let timelineStart = clip.timelineStart + (intersectionStart - clip.sourceStart)
+                    let effects = clip.effectiveEffects
+                    let timelineStart = switch effects.direction {
+                    case .forward:
+                        clip.timelineStart
+                            + (intersectionStart - clip.sourceStart) / effects.playbackRate
+                    case .reverse:
+                        clip.timelineStart
+                            + (clipSourceEnd - intersectionEnd) / effects.playbackRate
+                    }
                     projected.append(ProjectedTranscriptSegment(
                         id: "\(clip.id.uuidString):\(segment.id.uuidString)",
                         sourceSegmentID: segment.id,
@@ -297,7 +305,7 @@ nonisolated enum TranscriptProjection {
                         role: role,
                         text: text,
                         timelineStart: timelineStart,
-                        duration: intersectionEnd - intersectionStart
+                        duration: (intersectionEnd - intersectionStart) / effects.playbackRate
                     ))
                 }
             }

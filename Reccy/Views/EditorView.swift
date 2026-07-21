@@ -19,6 +19,13 @@ struct EditorView: View {
     @State private var showsVoiceoverInputPopover = false
     @State private var playbackSyncTask: Task<Void, Never>?
     @State private var timelineVerticalScrollOffset: CGFloat = 0
+    @State private var timelineHorizontalScrollPosition = ScrollPosition(idType: UUID.self)
+    @State private var timelineHorizontalMetrics = TimelineHorizontalMetrics()
+    @State private var timelineHorizontalScrollPhase: ScrollPhase = .idle
+    @State private var timelineFollowSuppressedUntil = Date.distantPast
+    @State private var previousObservedPlayhead: TimeInterval = 0
+    @State private var isProgrammaticTimelineScroll = false
+    @State private var confirmsClipDeletion = false
 
     private let trackHeaderWidth: CGFloat = 176
     private let rulerHeight: CGFloat = 32
@@ -102,6 +109,14 @@ struct EditorView: View {
         } message: {
             Text(editor.errorMessage ?? "Unknown error")
         }
+        .alert(deleteConfirmationTitle, isPresented: $confirmsClipDeletion) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                editor.deleteSelection()
+            }
+        } message: {
+            Text(deleteConfirmationMessage)
+        }
     }
 
     private func editorWorkspace(_ project: TimelineProject) -> some View {
@@ -124,6 +139,8 @@ struct EditorView: View {
                                 transcriptPanel(project)
                             case .captions:
                                 captionPanel(project)
+                            case .video:
+                                videoAdjustmentPanel()
                             }
                         }
                     }
@@ -314,6 +331,7 @@ struct EditorView: View {
                 let rowsHeight = timelineRowsHeight(project)
                 let visibleRowsHeight = max(geometry.size.height - rulerHeight - 1, 0)
                 let maximumVerticalOffset = max(rowsHeight - visibleRowsHeight, 0)
+                let timelineViewportWidth = max(geometry.size.width - trackHeaderWidth - 1, 0)
 
                 HStack(spacing: 0) {
                     VStack(spacing: 0) {
@@ -380,12 +398,49 @@ struct EditorView: View {
                         .frame(width: trackWidth, height: geometry.size.height, alignment: .topLeading)
                         .coordinateSpace(name: "timelineCanvas")
                     }
+                    .scrollPosition($timelineHorizontalScrollPosition)
+                    .onScrollGeometryChange(for: TimelineHorizontalMetrics.self) { geometry in
+                        TimelineHorizontalMetrics(
+                            offset: max(0, geometry.visibleRect.minX),
+                            viewportWidth: geometry.visibleRect.width
+                        )
+                    } action: { _, metrics in
+                        timelineHorizontalMetrics = metrics
+                    }
+                    .onScrollPhaseChange { _, phase in
+                        timelineHorizontalScrollPhase = phase
+                        if !isProgrammaticTimelineScroll,
+                           phase == .tracking || phase == .interacting || phase == .decelerating
+                        {
+                            suppressTimelineFollowing(for: 1.5)
+                        }
+                    }
+                    .onChange(of: editor.playhead) { oldValue, newValue in
+                        followPlayheadIfNeeded(from: oldValue, to: newValue, trackWidth: trackWidth)
+                    }
+                    .onChange(of: editor.pixelsPerSecond) { _, _ in
+                        keepPlayheadVisibleAfterZoom(trackWidth: trackWidth)
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .scrollIndicators(.visible)
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
+                .onAppear {
+                    editor.updateTimelineViewport(width: timelineViewportWidth)
+                    previousObservedPlayhead = editor.playhead
+                }
+                .onChange(of: timelineViewportWidth) { _, width in
+                    editor.updateTimelineViewport(width: width)
+                }
+                .onChange(of: project.duration) { _, _ in
+                    editor.updateTimelineViewport(width: timelineViewportWidth)
+                }
             }
             .background(Color(nsColor: .controlBackgroundColor))
+            .background {
+                TimelineSelectionCommandResponder(onSelectAll: editor.selectAllClips)
+                    .accessibilityHidden(true)
+            }
         }
     }
 
@@ -577,7 +632,10 @@ struct EditorView: View {
                 .gesture(
                     DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
                         .onChanged { value in
-                            editor.seek(to: value.location.x / editor.pixelsPerSecond)
+                            seekFromTimeline(
+                                to: value.location.x / editor.pixelsPerSecond,
+                                clearsClips: true
+                            )
                         }
                 )
 
@@ -619,7 +677,10 @@ struct EditorView: View {
                 .gesture(
                     DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
                         .onChanged { value in
-                            editor.seek(to: value.location.x / editor.pixelsPerSecond)
+                            seekFromTimeline(
+                                to: value.location.x / editor.pixelsPerSecond,
+                                clearsClips: true
+                            )
                         }
                 )
 
@@ -677,7 +738,10 @@ struct EditorView: View {
         .gesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
                 .onChanged { value in
-                editor.seek(to: value.location.x / editor.pixelsPerSecond)
+                seekFromTimeline(
+                    to: value.location.x / editor.pixelsPerSecond,
+                    clearsClips: true
+                )
             }
         )
         .accessibilityElement(children: .ignore)
@@ -694,9 +758,7 @@ struct EditorView: View {
     }
 
     private var rulerInterval: TimeInterval {
-        if editor.pixelsPerSecond >= 150 { return 1 }
-        if editor.pixelsPerSecond >= 70 { return 2 }
-        return 5
+        TimelineViewportPolicy.rulerInterval(pixelsPerSecond: editor.pixelsPerSecond)
     }
 
     private func laneRow(
@@ -712,7 +774,10 @@ struct EditorView: View {
                 .gesture(
                     DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineCanvas"))
                         .onChanged { value in
-                        editor.seek(to: value.location.x / editor.pixelsPerSecond)
+                        seekFromTimeline(
+                            to: value.location.x / editor.pixelsPerSecond,
+                            clearsClips: true
+                        )
                     }
                 )
 
@@ -737,9 +802,12 @@ struct EditorView: View {
                     lane: lane,
                     pixelsPerSecond: editor.pixelsPerSecond,
                     frameRate: frameRate,
-                    isSelected: editor.selectedClipID == clip.id,
+                    isSelected: editor.selectedClipIDs.contains(clip.id),
                     color: laneColor(lane.kind),
-                    onSelect: { time in editor.select(clip, at: time) },
+                    onSelect: { time, modifiers in
+                        suppressTimelineFollowing(for: 1.25)
+                        editor.select(clip, at: time, modifiers: modifiers)
+                    },
                     onBeginMove: { anchorTime in
                         editor.beginClipMove(id: clip.id, anchorTime: anchorTime)
                     },
@@ -755,6 +823,12 @@ struct EditorView: View {
                     onNudge: { frames in editor.nudgeClip(id: clip.id, byFrames: frames) },
                     onNudgeTrim: { edge, frames in
                         editor.nudgeClipTrim(id: clip.id, edge: edge, byFrames: frames)
+                    },
+                    onDelete: {
+                        if !editor.selectedClipIDs.contains(clip.id) {
+                            editor.select(clip)
+                        }
+                        requestDeleteSelection()
                     }
                 )
                 .frame(width: max(clip.duration * editor.pixelsPerSecond, 18), height: laneHeight - 12)
@@ -798,7 +872,7 @@ struct EditorView: View {
                         help: "Delete the selected clip or effect",
                         tint: .red
                     ) {
-                        editor.deleteSelection()
+                        requestDeleteSelection()
                     }
                     .disabled(
                         editor.selectedClipID == nil
@@ -813,7 +887,7 @@ struct EditorView: View {
                     ) {
                         editor.rippleDeleteSelection()
                     }
-                    .disabled(editor.selectedClipID == nil)
+                    .disabled(!editor.canRippleSelection)
                     .keyboardShortcut(.delete, modifiers: .command)
 
                     if editor.selectedClipIsOverlayVideo, let selectedClipID = editor.selectedClipID {
@@ -860,6 +934,7 @@ struct EditorView: View {
                     Divider().frame(height: 20)
 
                     linkedClipsButton
+                    clipEffectsMenu
                     ForEach(TimelineGapFillMode.allCases) { mode in
                         gapFillButton(mode)
                     }
@@ -873,6 +948,8 @@ struct EditorView: View {
 
                     inspectorButton(.transcript, title: "Transcript", systemImage: "captions.bubble")
                     inspectorButton(.captions, title: "Captions", systemImage: "captions.bubble.fill")
+                    inspectorButton(.video, title: "Video", systemImage: "crop")
+                        .disabled(editor.selectedVideoClips.isEmpty)
                 }
                 .padding(.vertical, 4)
             }
@@ -883,7 +960,8 @@ struct EditorView: View {
                 Divider().frame(height: 20)
 
                 Button {
-                    editor.pixelsPerSecond = max(30, editor.pixelsPerSecond - 20)
+                    suppressTimelineFollowing(for: 1.25)
+                    editor.zoomTimelineOut()
                 } label: {
                     Image(systemName: "minus.magnifyingglass")
                         .font(.system(size: 13, weight: .medium))
@@ -892,16 +970,44 @@ struct EditorView: View {
                 }
                 .buttonStyle(.borderless)
                 .frame(width: 24, height: 24)
-                .disabled(editor.pixelsPerSecond <= 30)
+                .disabled(editor.pixelsPerSecond <= editor.minimumPixelsPerSecond + 0.000_1)
                 .reccyAccessibleControl("Zoom Out")
                 .reccyTooltip("Zoom out of the timeline")
 
-                Slider(value: $editor.pixelsPerSecond, in: 30...220)
+                Slider(
+                    value: Binding(
+                        get: { editor.pixelsPerSecond },
+                        set: {
+                            suppressTimelineFollowing(for: 1.25)
+                            editor.setTimelineZoom($0)
+                        }
+                    ),
+                    in: editor.minimumPixelsPerSecond...TimelineViewportPolicy.maximumPixelsPerSecond
+                )
                     .frame(width: 96)
                     .accessibilityLabel("Timeline zoom")
+                    .accessibilityValue(
+                        "\(editor.pixelsPerSecond.formatted(.number.precision(.fractionLength(editor.pixelsPerSecond < 10 ? 1 : 0)))) points per second"
+                    )
 
                 Button {
-                    editor.pixelsPerSecond = min(220, editor.pixelsPerSecond + 20)
+                    suppressTimelineFollowing(for: 1.25)
+                    editor.zoomTimelineToFit()
+                } label: {
+                    Image(systemName: "arrow.left.and.right")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.borderless)
+                .frame(width: 24, height: 24)
+                .disabled(abs(editor.pixelsPerSecond - editor.minimumPixelsPerSecond) < 0.000_1)
+                .reccyAccessibleControl("Zoom Timeline to Fit")
+                .reccyTooltip("Fit the complete project in the timeline")
+
+                Button {
+                    suppressTimelineFollowing(for: 1.25)
+                    editor.zoomTimelineIn()
                 } label: {
                     Image(systemName: "plus.magnifyingglass")
                         .font(.system(size: 13, weight: .medium))
@@ -910,7 +1016,7 @@ struct EditorView: View {
                 }
                 .buttonStyle(.borderless)
                 .frame(width: 24, height: 24)
-                .disabled(editor.pixelsPerSecond >= 220)
+                .disabled(editor.pixelsPerSecond >= TimelineViewportPolicy.maximumPixelsPerSecond)
                 .reccyAccessibleControl("Zoom In")
                 .reccyTooltip("Zoom in to the timeline")
             }
@@ -957,6 +1063,83 @@ struct EditorView: View {
         ) {
             editor.moveLinkedClips.toggle()
         }
+    }
+
+    private var clipEffectsMenu: some View {
+        Menu {
+            Menu("Speed") {
+                ForEach(TimelineClipEffects.supportedPlaybackRates, id: \.self) { rate in
+                    Button {
+                        editor.setSelectedPlaybackRate(rate)
+                    } label: {
+                        if editor.commonPlaybackRate == rate {
+                            Label(speedTitle(rate), systemImage: "checkmark")
+                        } else {
+                            Text(speedTitle(rate))
+                        }
+                    }
+                }
+            }
+
+            Button {
+                let direction: TimelinePlaybackDirection = editor.commonPlaybackDirection == .reverse
+                    ? .forward
+                    : .reverse
+                editor.setSelectedPlaybackDirection(direction)
+            } label: {
+                Label(
+                    editor.commonPlaybackDirection == .reverse ? "Play Forward" : "Reverse",
+                    systemImage: editor.commonPlaybackDirection == .reverse
+                        ? "play.fill"
+                        : "backward.end.fill"
+                )
+            }
+
+            Divider()
+
+            fadeMenu(title: "Fade In", current: editor.commonFadeInDuration) {
+                editor.setSelectedFadeInDuration($0)
+            }
+            fadeMenu(title: "Fade Out", current: editor.commonFadeOutDuration) {
+                editor.setSelectedFadeOutDuration($0)
+            }
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 13, weight: .medium))
+                .frame(width: 16, height: 16)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .frame(width: timelineToolbarControlSize, height: timelineToolbarControlSize)
+        .disabled(editor.selectedClipCount == 0 || editor.isRebuilding)
+        .reccyAccessibleControl("Clip Effects")
+        .reccyTooltip("Speed, reverse, and fades for the selected clips")
+    }
+
+    private func fadeMenu(
+        title: String,
+        current: TimeInterval?,
+        action: @escaping (TimeInterval) -> Void
+    ) -> some View {
+        Menu(title) {
+            ForEach([0.0, 0.25, 0.5, 1, 2], id: \.self) { duration in
+                Button {
+                    action(duration)
+                } label: {
+                    let label = duration == 0 ? "None" : "\(duration.formatted()) seconds"
+                    if current == duration {
+                        Label(label, systemImage: "checkmark")
+                    } else {
+                        Text(label)
+                    }
+                }
+            }
+        }
+    }
+
+    private func speedTitle(_ rate: Double) -> String {
+        rate.formatted(.number.precision(.fractionLength(0...2))) + "×"
     }
 
     private func gapFillButton(_ mode: TimelineGapFillMode) -> some View {
@@ -1088,6 +1271,29 @@ struct EditorView: View {
         .disabled(!editor.hasProject || editor.isRebuilding || editor.isImportingMedia)
         .reccyAccessibleControl("Import Media")
         .reccyTooltip("Import video, audio, or images as new timeline tracks (⌘I)")
+    }
+
+    private func videoAdjustmentPanel() -> some View {
+        Group {
+            if let clip = editor.selectedVideoClips.first {
+                VideoAdjustmentInspector(
+                    clipName: editor.selectedVideoClips.count == 1
+                        ? clip.name
+                        : "\(editor.selectedVideoClips.count) Selected Videos",
+                    adjustment: clip.effectiveVideoAdjustment,
+                    onCommit: { editor.setSelectedVideoAdjustment($0) },
+                    onClose: { showsTranscript = false }
+                )
+                .id(editor.selectedVideoClips.map(\.id.uuidString).joined(separator: ":"))
+            } else {
+                ContentUnavailableView(
+                    "Select a Video Clip",
+                    systemImage: "crop",
+                    description: Text("Crop and sizing controls apply non-destructively to selected video clips.")
+                )
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     private func captionPanel(_ project: TimelineProject) -> some View {
@@ -1438,6 +1644,87 @@ struct EditorView: View {
         showsTranscript = true
     }
 
+    private func seekFromTimeline(to time: TimeInterval, clearsClips: Bool) {
+        suppressTimelineFollowing(for: 1.25)
+        if clearsClips {
+            editor.clearEditorSelection()
+        }
+        editor.seek(to: time)
+    }
+
+    private func suppressTimelineFollowing(for seconds: TimeInterval) {
+        timelineFollowSuppressedUntil = Date().addingTimeInterval(seconds)
+    }
+
+    private func followPlayheadIfNeeded(
+        from oldTime: TimeInterval,
+        to newTime: TimeInterval,
+        trackWidth: Double
+    ) {
+        previousObservedPlayhead = newTime
+        guard editor.isPlaying,
+              Date() >= timelineFollowSuppressedUntil,
+              timelineHorizontalScrollPhase != .tracking,
+              timelineHorizontalScrollPhase != .interacting,
+              timelineHorizontalMetrics.viewportWidth > 0
+        else { return }
+
+        let target = TimelinePlaybackFollowPolicy.targetOffset(
+            previousTime: oldTime,
+            currentTime: newTime,
+            pixelsPerSecond: editor.pixelsPerSecond,
+            viewportOffset: timelineHorizontalMetrics.offset,
+            viewportWidth: timelineHorizontalMetrics.viewportWidth
+        )
+        guard let target else { return }
+        scrollTimeline(to: target, trackWidth: trackWidth, animated: true)
+    }
+
+    private func keepPlayheadVisibleAfterZoom(trackWidth: Double) {
+        guard timelineHorizontalMetrics.viewportWidth > 0 else { return }
+        let playheadX = CGFloat(editor.playhead * editor.pixelsPerSecond)
+        scrollTimeline(
+            to: playheadX - timelineHorizontalMetrics.viewportWidth / 2,
+            trackWidth: trackWidth,
+            animated: false
+        )
+    }
+
+    private func scrollTimeline(to proposedOffset: CGFloat, trackWidth: Double, animated: Bool) {
+        let maximumOffset = max(0, CGFloat(trackWidth) - timelineHorizontalMetrics.viewportWidth)
+        let offset = min(max(proposedOffset, 0), maximumOffset)
+        isProgrammaticTimelineScroll = true
+        if animated {
+            withAnimation(.easeOut(duration: 0.18)) {
+                timelineHorizontalScrollPosition.scrollTo(x: offset)
+            }
+        } else {
+            timelineHorizontalScrollPosition.scrollTo(x: offset)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            isProgrammaticTimelineScroll = false
+        }
+    }
+
+    private func requestDeleteSelection() {
+        if editor.selectedClipCount > 0 {
+            confirmsClipDeletion = true
+        } else {
+            editor.deleteSelection()
+        }
+    }
+
+    private var deleteConfirmationTitle: String {
+        editor.selectedClipCount == 1
+            ? "Delete Selected Clip?"
+            : "Delete \(editor.selectedClipCount) Clips?"
+    }
+
+    private var deleteConfirmationMessage: String {
+        "This removes the selection from the project without changing its source media. You can undo the edit."
+    }
+
     private func laneColor(_ kind: TimelineLaneKind) -> Color {
         switch kind {
         case .video: .indigo
@@ -1473,9 +1760,185 @@ struct EditorView: View {
     }
 }
 
+private struct TimelineHorizontalMetrics: Equatable {
+    var offset: CGFloat = 0
+    var viewportWidth: CGFloat = 0
+}
+
+private struct TimelineSelectionCommandResponder: NSViewRepresentable {
+    let onSelectAll: @MainActor () -> Void
+
+    func makeNSView(context: Context) -> TimelineSelectionResponderView {
+        let view = TimelineSelectionResponderView()
+        view.onSelectAll = onSelectAll
+        return view
+    }
+
+    func updateNSView(_ view: TimelineSelectionResponderView, context: Context) {
+        view.onSelectAll = onSelectAll
+    }
+
+    static func dismantleNSView(_ view: TimelineSelectionResponderView, coordinator: Void) {
+        view.uninstallEventMonitor()
+    }
+}
+
+private final class TimelineSelectionResponderView: NSView {
+    var onSelectAll: (@MainActor () -> Void)?
+    private var eventMonitor: Any?
+    private var isTimelineActive = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        uninstallEventMonitor()
+        guard let window else { return }
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .keyDown]) {
+            [weak self, weak window] event in
+            guard let self, let window, event.window === window else { return event }
+            switch event.type {
+            case .leftMouseDown:
+                let location = convert(event.locationInWindow, from: nil)
+                isTimelineActive = bounds.contains(location)
+            case .keyDown:
+                let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                if isTimelineActive,
+                   modifiers == .command,
+                   event.charactersIgnoringModifiers?.lowercased() == "a"
+                {
+                    onSelectAll?()
+                    return nil
+                }
+            default:
+                break
+            }
+            return event
+        }
+    }
+
+    func uninstallEventMonitor() {
+        guard let eventMonitor else { return }
+        NSEvent.removeMonitor(eventMonitor)
+        self.eventMonitor = nil
+        isTimelineActive = false
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
 private enum EditorInspectorMode {
     case transcript
     case captions
+    case video
+}
+
+private struct VideoAdjustmentInspector: View {
+    let clipName: String
+    let onCommit: (TimelineVideoAdjustment) -> Void
+    let onClose: () -> Void
+
+    @State private var draft: TimelineVideoAdjustment
+
+    init(
+        clipName: String,
+        adjustment: TimelineVideoAdjustment,
+        onCommit: @escaping (TimelineVideoAdjustment) -> Void,
+        onClose: @escaping () -> Void
+    ) {
+        self.clipName = clipName
+        self.onCommit = onCommit
+        self.onClose = onClose
+        _draft = State(initialValue: adjustment.clamped())
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Label("Video", systemImage: "crop")
+                    .font(.headline)
+                Spacer()
+                Text(clipName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Button(action: onClose) {
+                    Image(systemName: "sidebar.trailing")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .reccyAccessibleControl("Close Video Inspector")
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 46)
+            .background(.bar)
+
+            Divider()
+
+            Form {
+                Section("Crop") {
+                    adjustmentSlider("Top", value: $draft.cropTop, range: 0...0.45, format: .percent)
+                    adjustmentSlider("Bottom", value: $draft.cropBottom, range: 0...0.45, format: .percent)
+                    adjustmentSlider("Left", value: $draft.cropLeading, range: 0...0.45, format: .percent)
+                    adjustmentSlider("Right", value: $draft.cropTrailing, range: 0...0.45, format: .percent)
+                }
+
+                Section("Sizing") {
+                    adjustmentSlider("Scale", value: $draft.scale, range: 0.25...4, format: .scale)
+                }
+
+                Section {
+                    Button("Reset Crop and Size", systemImage: "arrow.counterclockwise") {
+                        draft = TimelineVideoAdjustment()
+                        commit()
+                    }
+                    .disabled(draft.clamped().isIdentity)
+                }
+            }
+            .formStyle(.grouped)
+        }
+    }
+
+    private func adjustmentSlider(
+        _ title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        format: AdjustmentValueFormat
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(format.string(value.wrappedValue))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Slider(value: value, in: range) { editing in
+                if !editing { commit() }
+            }
+            .accessibilityLabel(title)
+            .accessibilityValue(format.string(value.wrappedValue))
+        }
+    }
+
+    private func commit() {
+        draft = draft.clamped()
+        onCommit(draft)
+    }
+
+    private enum AdjustmentValueFormat {
+        case percent
+        case scale
+
+        func string(_ value: Double) -> String {
+            switch self {
+            case .percent:
+                value.formatted(.percent.precision(.fractionLength(0)))
+            case .scale:
+                value.formatted(.number.precision(.fractionLength(0...2))) + "×"
+            }
+        }
+    }
 }
 
 private struct TranscriptCorrectionSheet: View {
@@ -1879,7 +2342,7 @@ private struct TimelineClipView: View {
     let frameRate: Double
     let isSelected: Bool
     let color: Color
-    let onSelect: (TimeInterval) -> Void
+    let onSelect: (TimeInterval, NSEvent.ModifierFlags) -> Void
     let onBeginMove: (TimeInterval) -> Void
     let onMoveChanged: (TimeInterval) -> Void
     let onEndMove: () -> Void
@@ -1888,6 +2351,7 @@ private struct TimelineClipView: View {
     let onEndTrim: (TimelineTrimEdge) -> Void
     let onNudge: (Int) -> Void
     let onNudgeTrim: (TimelineTrimEdge, Int) -> Void
+    let onDelete: () -> Void
 
     @State private var isMoving = false
     @State private var trimmingEdge: TimelineTrimEdge?
@@ -1899,8 +2363,9 @@ private struct TimelineClipView: View {
                     sourceURL: clip.sourceURL,
                     sourceTrackID: clip.sourceTrackID,
                     sourceStart: clip.sourceStart,
-                    duration: clip.duration,
-                    color: .white
+                    duration: clip.sourceSpanDuration,
+                    color: .white,
+                    isReversed: clip.effectiveEffects.direction == .reverse
                 )
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
@@ -1913,6 +2378,24 @@ private struct TimelineClipView: View {
                 Text(clip.name)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                if clip.effectiveEffects.direction == .reverse {
+                    Image(systemName: "backward.end.fill")
+                        .accessibilityHidden(true)
+                }
+                if clip.effectiveEffects.playbackRate != 1 {
+                    Text(speedLabel)
+                        .monospacedDigit()
+                }
+                if clip.effectiveEffects.fadeInDuration > 0
+                    || clip.effectiveEffects.fadeOutDuration > 0
+                {
+                    Image(systemName: "waveform.path")
+                        .accessibilityHidden(true)
+                }
+                if lane.kind.isVideo, !clip.effectiveVideoAdjustment.isIdentity {
+                    Image(systemName: "crop")
+                        .accessibilityHidden(true)
+                }
             }
             .padding(.horizontal, 9)
             .shadow(color: .black.opacity(lane.kind.isVideo ? 0 : 0.45), radius: 2)
@@ -1931,7 +2414,10 @@ private struct TimelineClipView: View {
         .simultaneousGesture(
             SpatialTapGesture().onEnded { value in
                 let localTime = min(max(value.location.x / pixelsPerSecond, 0), clip.duration)
-                onSelect(clip.timelineStart + localTime)
+                onSelect(
+                    clip.timelineStart + localTime,
+                    NSApp.currentEvent?.modifierFlags ?? []
+                )
             }
         )
         .highPriorityGesture(
@@ -1973,7 +2459,7 @@ private struct TimelineClipView: View {
         .accessibilityValue(accessibilityValue)
         .accessibilityHint("Activate to select. Additional actions move or trim by one frame.")
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-        .accessibilityAction { onSelect(clip.timelineStart) }
+        .accessibilityAction { onSelect(clip.timelineStart, []) }
         .accessibilityAction(named: "Move Earlier by One Frame") { onNudge(-1) }
         .accessibilityAction(named: "Move Later by One Frame") { onNudge(1) }
         .accessibilityAction(named: "Trim Start Later by One Frame") {
@@ -1982,12 +2468,28 @@ private struct TimelineClipView: View {
         .accessibilityAction(named: "Trim End Earlier by One Frame") {
             onNudgeTrim(.trailing, -1)
         }
+        .accessibilityAction(named: "Delete Selected Clips") { onDelete() }
     }
 
     private var accessibilityValue: String {
         let selection = isSelected ? "Selected" : "Not selected"
         let duration = clip.duration.formatted(.number.precision(.fractionLength(1)))
-        return "\(selection), starts at \(accessibilityTimecode), \(duration) seconds"
+        return "\(selection), starts at \(accessibilityTimecode), \(duration) seconds, \(effectSummary)"
+    }
+
+    private var speedLabel: String {
+        clip.effectiveEffects.playbackRate
+            .formatted(.number.precision(.fractionLength(0...2))) + "×"
+    }
+
+    private var effectSummary: String {
+        var values = [speedLabel, clip.effectiveEffects.direction.title]
+        if clip.effectiveEffects.fadeInDuration > 0 { values.append("fade in") }
+        if clip.effectiveEffects.fadeOutDuration > 0 { values.append("fade out") }
+        if lane.kind.isVideo, !clip.effectiveVideoAdjustment.isIdentity {
+            values.append("cropped or resized")
+        }
+        return values.joined(separator: ", ")
     }
 
     private var accessibilityTimecode: String {

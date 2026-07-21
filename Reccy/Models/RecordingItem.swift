@@ -72,7 +72,7 @@ struct RecordingItem: Identifiable, Hashable, Sendable {
 /// Every file Reccy owns for one recording. Keeping these paths beside the
 /// recording identity prevents Library cleanup and Editor storage from
 /// disagreeing about which project belongs to which source file.
-struct RecordingArtifacts: Equatable, Sendable {
+nonisolated struct RecordingArtifacts: Equatable, Sendable {
     let mediaURL: URL
 
     var manifestURL: URL {

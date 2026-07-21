@@ -764,13 +764,13 @@ struct RecordView: View {
                         .contentTransition(.numericText())
                     Text("Get ready")
                         .foregroundStyle(.secondary)
-                    Button(coordinator.state.stopButtonTitle) {
-                        coordinator.requestStopRecording()
+                    Button(coordinator.state.recordingEndButtonTitle) {
+                        coordinator.requestFinishRecording()
                     }
                 case .starting:
                     ProgressView("Starting recording…")
-                    Button(coordinator.state.stopButtonTitle) {
-                        coordinator.requestStopRecording()
+                    Button(coordinator.state.recordingEndButtonTitle) {
+                        coordinator.requestFinishRecording()
                     }
                 case .stopping:
                     ProgressView("Finishing the file…")
@@ -792,15 +792,6 @@ struct RecordView: View {
                         .contentTransition(.numericText())
                     Text("\(coordinator.formattedFileSize) · \(coordinator.settings.resolution.title) · \(coordinator.settings.frameRate.title)")
                         .foregroundStyle(.secondary)
-                    Button {
-                        coordinator.requestStopRecording()
-                    } label: {
-                        Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
-                            .frame(minWidth: 150)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .tint(.red)
 
                     Button {
                         coordinator.toggleRecordingPause()
@@ -809,11 +800,41 @@ struct RecordView: View {
                             coordinator.state == .paused ? "Resume Recording" : "Pause Recording",
                             systemImage: coordinator.state == .paused ? "play.fill" : "pause.fill"
                         )
+                            .frame(minWidth: 150)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.large)
+
+                    Button {
+                        coordinator.requestCancelRecording()
+                    } label: {
+                        Label("Cancel", systemImage: "xmark")
+                            .frame(minWidth: 150)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(coordinator.state != .recording && coordinator.state != .paused)
+                    .reccyAccessibleControl(
+                        "Cancel Recording",
+                        help: "Discard this recording after confirmation without adding it to the Library"
+                    )
+
+                    Button {
+                        coordinator.requestFinishRecording()
+                    } label: {
+                        Label("Finish", systemImage: "stop.fill")
+                            .frame(minWidth: 150)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .tint(.red)
+                    .reccyAccessibleControl(
+                        coordinator.state.recordingEndButtonTitle,
+                        help: "Finish writing this recording and add it to the Library"
+                    )
                 }
             }
+            .buttonBorderShape(.capsule)
             .frame(maxWidth: .infinity, minHeight: 390)
         }
     }
