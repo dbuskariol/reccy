@@ -155,6 +155,97 @@ struct TimelineVideoLayout: Codable, Hashable, Sendable {
     }
 }
 
+enum TimelinePlaybackDirection: String, Codable, CaseIterable, Identifiable, Sendable {
+    case forward
+    case reverse
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .forward: "Forward"
+        case .reverse: "Reverse"
+        }
+    }
+}
+
+/// Persisted, non-destructive temporal and transition parameters for a clip.
+/// Source media is never rewritten; the composition builder applies the same
+/// mapping for editor preview, Library playback, and rendered export.
+struct TimelineClipEffects: Codable, Hashable, Sendable {
+    nonisolated static let supportedPlaybackRates: [Double] = [0.25, 0.5, 1, 2, 4]
+
+    var playbackRate: Double = 1
+    var direction: TimelinePlaybackDirection = .forward
+    var fadeInDuration: TimeInterval = 0
+    var fadeOutDuration: TimeInterval = 0
+
+    nonisolated func clamped(to clipDuration: TimeInterval) -> TimelineClipEffects {
+        var result = self
+        result.playbackRate = Self.supportedPlaybackRates.min {
+            abs($0 - playbackRate) < abs($1 - playbackRate)
+        } ?? 1
+        result.fadeInDuration = min(max(fadeInDuration, 0), max(clipDuration, 0))
+        result.fadeOutDuration = min(max(fadeOutDuration, 0), max(clipDuration, 0))
+        let combined = result.fadeInDuration + result.fadeOutDuration
+        if combined > clipDuration, combined > 0 {
+            let scale = max(clipDuration, 0) / combined
+            result.fadeInDuration *= scale
+            result.fadeOutDuration *= scale
+        }
+        return result
+    }
+
+    nonisolated var isIdentity: Bool {
+        playbackRate == 1
+            && direction == .forward
+            && fadeInDuration == 0
+            && fadeOutDuration == 0
+    }
+}
+
+/// Source-relative crop edges plus a centered output scale. Values are stored
+/// independently of source and render dimensions so projects remain portable
+/// across preview and export sizes.
+struct TimelineVideoAdjustment: Codable, Hashable, Sendable {
+    var cropTop: Double = 0
+    var cropLeading: Double = 0
+    var cropBottom: Double = 0
+    var cropTrailing: Double = 0
+    var scale: Double = 1
+
+    nonisolated func clamped() -> TimelineVideoAdjustment {
+        var result = self
+        result.cropTop = min(max(cropTop, 0), 0.9)
+        result.cropLeading = min(max(cropLeading, 0), 0.9)
+        result.cropBottom = min(max(cropBottom, 0), 0.9)
+        result.cropTrailing = min(max(cropTrailing, 0), 0.9)
+        result.scale = min(max(scale.isFinite ? scale : 1, 0.25), 4)
+
+        let vertical = result.cropTop + result.cropBottom
+        if vertical > 0.9 {
+            let factor = 0.9 / vertical
+            result.cropTop *= factor
+            result.cropBottom *= factor
+        }
+        let horizontal = result.cropLeading + result.cropTrailing
+        if horizontal > 0.9 {
+            let factor = 0.9 / horizontal
+            result.cropLeading *= factor
+            result.cropTrailing *= factor
+        }
+        return result
+    }
+
+    nonisolated var isIdentity: Bool {
+        cropTop == 0
+            && cropLeading == 0
+            && cropBottom == 0
+            && cropTrailing == 0
+            && scale == 1
+    }
+}
+
 enum TimelineCaptionPlacement: String, Codable, CaseIterable, Identifiable, Sendable {
     case bottom
     case top
@@ -293,11 +384,34 @@ struct TimelineClip: Identifiable, Codable, Hashable, Sendable {
     var name: String
     var linkedGroupID: UUID?
     var videoLayout: TimelineVideoLayout? = nil
+    /// Optional for backward-compatible decoding of format 3–6 projects.
+    var effects: TimelineClipEffects? = nil
+    /// Video-only source crop and centered sizing. Audio clips leave this nil.
+    var videoAdjustment: TimelineVideoAdjustment? = nil
     /// The project-owned original image for a generated single-frame proxy.
     /// Presence distinguishes an indefinitely trimmable still from a movie.
     var stillImageOriginalURL: URL? = nil
 
     var timelineEnd: TimeInterval { timelineStart + duration }
+    nonisolated var effectiveEffects: TimelineClipEffects {
+        (effects ?? TimelineClipEffects()).clamped(to: duration)
+    }
+    nonisolated var effectiveVideoAdjustment: TimelineVideoAdjustment {
+        (videoAdjustment ?? TimelineVideoAdjustment()).clamped()
+    }
+    nonisolated var sourceSpanDuration: TimeInterval { duration * effectiveEffects.playbackRate }
+    nonisolated var sourceEnd: TimeInterval { sourceStart + sourceSpanDuration }
+
+    nonisolated func sourceTime(atTimelineOffset requestedOffset: TimeInterval) -> TimeInterval {
+        let effects = effectiveEffects
+        let offset = min(max(requestedOffset, 0), duration) * effects.playbackRate
+        switch effects.direction {
+        case .forward:
+            return min(sourceEnd, sourceStart + offset)
+        case .reverse:
+            return max(sourceStart, sourceEnd - offset)
+        }
+    }
 
     func contains(_ time: TimeInterval) -> Bool {
         time > timelineStart + 0.001 && time < timelineEnd - 0.001
@@ -308,15 +422,31 @@ struct TimelineClip: Identifiable, Codable, Hashable, Sendable {
         let leftDuration = time - timelineStart
         let rightDuration = duration - leftDuration
 
+        let effects = effectiveEffects
         var left = self
         left.id = UUID()
         left.duration = leftDuration
+        if effects.direction == .reverse {
+            left.sourceStart += rightDuration * effects.playbackRate
+        }
+        var leftEffects = effects
+        leftEffects.fadeOutDuration = 0
+        left.effects = leftEffects.clamped(to: leftDuration).isIdentity
+            ? nil
+            : leftEffects.clamped(to: leftDuration)
 
         var right = self
         right.id = UUID()
-        right.sourceStart += leftDuration
+        if effects.direction == .forward {
+            right.sourceStart += leftDuration * effects.playbackRate
+        }
         right.timelineStart = time
         right.duration = rightDuration
+        var rightEffects = effects
+        rightEffects.fadeInDuration = 0
+        right.effects = rightEffects.clamped(to: rightDuration).isIdentity
+            ? nil
+            : rightEffects.clamped(to: rightDuration)
         return (left, right)
     }
 }
@@ -372,8 +502,163 @@ struct TimelineLane: Identifiable, Codable, Hashable, Sendable {
     var clips: [TimelineClip]
 }
 
+enum TimelineClipSelectionIntent: Equatable, Sendable {
+    case replace
+    case toggle
+    case extend(additive: Bool)
+}
+
+/// The editor's Mac-style clip selection state. Keeping the anchor separate
+/// from the primary clip preserves conventional Shift-click behavior after a
+/// discontiguous Command-click selection.
+struct TimelineClipSelection: Equatable, Sendable {
+    var selectedIDs: Set<UUID> = []
+    var primaryID: UUID?
+    var anchorID: UUID?
+
+    mutating func select(
+        _ id: UUID,
+        from orderedIDs: [UUID],
+        intent: TimelineClipSelectionIntent
+    ) {
+        guard let targetIndex = orderedIDs.firstIndex(of: id) else { return }
+
+        switch intent {
+        case .replace:
+            selectedIDs = [id]
+            primaryID = id
+            anchorID = id
+
+        case .toggle:
+            if selectedIDs.remove(id) != nil {
+                if primaryID == id {
+                    primaryID = orderedIDs.first(where: selectedIDs.contains)
+                }
+                if selectedIDs.isEmpty {
+                    anchorID = nil
+                } else if anchorID == id {
+                    anchorID = primaryID
+                }
+            } else {
+                selectedIDs.insert(id)
+                primaryID = id
+                anchorID = id
+            }
+
+        case .extend(let additive):
+            let anchorIndex = anchorID.flatMap { orderedIDs.firstIndex(of: $0) }
+                ?? primaryID.flatMap { orderedIDs.firstIndex(of: $0) }
+                ?? targetIndex
+            let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
+            let rangeIDs = Set(orderedIDs[bounds])
+            selectedIDs = additive ? selectedIDs.union(rangeIDs) : rangeIDs
+            primaryID = id
+            anchorID = orderedIDs[anchorIndex]
+        }
+    }
+
+    mutating func selectAll(_ orderedIDs: [UUID]) {
+        selectedIDs = Set(orderedIDs)
+        guard !orderedIDs.isEmpty else {
+            primaryID = nil
+            anchorID = nil
+            return
+        }
+        if let primaryID, selectedIDs.contains(primaryID) {
+            anchorID = primaryID
+        } else {
+            primaryID = orderedIDs[0]
+            anchorID = orderedIDs[0]
+        }
+    }
+
+    mutating func reconcile(with orderedIDs: [UUID]) {
+        let validIDs = Set(orderedIDs)
+        selectedIDs.formIntersection(validIDs)
+        if let primaryID, !validIDs.contains(primaryID) {
+            self.primaryID = orderedIDs.first(where: selectedIDs.contains)
+        }
+        if let anchorID, !validIDs.contains(anchorID) {
+            self.anchorID = primaryID
+        }
+        if selectedIDs.isEmpty {
+            primaryID = nil
+            anchorID = nil
+        }
+    }
+
+    mutating func clear() {
+        selectedIDs.removeAll()
+        primaryID = nil
+        anchorID = nil
+    }
+}
+
+enum TimelineViewportPolicy {
+    static let maximumPixelsPerSecond: Double = 220
+    static let fallbackMinimumPixelsPerSecond: Double = 4
+
+    /// Returns the exact scale at which the project endpoint fits inside the
+    /// clip viewport. Long projects may legitimately need less than one point
+    /// per second; the slider remains precise instead of imposing an arbitrary
+    /// lower zoom bound.
+    static func minimumPixelsPerSecond(
+        duration: TimeInterval,
+        viewportWidth: CGFloat
+    ) -> Double {
+        guard duration.isFinite,
+              duration > 0,
+              viewportWidth.isFinite,
+              viewportWidth > 0
+        else { return fallbackMinimumPixelsPerSecond }
+        return min(
+            maximumPixelsPerSecond,
+            max(Double(viewportWidth) / duration, 0.01)
+        )
+    }
+
+    static func rulerInterval(pixelsPerSecond: Double) -> TimeInterval {
+        let candidates: [TimeInterval] = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1_800, 3_600]
+        let scale = max(pixelsPerSecond, 0.01)
+        return candidates.first(where: { $0 * scale >= 64 }) ?? candidates[candidates.count - 1]
+    }
+}
+
+enum TimelinePlaybackFollowPolicy {
+    /// Returns a direction-aware scroll target only after the playhead enters
+    /// the viewport's edge comfort zone. Callers own paused/manual-navigation
+    /// suppression so this remains deterministic and independently testable.
+    static func targetOffset(
+        previousTime: TimeInterval,
+        currentTime: TimeInterval,
+        pixelsPerSecond: Double,
+        viewportOffset: CGFloat,
+        viewportWidth: CGFloat
+    ) -> CGFloat? {
+        guard pixelsPerSecond.isFinite,
+              pixelsPerSecond > 0,
+              viewportOffset.isFinite,
+              viewportWidth.isFinite,
+              viewportWidth > 0
+        else { return nil }
+        let playheadX = CGFloat(currentTime * pixelsPerSecond)
+        let trailing = viewportOffset + viewportWidth
+        let margin = min(max(viewportWidth * 0.12, 32), 96)
+        if currentTime < previousTime, playheadX < viewportOffset + margin {
+            return playheadX - viewportWidth * 0.28
+        }
+        if currentTime >= previousTime, playheadX > trailing - margin {
+            return playheadX - viewportWidth * 0.72
+        }
+        if playheadX < viewportOffset || playheadX > trailing {
+            return playheadX - viewportWidth / 2
+        }
+        return nil
+    }
+}
+
 struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
-    static let currentFormatVersion = 6
+    static let currentFormatVersion = 7
 
     var formatVersion = currentFormatVersion
     var id = UUID()
@@ -464,6 +749,25 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         lanes.lazy.flatMap(\.clips).first(where: { $0.id == id })
     }
 
+    /// Visual reading order for native range selection: time first, followed
+    /// by the stable top-to-bottom lane order for clips sharing a boundary.
+    var orderedClipIDs: [UUID] {
+        lanes.enumerated()
+            .flatMap { laneIndex, lane in
+                lane.clips.map { (clip: $0, laneIndex: laneIndex) }
+            }
+            .sorted { lhs, rhs in
+                if abs(lhs.clip.timelineStart - rhs.clip.timelineStart) > 0.000_1 {
+                    return lhs.clip.timelineStart < rhs.clip.timelineStart
+                }
+                if lhs.laneIndex != rhs.laneIndex {
+                    return lhs.laneIndex < rhs.laneIndex
+                }
+                return lhs.clip.id.uuidString < rhs.clip.id.uuidString
+            }
+            .map(\.clip.id)
+    }
+
     func videoGap(id: UUID) -> TimelineGapSegment? {
         videoGaps.first(where: { $0.id == id })
     }
@@ -521,6 +825,92 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         }
         reconcileVideoGaps()
         modifiedAt = Date()
+    }
+
+    mutating func deleteClips(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        for laneIndex in lanes.indices {
+            lanes[laneIndex].clips.removeAll { ids.contains($0.id) }
+        }
+        reconcileVideoGaps()
+        modifiedAt = Date()
+    }
+
+    /// Moves a discontiguous selection as one rigid group. The shared delta is
+    /// clamped against time zero and the nearest stationary clip in every
+    /// affected lane, so clips never drift relative to one another or overlap.
+    @discardableResult
+    mutating func moveClips(
+        ids requestedIDs: Set<UUID>,
+        anchorID: UUID,
+        to desiredAnchorStart: TimeInterval,
+        includeLinked: Bool = false,
+        snapTargets: [TimeInterval] = [],
+        snapTolerance: TimeInterval = 0
+    ) -> TimeInterval? {
+        normalizeTimelineBounds()
+        guard let anchor = clip(id: anchorID), requestedIDs.contains(anchorID) else { return nil }
+
+        var movingIDs = requestedIDs
+        if includeLinked {
+            for id in requestedIDs {
+                if let selected = clip(id: id) {
+                    movingIDs.formUnion(linkedClipIDs(matching: selected))
+                }
+            }
+        }
+        let movingClips = lanes.flatMap(\.clips).filter { movingIDs.contains($0.id) }
+        guard !movingClips.isEmpty else { return nil }
+
+        var delta = desiredAnchorStart - anchor.timelineStart
+        let stationary = lanes.flatMap(\.clips).filter { !movingIDs.contains($0.id) }
+        if snapTolerance > 0 {
+            let groupStart = movingClips.map(\.timelineStart).min() ?? anchor.timelineStart
+            let groupEnd = movingClips.map(\.timelineEnd).max() ?? anchor.timelineEnd
+            let targets = [0] + snapTargets + stationary.flatMap { [$0.timelineStart, $0.timelineEnd] }
+            let corrections = targets.flatMap { [$0 - (groupStart + delta), $0 - (groupEnd + delta)] }
+            if let correction = corrections.min(by: { abs($0) < abs($1) }),
+               abs(correction) <= snapTolerance
+            {
+                delta += correction
+            }
+        }
+
+        var lowerDelta = -(movingClips.map(\.timelineStart).min() ?? 0)
+        var upperDelta = TimeInterval.greatestFiniteMagnitude
+        for lane in lanes {
+            let laneMoving = lane.clips.filter { movingIDs.contains($0.id) }
+            let laneStationary = lane.clips.filter { !movingIDs.contains($0.id) }
+            for moving in laneMoving {
+                if let previousEnd = laneStationary
+                    .filter({ $0.timelineEnd <= moving.timelineStart + 0.000_1 })
+                    .map(\.timelineEnd)
+                    .max()
+                {
+                    lowerDelta = max(lowerDelta, previousEnd - moving.timelineStart)
+                }
+                if let nextStart = laneStationary
+                    .filter({ $0.timelineStart >= moving.timelineEnd - 0.000_1 })
+                    .map(\.timelineStart)
+                    .min()
+                {
+                    upperDelta = min(upperDelta, nextStart - moving.timelineEnd)
+                }
+            }
+        }
+        delta = min(max(delta, lowerDelta), upperDelta)
+
+        for laneIndex in lanes.indices {
+            for clipIndex in lanes[laneIndex].clips.indices
+                where movingIDs.contains(lanes[laneIndex].clips[clipIndex].id)
+            {
+                lanes[laneIndex].clips[clipIndex].timelineStart += delta
+            }
+            lanes[laneIndex].clips.sort { $0.timelineStart < $1.timelineStart }
+        }
+        reconcileVideoGaps()
+        modifiedAt = Date()
+        return anchor.timelineStart + delta
     }
 
     /// Moves one clip by default. Linked A/V movement is an explicit editing
@@ -609,7 +999,11 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
 
                 switch edge {
                 case .leading:
-                    let sourceBound = candidate.timelineStart - candidate.sourceStart
+                    let effects = candidate.effectiveEffects
+                    let sourceExpansion = effects.direction == .forward
+                        ? candidate.sourceStart / effects.playbackRate
+                        : max(0, sourceDuration - candidate.sourceEnd) / effects.playbackRate
+                    let sourceBound = candidate.timelineStart - sourceExpansion
                     let neighbourBound = stationary
                         .filter { $0.timelineEnd <= candidate.timelineStart + 0.001 }
                         .map(\.timelineEnd)
@@ -619,12 +1013,19 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
                     let finalTime = min(max(proposed, lowerBound), upperBound)
                     let delta = finalTime - candidate.timelineStart
                     lanes[laneIndex].clips[clipIndex].timelineStart = finalTime
-                    lanes[laneIndex].clips[clipIndex].sourceStart += delta
+                    if effects.direction == .forward {
+                        lanes[laneIndex].clips[clipIndex].sourceStart += delta * effects.playbackRate
+                    }
                     lanes[laneIndex].clips[clipIndex].duration -= delta
+                    normalizeEffects(laneIndex: laneIndex, clipIndex: clipIndex)
                     if candidate.id == selected.id { selectedResult = finalTime }
 
                 case .trailing:
-                    let sourceBound = candidate.timelineStart + max(0, sourceDuration - candidate.sourceStart)
+                    let effects = candidate.effectiveEffects
+                    let maximumDuration = effects.direction == .forward
+                        ? max(0, sourceDuration - candidate.sourceStart) / effects.playbackRate
+                        : candidate.sourceEnd / effects.playbackRate
+                    let sourceBound = candidate.timelineStart + maximumDuration
                     let neighbourBound = stationary
                         .filter { $0.timelineStart >= candidate.timelineEnd - 0.001 }
                         .map(\.timelineStart)
@@ -632,7 +1033,13 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
                     let lowerBound = candidate.timelineStart + minimumDuration
                     let upperBound = min(sourceBound, neighbourBound)
                     let finalTime = min(max(proposed, lowerBound), upperBound)
-                    lanes[laneIndex].clips[clipIndex].duration = finalTime - candidate.timelineStart
+                    let finalDuration = finalTime - candidate.timelineStart
+                    if effects.direction == .reverse {
+                        lanes[laneIndex].clips[clipIndex].sourceStart = candidate.sourceEnd
+                            - finalDuration * effects.playbackRate
+                    }
+                    lanes[laneIndex].clips[clipIndex].duration = finalDuration
+                    normalizeEffects(laneIndex: laneIndex, clipIndex: clipIndex)
                     if candidate.id == selected.id { selectedResult = finalTime }
                 }
             }
@@ -641,6 +1048,109 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         reconcileVideoGaps()
         modifiedAt = Date()
         return selectedResult
+    }
+
+    /// Changes speed without changing the selected source range. Lane-local
+    /// ripple preserves every following gap and linked A/V remains aligned when
+    /// the caller expands the selection through `includeLinked`.
+    mutating func setPlaybackRate(
+        _ requestedRate: Double,
+        clipIDs requestedIDs: Set<UUID>,
+        includeLinked: Bool = true
+    ) {
+        guard !requestedIDs.isEmpty else { return }
+        let rate = TimelineClipEffects.supportedPlaybackRates.min {
+            abs($0 - requestedRate) < abs($1 - requestedRate)
+        } ?? 1
+        let editingIDs = expandedClipIDs(requestedIDs, includeLinked: includeLinked)
+        let canonicalEdits = playbackTimeWarpEdits(
+            rate: rate,
+            editingIDs: editingIDs
+        )
+
+        for laneIndex in lanes.indices {
+            var accumulatedShift: TimeInterval = 0
+            let ordered = lanes[laneIndex].clips.sorted { $0.timelineStart < $1.timelineStart }
+            var updated: [TimelineClip] = []
+            for var clip in ordered {
+                clip.timelineStart += accumulatedShift
+                if editingIDs.contains(clip.id) {
+                    let oldDuration = clip.duration
+                    var effects = clip.effectiveEffects
+                    let sourceSpan = clip.sourceSpanDuration
+                    effects.playbackRate = rate
+                    clip.duration = sourceSpan / rate
+                    clip.effects = effects.clamped(to: clip.duration).isIdentity
+                        ? nil
+                        : effects.clamped(to: clip.duration)
+                    accumulatedShift += clip.duration - oldDuration
+                }
+                updated.append(clip)
+            }
+            lanes[laneIndex].clips = updated
+        }
+        applyPlaybackTimeWarp(canonicalEdits)
+        reconcileVideoGaps()
+        modifiedAt = Date()
+    }
+
+    mutating func setPlaybackDirection(
+        _ direction: TimelinePlaybackDirection,
+        clipIDs requestedIDs: Set<UUID>,
+        includeLinked: Bool = true
+    ) {
+        let editingIDs = expandedClipIDs(requestedIDs, includeLinked: includeLinked)
+        guard !editingIDs.isEmpty else { return }
+        for laneIndex in lanes.indices {
+            for clipIndex in lanes[laneIndex].clips.indices
+                where editingIDs.contains(lanes[laneIndex].clips[clipIndex].id)
+            {
+                var effects = lanes[laneIndex].clips[clipIndex].effectiveEffects
+                effects.direction = direction
+                lanes[laneIndex].clips[clipIndex].effects = effects.isIdentity ? nil : effects
+            }
+        }
+        modifiedAt = Date()
+    }
+
+    mutating func setFadeDurations(
+        fadeIn: TimeInterval? = nil,
+        fadeOut: TimeInterval? = nil,
+        clipIDs requestedIDs: Set<UUID>,
+        includeLinked: Bool = true
+    ) {
+        let editingIDs = expandedClipIDs(requestedIDs, includeLinked: includeLinked)
+        guard !editingIDs.isEmpty else { return }
+        for laneIndex in lanes.indices {
+            for clipIndex in lanes[laneIndex].clips.indices
+                where editingIDs.contains(lanes[laneIndex].clips[clipIndex].id)
+            {
+                let duration = lanes[laneIndex].clips[clipIndex].duration
+                var effects = lanes[laneIndex].clips[clipIndex].effectiveEffects
+                if let fadeIn { effects.fadeInDuration = fadeIn }
+                if let fadeOut { effects.fadeOutDuration = fadeOut }
+                effects = effects.clamped(to: duration)
+                lanes[laneIndex].clips[clipIndex].effects = effects.isIdentity ? nil : effects
+            }
+        }
+        modifiedAt = Date()
+    }
+
+    mutating func setVideoAdjustment(
+        _ adjustment: TimelineVideoAdjustment,
+        clipIDs requestedIDs: Set<UUID>
+    ) {
+        let normalized = adjustment.clamped()
+        for laneIndex in lanes.indices where lanes[laneIndex].kind.isVideo {
+            for clipIndex in lanes[laneIndex].clips.indices
+                where requestedIDs.contains(lanes[laneIndex].clips[clipIndex].id)
+            {
+                lanes[laneIndex].clips[clipIndex].videoAdjustment = normalized.isIdentity
+                    ? nil
+                    : normalized
+            }
+        }
+        modifiedAt = Date()
     }
 
     mutating func rippleDelete(timeRange: Range<TimeInterval>) {
@@ -868,6 +1378,90 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         max(0, min(range.upperBound, gap.timelineEnd) - max(range.lowerBound, gap.timelineStart))
     }
 
+    private func expandedClipIDs(
+        _ requestedIDs: Set<UUID>,
+        includeLinked: Bool
+    ) -> Set<UUID> {
+        guard includeLinked else { return requestedIDs }
+        var result = requestedIDs
+        for id in requestedIDs {
+            if let clip = clip(id: id) {
+                result.formUnion(linkedClipIDs(matching: clip))
+            }
+        }
+        return result
+    }
+
+    private func playbackTimeWarpEdits(
+        rate: Double,
+        editingIDs: Set<UUID>
+    ) -> [TimelinePlaybackTimeWarpEdit] {
+        guard let lane = lanes.first(where: { $0.kind == .video }) else { return [] }
+        var accumulatedShift: TimeInterval = 0
+        return lane.clips
+            .sorted { $0.timelineStart < $1.timelineStart }
+            .compactMap { clip in
+                let newStart = clip.timelineStart + accumulatedShift
+                guard editingIDs.contains(clip.id) else { return nil }
+                let newDuration = clip.sourceSpanDuration / rate
+                let edit = TimelinePlaybackTimeWarpEdit(
+                    oldRange: clip.timelineStart..<clip.timelineEnd,
+                    newRange: newStart..<(newStart + newDuration)
+                )
+                accumulatedShift += newDuration - clip.duration
+                return edit
+            }
+    }
+
+    private mutating func applyPlaybackTimeWarp(_ edits: [TimelinePlaybackTimeWarpEdit]) {
+        guard !edits.isEmpty else { return }
+        if var track = captionTrack {
+            track.cues = track.cues.compactMap { cue in
+                var cue = cue
+                let start = TimelinePlaybackTimeWarpEdit.map(cue.timelineStart, through: edits)
+                let end = TimelinePlaybackTimeWarpEdit.map(cue.timelineEnd, through: edits)
+                guard end - start >= frameDuration else { return nil }
+                cue.timelineStart = start
+                cue.duration = end - start
+                return cue
+            }
+            captionTrack = track
+        }
+        if var track = mouseFollowZoomTrack {
+            track.segments = track.segments.compactMap { segment in
+                var segment = segment
+                let start = TimelinePlaybackTimeWarpEdit.map(segment.timelineStart, through: edits)
+                let end = TimelinePlaybackTimeWarpEdit.map(segment.timelineEnd, through: edits)
+                guard end - start >= frameDuration else { return nil }
+                segment.timelineStart = start
+                segment.duration = end - start
+                segment.points = segment.points.map {
+                    MouseFollowZoomPoint(
+                        timelineTime: TimelinePlaybackTimeWarpEdit.map(
+                            $0.timelineTime,
+                            through: edits
+                        ),
+                        position: $0.position
+                    )
+                }
+                return segment
+            }
+            mouseFollowZoomTrack = track
+        }
+        if let posterFrameTime {
+            self.posterFrameTime = TimelinePlaybackTimeWarpEdit.map(
+                posterFrameTime,
+                through: edits
+            )
+        }
+    }
+
+    private mutating func normalizeEffects(laneIndex: Int, clipIndex: Int) {
+        let duration = lanes[laneIndex].clips[clipIndex].duration
+        let effects = lanes[laneIndex].clips[clipIndex].effectiveEffects.clamped(to: duration)
+        lanes[laneIndex].clips[clipIndex].effects = effects.isIdentity ? nil : effects
+    }
+
     private func linkedClipIDs(matching selected: TimelineClip) -> Set<UUID> {
         guard let groupID = selected.linkedGroupID else { return [selected.id] }
         let tolerance = 0.002
@@ -957,5 +1551,33 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         updated.insert(moved, at: insertionIndex)
         lanes[laneIndex].clips = updated.sorted { $0.timelineStart < $1.timelineStart }
         return finalStart
+    }
+}
+
+private struct TimelinePlaybackTimeWarpEdit {
+    let oldRange: Range<TimeInterval>
+    let newRange: Range<TimeInterval>
+
+    static func map(
+        _ time: TimeInterval,
+        through edits: [TimelinePlaybackTimeWarpEdit]
+    ) -> TimeInterval {
+        var accumulatedShift: TimeInterval = 0
+        for edit in edits {
+            if time < edit.oldRange.lowerBound {
+                return max(0, time + accumulatedShift)
+            }
+            if time <= edit.oldRange.upperBound {
+                let oldDuration = edit.oldRange.upperBound - edit.oldRange.lowerBound
+                let newDuration = edit.newRange.upperBound - edit.newRange.lowerBound
+                let progress = oldDuration > 0
+                    ? (time - edit.oldRange.lowerBound) / oldDuration
+                    : 0
+                return max(0, edit.newRange.lowerBound + progress * newDuration)
+            }
+            accumulatedShift += (edit.newRange.upperBound - edit.newRange.lowerBound)
+                - (edit.oldRange.upperBound - edit.oldRange.lowerBound)
+        }
+        return max(0, time + accumulatedShift)
     }
 }

@@ -43,12 +43,12 @@ enum CaptureState: Equatable, Sendable {
         }
     }
 
-    var stopButtonTitle: String {
+    var recordingEndButtonTitle: String {
         switch self {
         case .countingDown: "Cancel"
         case .starting: "Cancel Start"
         case .stopping: "Finishing…"
-        default: "Stop Recording"
+        default: "Finish Recording"
         }
     }
 
@@ -74,6 +74,38 @@ enum CaptureStopOperation: Equatable, Sendable {
     case cancelCountdown
     case cancelStartup
     case finishRecording
+}
+
+enum RecordingEndIntent: Equatable, Sendable {
+    case finish
+    case discard
+
+    var alertTitle: String {
+        switch self {
+        case .finish: "Finish Recording?"
+        case .discard: "Cancel This Recording?"
+        }
+    }
+
+    var informativeText: String {
+        switch self {
+        case .finish:
+            "Reccy will finish writing the current recording and add it to your Library."
+        case .discard:
+            "The recording in progress will be discarded and won’t be added to your Library. This can’t be undone."
+        }
+    }
+
+    var actionTitle: String {
+        switch self {
+        case .finish: "Finish Recording"
+        case .discard: "Discard Recording"
+        }
+    }
+
+    var safeTitle: String { "Keep Recording" }
+
+    var isDestructive: Bool { self == .discard }
 }
 
 enum CaptureFailureArtifactDisposition: Equatable, Sendable {
@@ -218,7 +250,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var activationCancellable: AnyCancellable?
     private let regionSelectionController = RegionSelectionController()
     private let boundaryController = CaptureBoundaryController()
-    private var isPresentingStopRecordingConfirmation = false
+    private var isPresentingRecordingEndConfirmation = false
 #if DEBUG
     private var suppressesPermissionRefreshForQA = false
     private var isSimulatingRecordingForQA = false
@@ -349,7 +381,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if self.state.isRecording {
-                    self.requestStopRecording()
+                    self.requestFinishRecording()
                 } else {
                     self.startRecording()
                 }
@@ -635,36 +667,56 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
-    /// Routes every user-initiated stop through one native confirmation. Capture
-    /// startup cancellation remains immediate, and automatic safety stops call
-    /// `stopRecording()` directly so low-space or failure recovery cannot wait
-    /// on modal UI while primary media is at risk.
-    func requestStopRecording() {
+    /// Routes every user-initiated finish through one native confirmation.
+    /// Capture startup cancellation remains immediate, and automatic safety
+    /// stops call `stopRecording()` directly so low-space or failure recovery
+    /// cannot wait on modal UI while primary media is at risk.
+    func requestFinishRecording() {
         guard state.requiresStopConfirmation else {
             stopRecording()
             return
         }
-        guard !isPresentingStopRecordingConfirmation else { return }
-        isPresentingStopRecordingConfirmation = true
+        presentRecordingEndConfirmation(.finish)
+    }
+
+    /// Cancelling an active recording is deliberately separate from cancelling
+    /// countdown/startup. The confirmed path shuts down every producer and the
+    /// writer before removing only this session's exact staged artifacts.
+    func requestCancelRecording() {
+        guard state.requiresStopConfirmation else { return }
+        presentRecordingEndConfirmation(.discard)
+    }
+
+    private func presentRecordingEndConfirmation(_ intent: RecordingEndIntent) {
+        guard !isPresentingRecordingEndConfirmation else { return }
+        isPresentingRecordingEndConfirmation = true
 
         let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Stop Recording?"
-        alert.informativeText = "Reccy will finish writing the current recording and add it to your Library."
+        alert.alertStyle = intent.isDestructive ? .warning : .informational
+        alert.messageText = intent.alertTitle
+        alert.informativeText = intent.informativeText
 
-        let cancelButton = alert.addButton(withTitle: "Cancel")
-        cancelButton.keyEquivalent = "\r"
-        let stopButton = alert.addButton(withTitle: "Stop Recording")
-        stopButton.hasDestructiveAction = true
-        stopButton.keyEquivalent = ""
+        // NSAlert places the first button at the trailing edge. Keep the safe
+        // choice there as the Return-key default, with the irreversible action
+        // immediately to its left and never keyboard-defaulted.
+        let keepButton = alert.addButton(withTitle: intent.safeTitle)
+        keepButton.keyEquivalent = "\r"
+        let actionButton = alert.addButton(withTitle: intent.actionTitle)
+        actionButton.hasDestructiveAction = intent.isDestructive
+        actionButton.keyEquivalent = ""
 
         let handleResponse: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard let self else { return }
-            self.isPresentingStopRecordingConfirmation = false
+            self.isPresentingRecordingEndConfirmation = false
             guard response == .alertSecondButtonReturn,
                   self.state.requiresStopConfirmation
             else { return }
-            self.stopRecording()
+            switch intent {
+            case .finish:
+                self.stopRecording()
+            case .discard:
+                self.discardActiveRecording()
+            }
         }
 
         if let window = NSApp.keyWindow,
@@ -674,6 +726,33 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             alert.beginSheetModal(for: window, completionHandler: handleResponse)
         } else {
             handleResponse(alert.runModal())
+        }
+    }
+
+    private func discardActiveRecording() {
+#if DEBUG
+        if isSimulatingRecordingForQA {
+            isSimulatingRecordingForQA = false
+            completeDiscardedRecording(at: nil)
+            return
+        }
+#endif
+        guard recordingStopTask == nil,
+              let recorder = multitrackRecorder,
+              state == .recording || state == .paused
+        else { return }
+
+        sessionGeneration &+= 1
+        recordingStartTask?.cancel()
+        recordingStartTask = nil
+        state = .stopping
+        meterTask?.cancel()
+        let outputURL = activeOutputURL
+
+        recordingStopTask = Task { [weak self] in
+            await recorder.cancel()
+            guard let self, self.state == .stopping else { return }
+            self.completeDiscardedRecording(at: outputURL)
         }
     }
 
@@ -1402,6 +1481,45 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         sessionCompletion = CaptureSessionCompletion(outcome: .cancelled)
         if needsRecoveryInspection {
             library.recoverInterruptedRecordingIfNeeded()
+        }
+    }
+
+    private func completeDiscardedRecording(at outputURL: URL?) {
+        transcription.cancelLive()
+        var cleanupError: Error?
+        if let outputURL {
+            do {
+                try RecordingRecoveryJournal.discardCancelledRecording(mediaURL: outputURL)
+            } catch {
+                cleanupError = error
+            }
+        }
+
+        recordingStartTask = nil
+        recordingStopTask = nil
+        meterTask?.cancel()
+        meterTask = nil
+        multitrackRecorder = nil
+        activeOutputURL = nil
+        activeRecordingManifest = nil
+        activeTranscriptionConfiguration = nil
+        pendingCompletionNotice = nil
+        recordingLease = nil
+        previewPipeline.clear()
+        cameraPreviewPipeline.clear()
+        clearSourceSelection()
+        resetSessionTelemetry()
+        state = .idle
+        sessionCompletion = CaptureSessionCompletion(outcome: .cancelled)
+
+        if let cleanupError {
+            library.presentNotice(
+                kind: .warning,
+                title: "Recording discard needs attention",
+                message: "Reccy did not add the recording to your Library, but couldn’t remove every temporary artifact. \(cleanupError.localizedDescription)"
+            )
+        } else {
+            library.refresh()
         }
     }
 

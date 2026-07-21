@@ -85,33 +85,54 @@ enum TimelineCompositionBuilder {
         var videoLayers: [(
             kind: TimelineLaneKind,
             laneOrder: Int,
+            layerOrder: Int,
             instruction: AVVideoCompositionLayerInstruction
         )] = []
         let videoRenderSize = try await primaryVideoRenderSize(for: project, sources: sources)
 
         for (laneOrder, lane) in project.lanes.enumerated() where !lane.clips.isEmpty {
-            guard let compositionTrack = composition.addMutableTrack(
-                withMediaType: lane.kind.mediaType,
-                preferredTrackID: kCMPersistentTrackID_Invalid
-            ) else {
-                throw TimelineCompositionBuildError.couldNotCreateTrack(lane.kind)
-            }
-
             let sortedClips = lane.clips.sorted(by: { $0.timelineStart < $1.timelineStart })
-            var previousVideoSource: (clip: TimelineClip, track: AVAssetTrack)?
-            var videoCursor: TimeInterval = 0
-            var primaryVideoTransforms: [(range: Range<TimeInterval>, transform: CGAffineTransform)] = []
-            var videoLayerConfiguration = lane.kind.isVideo
-                ? AVVideoCompositionLayerInstruction.Configuration(trackID: compositionTrack.trackID)
-                : nil
-            if lane.kind.isOverlayVideo,
-               let firstClip = sortedClips.first,
-               firstClip.timelineStart > 0
-            {
-                videoLayerConfiguration?.setOpacity(0, at: .zero)
+            // AVFoundation can stall when one composition track changes crop or
+            // transform discontinuously at an adjacent edit. Alternating between
+            // two tracks gives each cut a clean layer boundary while keeping the
+            // track count bounded for arbitrarily long projects.
+            let compositionTrackCount = lane.kind.isVideo ? min(sortedClips.count, 2) : 1
+            let compositionTracks = try (0..<compositionTrackCount).map { _ in
+                guard let track = composition.addMutableTrack(
+                    withMediaType: lane.kind.mediaType,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ) else {
+                    throw TimelineCompositionBuildError.couldNotCreateTrack(lane.kind)
+                }
+                return track
+            }
+            var videoLayerConfigurations = lane.kind.isVideo
+                ? compositionTracks.map {
+                    AVVideoCompositionLayerInstruction.Configuration(trackID: $0.trackID)
+                }
+                : []
+            if lane.kind.isOverlayVideo {
+                for index in videoLayerConfigurations.indices {
+                    videoLayerConfigurations[index].setOpacity(0, at: .zero)
+                }
             }
 
-            for clip in sortedClips {
+            var primaryVideoTransforms = Array(
+                repeating: [(range: Range<TimeInterval>, transform: CGAffineTransform)](),
+                count: compositionTrackCount
+            )
+            var previousVideoSource: (
+                clip: TimelineClip,
+                track: AVAssetTrack,
+                compositionTrack: AVMutableCompositionTrack,
+                trackIndex: Int,
+                state: VideoRenderState?
+            )?
+            var videoCursor: TimeInterval = 0
+
+            for (clipIndex, clip) in sortedClips.enumerated() {
+                let trackIndex = lane.kind.isVideo ? clipIndex % compositionTrackCount : 0
+                let compositionTrack = compositionTracks[trackIndex]
                 let key = SourceTrackKey(
                     url: clip.sourceURL,
                     mediaType: lane.kind.mediaType,
@@ -124,18 +145,65 @@ enum TimelineCompositionBuilder {
                     )
                 }
 
+                let renderState: VideoRenderState?
+                if lane.kind.isVideo, let videoRenderSize {
+                    let geometry = try await sourceVideoGeometry(sourceTrack)
+                    renderState = VideoRenderState(
+                        transform: videoTransform(
+                            geometry: geometry,
+                            renderSize: videoRenderSize,
+                            layout: lane.kind.isOverlayVideo
+                                ? (clip.videoLayout ?? .defaultCamera)
+                                : nil,
+                            adjustment: clip.effectiveVideoAdjustment
+                        ),
+                        cropRectangle: sourceCropRectangle(
+                            geometry: geometry,
+                            adjustment: clip.effectiveVideoAdjustment
+                        )
+                    )
+                } else {
+                    renderState = nil
+                }
+
                 if lane.kind == .video, clip.timelineStart > videoCursor + 0.000_1 {
                     let gap = videoCursor..<clip.timelineStart
                     let fillMode = gapFillMode(for: gap, in: project)
+                    let targetTrackIndex: Int
+                    let targetTrack: AVMutableCompositionTrack
+                    let gapState: VideoRenderState?
+                    switch fillMode {
+                    case .holdPrevious:
+                        targetTrackIndex = previousVideoSource?.trackIndex ?? trackIndex
+                        targetTrack = previousVideoSource?.compositionTrack ?? compositionTrack
+                        gapState = previousVideoSource?.state ?? renderState
+                    case .holdNext:
+                        targetTrackIndex = trackIndex
+                        targetTrack = compositionTrack
+                        gapState = renderState ?? previousVideoSource?.state
+                    case .black:
+                        targetTrackIndex = trackIndex
+                        targetTrack = compositionTrack
+                        gapState = nil
+                    }
                     do {
                         try fillVideoGap(
                             gap,
                             mode: fillMode,
                             frameDuration: project.frameDuration,
-                            compositionTrack: compositionTrack,
-                            previous: previousVideoSource,
+                            compositionTrack: targetTrack,
+                            previous: previousVideoSource.map { ($0.clip, $0.track) },
                             next: (clip, sourceTrack)
                         )
+                        if let gapState {
+                            configureVideoGeometry(
+                                gapState,
+                                range: gap,
+                                animateTransform: project.mouseFollowZoomTrack != nil,
+                                configuration: &videoLayerConfigurations[targetTrackIndex],
+                                transformRanges: &primaryVideoTransforms[targetTrackIndex]
+                            )
+                        }
                     } catch {
                         throw TimelineCompositionBuildError.couldNotFillGap(
                             fillMode,
@@ -152,47 +220,67 @@ enum TimelineCompositionBuilder {
                             frameDuration: project.frameDuration,
                             compositionTrack: compositionTrack
                         )
+                    } else if clip.effectiveEffects.direction == .reverse,
+                              lane.kind.isVideo
+                    {
+                        try insertReversedVideo(
+                            clip,
+                            sourceTrack: sourceTrack,
+                            frameDuration: project.frameDuration,
+                            compositionTrack: compositionTrack
+                        )
+                    } else if clip.effectiveEffects.direction == .reverse {
+                        let reverseURL = try await TimelineReverseAudioRenderer.shared.reversedTrack(
+                            sourceURL: clip.sourceURL,
+                            sourceTrackID: clip.sourceTrackID,
+                            sourceStart: clip.sourceStart,
+                            sourceDuration: clip.sourceSpanDuration
+                        )
+                        let reverseAsset = AVURLAsset(url: reverseURL)
+                        guard let reverseTrack = try await reverseAsset.loadTracks(withMediaType: .audio).first else {
+                            throw TimelineReverseAudioError.missingTrack(clip.sourceTrackID)
+                        }
+                        try insertRetimedClip(
+                            clip,
+                            sourceTrack: reverseTrack,
+                            sourceStart: 0,
+                            compositionTrack: compositionTrack
+                        )
                     } else {
-                        try compositionTrack.insertTimeRange(
-                            CMTimeRange(
-                                start: timelineTime(clip.sourceStart),
-                                duration: timelineTime(clip.duration)
-                            ),
-                            of: sourceTrack,
-                            at: timelineTime(clip.timelineStart)
+                        try insertRetimedClip(
+                            clip,
+                            sourceTrack: sourceTrack,
+                            sourceStart: clip.sourceStart,
+                            compositionTrack: compositionTrack
                         )
                     }
                 } catch {
                     throw TimelineCompositionBuildError.couldNotInsertClip(clip.name, error)
                 }
 
-                if lane.kind.isVideo, let videoRenderSize {
-                    let geometry = try await sourceVideoGeometry(sourceTrack)
-                    let transform = videoTransform(
-                        geometry: geometry,
-                        renderSize: videoRenderSize,
-                        layout: lane.kind.isOverlayVideo
-                            ? (clip.videoLayout ?? .defaultCamera)
-                            : nil
+                if let renderState {
+                    configureVideoGeometry(
+                        renderState,
+                        range: clip.timelineStart..<clip.timelineEnd,
+                        animateTransform: lane.kind == .video && project.mouseFollowZoomTrack != nil,
+                        configuration: &videoLayerConfigurations[trackIndex],
+                        transformRanges: &primaryVideoTransforms[trackIndex]
                     )
-                    videoLayerConfiguration?.setTransform(
-                        transform,
-                        at: timelineTime(clip.timelineStart)
+                    configureVideoOpacity(
+                        for: clip,
+                        isOverlay: lane.kind.isOverlayVideo,
+                        configuration: &videoLayerConfigurations[trackIndex]
                     )
-                    if lane.kind == .video {
-                        primaryVideoTransforms.append((
-                            range: clip.timelineStart..<clip.timelineEnd,
-                            transform: transform
-                        ))
-                    }
-                    if lane.kind.isOverlayVideo {
-                        videoLayerConfiguration?.setOpacity(1, at: timelineTime(clip.timelineStart))
-                        videoLayerConfiguration?.setOpacity(0, at: timelineTime(clip.timelineEnd))
-                    }
                 }
 
                 if lane.kind == .video {
-                    previousVideoSource = (clip, sourceTrack)
+                    previousVideoSource = (
+                        clip,
+                        sourceTrack,
+                        compositionTrack,
+                        trackIndex,
+                        renderState
+                    )
                     videoCursor = clip.timelineEnd
                 }
             }
@@ -201,15 +289,28 @@ enum TimelineCompositionBuilder {
                 if project.duration > videoCursor + 0.000_1 {
                     let gap = videoCursor..<project.duration
                     let fillMode = gapFillMode(for: gap, in: project)
+                    let targetTrackIndex = previousVideoSource?.trackIndex ?? 0
+                    let targetTrack = previousVideoSource?.compositionTrack ?? compositionTracks[0]
                     do {
                         try fillVideoGap(
                             gap,
                             mode: fillMode,
                             frameDuration: project.frameDuration,
-                            compositionTrack: compositionTrack,
-                            previous: previousVideoSource,
+                            compositionTrack: targetTrack,
+                            previous: previousVideoSource.map { ($0.clip, $0.track) },
                             next: nil
                         )
+                        if fillMode == .holdPrevious,
+                           let state = previousVideoSource?.state
+                        {
+                            configureVideoGeometry(
+                                state,
+                                range: gap,
+                                animateTransform: project.mouseFollowZoomTrack != nil,
+                                configuration: &videoLayerConfigurations[targetTrackIndex],
+                                transformRanges: &primaryVideoTransforms[targetTrackIndex]
+                            )
+                        }
                     } catch {
                         throw TimelineCompositionBuildError.couldNotFillGap(
                             fillMode,
@@ -217,38 +318,41 @@ enum TimelineCompositionBuilder {
                         )
                     }
                 }
-                primaryVideoTrack = compositionTrack
+                primaryVideoTrack = compositionTracks.first
             }
 
-            if let videoLayerConfiguration {
-                let baseInstruction = AVVideoCompositionLayerInstruction(
-                    configuration: videoLayerConfiguration
-                )
-                let instruction: AVVideoCompositionLayerInstruction
-                if lane.kind == .video,
-                   let renderSize = videoRenderSize,
-                   let track = project.mouseFollowZoomTrack
-                {
-                    instruction = applyMouseFollowZoom(
-                        track,
-                        baseTransforms: primaryVideoTransformsCoveringGaps(
-                            primaryVideoTransforms,
-                            project: project
-                        ),
-                        renderSize: renderSize,
-                        instruction: baseInstruction
-                    )
-                } else {
-                    instruction = baseInstruction
+            if lane.kind.isVideo {
+                for index in videoLayerConfigurations.indices {
+                    var configuration = videoLayerConfigurations[index]
+                    if lane.kind == .video,
+                       let renderSize = videoRenderSize,
+                       let track = project.mouseFollowZoomTrack
+                    {
+                        applyMouseFollowZoom(
+                            track,
+                            baseTransforms: primaryVideoTransforms[index],
+                            renderSize: renderSize,
+                            configuration: &configuration
+                        )
+                    }
+                    videoLayers.append((
+                        kind: lane.kind,
+                        laneOrder: laneOrder,
+                        layerOrder: index,
+                        instruction: AVVideoCompositionLayerInstruction(configuration: configuration)
+                    ))
                 }
-                videoLayers.append((
-                    kind: lane.kind,
-                    laneOrder: laneOrder,
-                    instruction: instruction
-                ))
             } else {
-                let parameters = AVMutableAudioMixInputParameters(track: compositionTrack)
-                parameters.setVolume(lane.isMuted ? 0 : Float(lane.volume), at: .zero)
+                let parameters = AVMutableAudioMixInputParameters(track: compositionTracks[0])
+                let volume = lane.isMuted ? Float(0) : Float(lane.volume)
+                parameters.setVolume(volume, at: .zero)
+                for clip in sortedClips {
+                    configureAudioVolume(
+                        for: clip,
+                        volume: volume,
+                        parameters: parameters
+                    )
+                }
                 audioParameters.append(parameters)
             }
         }
@@ -312,7 +416,8 @@ enum TimelineCompositionBuilder {
         naturalSize: CGSize,
         preferredTransform: CGAffineTransform,
         renderSize: CGSize,
-        layout: TimelineVideoLayout?
+        layout: TimelineVideoLayout?,
+        adjustment: TimelineVideoAdjustment? = nil
     ) -> CGAffineTransform {
         let transformedRect = CGRect(origin: .zero, size: naturalSize).applying(preferredTransform)
         return videoTransform(
@@ -322,7 +427,8 @@ enum TimelineCompositionBuilder {
                 transformedRect: transformedRect
             ),
             renderSize: renderSize,
-            layout: layout
+            layout: layout,
+            adjustment: (adjustment ?? TimelineVideoAdjustment()).clamped()
         )
     }
 
@@ -352,45 +458,16 @@ enum TimelineCompositionBuilder {
         return baseTransform.concatenating(viewportTransform)
     }
 
-    private static func primaryVideoTransformsCoveringGaps(
-        _ clipTransforms: [(range: Range<TimeInterval>, transform: CGAffineTransform)],
-        project: TimelineProject
-    ) -> [(range: Range<TimeInterval>, transform: CGAffineTransform)] {
-        var result = clipTransforms
-        for gap in project.videoGaps where gap.duration > 0.000_1 {
-            let previous = clipTransforms
-                .filter { $0.range.upperBound <= gap.timelineStart + 0.000_1 }
-                .max { $0.range.upperBound < $1.range.upperBound }
-            let next = clipTransforms
-                .filter { $0.range.lowerBound >= gap.timelineEnd - 0.000_1 }
-                .min { $0.range.lowerBound < $1.range.lowerBound }
-            let transform = switch gap.fillMode {
-            case .holdPrevious: previous?.transform ?? next?.transform ?? .identity
-            case .holdNext: next?.transform ?? previous?.transform ?? .identity
-            case .black: previous?.transform ?? next?.transform ?? .identity
-            }
-            result.append((
-                range: gap.timelineStart..<gap.timelineEnd,
-                transform: transform
-            ))
-        }
-        return result.sorted { $0.range.lowerBound < $1.range.lowerBound }
-    }
-
     private static func applyMouseFollowZoom(
         _ track: MouseFollowZoomTrack,
         baseTransforms: [(range: Range<TimeInterval>, transform: CGAffineTransform)],
         renderSize: CGSize,
-        instruction: AVVideoCompositionLayerInstruction
-    ) -> AVVideoCompositionLayerInstruction {
+        configuration: inout AVVideoCompositionLayerInstruction.Configuration
+    ) {
         // Use AVFoundation's native ramps between bounded capture samples.
         // Emitting a transform command for every output frame makes long
         // projects expensive to build and gives AVFoundation far more state
         // than it needs to interpolate the same pointer path.
-        var animated = AVVideoCompositionLayerInstruction.Configuration(
-            trackID: instruction.trackID
-        )
-
         for base in baseTransforms {
             var cursor = base.range.lowerBound
             let segments = track.segments.filter {
@@ -407,7 +484,7 @@ enum TimelineCompositionBuilder {
                     from: base.transform,
                     to: base.transform,
                     range: cursor..<start,
-                    configuration: &animated
+                    configuration: &configuration
                 )
 
                 let previous = segmentIndex > 0 ? segments[segmentIndex - 1] : nil
@@ -440,7 +517,7 @@ enum TimelineCompositionBuilder {
                         start: timelineTime(lower),
                         duration: timelineTime(upper - lower)
                     )
-                    animated.addTransformRamp(.init(
+                    configuration.addTransformRamp(.init(
                         timeRange: timeRange,
                         start: mouseFollowZoomTransform(
                             baseTransform: base.transform,
@@ -472,10 +549,9 @@ enum TimelineCompositionBuilder {
                 from: base.transform,
                 to: base.transform,
                 range: cursor..<base.range.upperBound,
-                configuration: &animated
+                configuration: &configuration
             )
         }
-        return AVVideoCompositionLayerInstruction(configuration: animated)
     }
 
     private static func setTransformRamp(
@@ -517,7 +593,8 @@ enum TimelineCompositionBuilder {
     private static func videoTransform(
         geometry: SourceVideoGeometry,
         renderSize: CGSize,
-        layout: TimelineVideoLayout?
+        layout: TimelineVideoLayout?,
+        adjustment: TimelineVideoAdjustment
     ) -> CGAffineTransform {
         guard geometry.displaySize.width > 0,
               geometry.displaySize.height > 0,
@@ -543,19 +620,27 @@ enum TimelineCompositionBuilder {
         } else {
             box = CGRect(origin: .zero, size: renderSize)
         }
-        let scale = min(
-            box.width / geometry.displaySize.width,
-            box.height / geometry.displaySize.height
+        let visibleDisplayRect = displayCropRectangle(
+            geometry: geometry,
+            adjustment: adjustment
         )
+        let scale = min(
+            box.width / visibleDisplayRect.width,
+            box.height / visibleDisplayRect.height
+        ) * CGFloat(adjustment.scale)
         let outputSize = CGSize(
-            width: geometry.displaySize.width * scale,
-            height: geometry.displaySize.height * scale
+            width: visibleDisplayRect.width * scale,
+            height: visibleDisplayRect.height * scale
         )
         let origin = CGPoint(
             x: box.midX - outputSize.width / 2,
             y: box.midY - outputSize.height / 2
         )
         return normalizedSource
+            .concatenating(CGAffineTransform(
+                translationX: -visibleDisplayRect.minX,
+                y: -visibleDisplayRect.minY
+            ))
             .concatenating(CGAffineTransform(scaleX: scale, y: scale))
             .concatenating(CGAffineTransform(translationX: origin.x, y: origin.y))
     }
@@ -582,6 +667,172 @@ enum TimelineCompositionBuilder {
             }
         }
         return LoadedSources(assets: assets, tracks: tracks)
+    }
+
+    private static func insertRetimedClip(
+        _ clip: TimelineClip,
+        sourceTrack: AVAssetTrack,
+        sourceStart: TimeInterval,
+        compositionTrack: AVMutableCompositionTrack
+    ) throws {
+        let sourceRange = CMTimeRange(
+            start: timelineTime(sourceStart),
+            duration: timelineTime(clip.sourceSpanDuration)
+        )
+        let targetStart = timelineTime(clip.timelineStart)
+        try compositionTrack.insertTimeRange(sourceRange, of: sourceTrack, at: targetStart)
+        let insertedRange = CMTimeRange(start: targetStart, duration: sourceRange.duration)
+        let targetDuration = timelineTime(clip.duration)
+        if abs(sourceRange.duration.seconds - targetDuration.seconds) > 0.000_1 {
+            compositionTrack.scaleTimeRange(insertedRange, toDuration: targetDuration)
+        }
+    }
+
+    /// AVMutableComposition has no negative-rate segment. Reverse picture is
+    /// therefore assembled from bounded output-frame samples in descending
+    /// source order. No proxy movie is written, and color/orientation metadata
+    /// continues to come from the original AVAssetTrack.
+    private static func insertReversedVideo(
+        _ clip: TimelineClip,
+        sourceTrack: AVAssetTrack,
+        frameDuration: TimeInterval,
+        compositionTrack: AVMutableCompositionTrack
+    ) throws {
+        let outputFrameDuration = max(frameDuration, 1 / 600)
+        let sourceFrameDuration = min(outputFrameDuration, clip.sourceSpanDuration)
+        var outputOffset: TimeInterval = 0
+        while outputOffset < clip.duration - 0.000_001 {
+            if Task.isCancelled { throw CancellationError() }
+            let targetFrameDuration = min(outputFrameDuration, clip.duration - outputOffset)
+            let sourceProgress = min(
+                outputOffset * clip.effectiveEffects.playbackRate,
+                max(0, clip.sourceSpanDuration - sourceFrameDuration)
+            )
+            let sourceTime = max(
+                clip.sourceStart,
+                clip.sourceEnd - sourceProgress - sourceFrameDuration
+            )
+            let targetStart = clip.timelineStart + outputOffset
+            let sourceRange = CMTimeRange(
+                start: timelineTime(sourceTime),
+                duration: timelineTime(sourceFrameDuration)
+            )
+            try compositionTrack.insertTimeRange(
+                sourceRange,
+                of: sourceTrack,
+                at: timelineTime(targetStart)
+            )
+            compositionTrack.scaleTimeRange(
+                CMTimeRange(start: timelineTime(targetStart), duration: sourceRange.duration),
+                toDuration: timelineTime(targetFrameDuration)
+            )
+            outputOffset += targetFrameDuration
+        }
+    }
+
+    private static func configureVideoOpacity(
+        for clip: TimelineClip,
+        isOverlay: Bool,
+        configuration: inout AVVideoCompositionLayerInstruction.Configuration
+    ) {
+        let effects = clip.effectiveEffects
+        let start = clip.timelineStart
+        let end = clip.timelineEnd
+        if isOverlay || effects.fadeInDuration > 0 {
+            configuration.setOpacity(0, at: timelineTime(start))
+        } else {
+            configuration.setOpacity(1, at: timelineTime(start))
+        }
+        if effects.fadeInDuration > 0 {
+            configuration.addOpacityRamp(.init(
+                timeRange: timelineRange(start..<(start + effects.fadeInDuration)),
+                start: 0,
+                end: 1
+            ))
+        } else if isOverlay {
+            configuration.setOpacity(1, at: timelineTime(start))
+        }
+        if effects.fadeOutDuration > 0 {
+            configuration.addOpacityRamp(.init(
+                timeRange: timelineRange((end - effects.fadeOutDuration)..<end),
+                start: 1,
+                end: 0
+            ))
+        }
+        if isOverlay || effects.fadeOutDuration > 0 {
+            configuration.setOpacity(0, at: timelineTime(end))
+        }
+    }
+
+    private static func configureVideoGeometry(
+        _ state: VideoRenderState,
+        range: Range<TimeInterval>,
+        animateTransform: Bool,
+        configuration: inout AVVideoCompositionLayerInstruction.Configuration,
+        transformRanges: inout [(range: Range<TimeInterval>, transform: CGAffineTransform)]
+    ) {
+        guard range.upperBound - range.lowerBound > 0.000_1 else { return }
+        configuration.setCropRectangle(
+            state.cropRectangle,
+            at: timelineTime(range.lowerBound)
+        )
+        if animateTransform {
+            transformRanges.append((range: range, transform: state.transform))
+        } else {
+            configuration.setTransform(
+                state.transform,
+                at: timelineTime(range.lowerBound)
+            )
+        }
+    }
+
+    private static func configureAudioVolume(
+        for clip: TimelineClip,
+        volume: Float,
+        parameters: AVMutableAudioMixInputParameters
+    ) {
+        let effects = clip.effectiveEffects
+        let start = clip.timelineStart
+        let end = clip.timelineEnd
+        parameters.setVolume(effects.fadeInDuration > 0 ? 0 : volume, at: timelineTime(start))
+        if effects.fadeInDuration > 0 {
+            parameters.setVolumeRamp(
+                fromStartVolume: 0,
+                toEndVolume: volume,
+                timeRange: timelineRange(start..<(start + effects.fadeInDuration))
+            )
+        }
+        if effects.fadeOutDuration > 0 {
+            parameters.setVolumeRamp(
+                fromStartVolume: volume,
+                toEndVolume: 0,
+                timeRange: timelineRange((end - effects.fadeOutDuration)..<end)
+            )
+        }
+    }
+
+    private static func displayCropRectangle(
+        geometry: SourceVideoGeometry,
+        adjustment: TimelineVideoAdjustment
+    ) -> CGRect {
+        let adjustment = adjustment.clamped()
+        return CGRect(
+            x: CGFloat(adjustment.cropLeading) * geometry.displaySize.width,
+            y: CGFloat(adjustment.cropTop) * geometry.displaySize.height,
+            width: CGFloat(1 - adjustment.cropLeading - adjustment.cropTrailing)
+                * geometry.displaySize.width,
+            height: CGFloat(1 - adjustment.cropTop - adjustment.cropBottom)
+                * geometry.displaySize.height
+        )
+    }
+
+    private static func sourceCropRectangle(
+        geometry: SourceVideoGeometry,
+        adjustment: TimelineVideoAdjustment
+    ) -> CGRect {
+        let displayRect = displayCropRectangle(geometry: geometry, adjustment: adjustment)
+            .offsetBy(dx: geometry.transformedRect.minX, dy: geometry.transformedRect.minY)
+        return displayRect.applying(geometry.preferredTransform.inverted()).standardized
     }
 
     private static func fillVideoGap(
@@ -611,7 +862,11 @@ enum TimelineCompositionBuilder {
             try insertHeldFrame(
                 from: previous.clip,
                 sourceTrack: previous.track,
-                sourceTime: previous.clip.sourceStart + max(0, previous.clip.duration - frameDuration),
+                sourceTime: heldFrameSourceTime(
+                    for: previous.clip,
+                    timelineOffset: max(0, previous.clip.duration - frameDuration),
+                    frameDuration: frameDuration
+                ),
                 into: gap,
                 frameDuration: frameDuration,
                 compositionTrack: compositionTrack
@@ -627,7 +882,11 @@ enum TimelineCompositionBuilder {
             try insertHeldFrame(
                 from: next.clip,
                 sourceTrack: next.track,
-                sourceTime: next.clip.sourceStart,
+                sourceTime: heldFrameSourceTime(
+                    for: next.clip,
+                    timelineOffset: 0,
+                    frameDuration: frameDuration
+                ),
                 into: gap,
                 frameDuration: frameDuration,
                 compositionTrack: compositionTrack
@@ -670,6 +929,19 @@ enum TimelineCompositionBuilder {
         )
     }
 
+    private static func heldFrameSourceTime(
+        for clip: TimelineClip,
+        timelineOffset: TimeInterval,
+        frameDuration: TimeInterval
+    ) -> TimeInterval {
+        let sourceFrameDuration = min(frameDuration, clip.sourceSpanDuration)
+        let requested = clip.sourceTime(atTimelineOffset: timelineOffset)
+        return min(
+            max(requested, clip.sourceStart),
+            max(clip.sourceStart, clip.sourceEnd - sourceFrameDuration)
+        )
+    }
+
     /// Image imports use a one-frame project proxy and stretch that frame only
     /// inside the composition. The source image remains untouched in Media/,
     /// and timeline duration does not increase proxy size or decode work.
@@ -700,6 +972,7 @@ enum TimelineCompositionBuilder {
         layers: [(
             kind: TimelineLaneKind,
             laneOrder: Int,
+            layerOrder: Int,
             instruction: AVVideoCompositionLayerInstruction
         )],
         renderSize: CGSize?,
@@ -737,7 +1010,10 @@ enum TimelineCompositionBuilder {
                 if lhsPriority != rhsPriority {
                     return lhsPriority < rhsPriority
                 }
-                return lhs.laneOrder > rhs.laneOrder
+                if lhs.laneOrder != rhs.laneOrder {
+                    return lhs.laneOrder > rhs.laneOrder
+                }
+                return lhs.layerOrder > rhs.layerOrder
             }
             .map(\.instruction)
         let instruction = AVVideoCompositionInstruction(configuration: instructionConfiguration)
@@ -752,6 +1028,13 @@ enum TimelineCompositionBuilder {
     private static func timelineTime(_ seconds: TimeInterval) -> CMTime {
         CMTime(seconds: seconds, preferredTimescale: 600)
     }
+
+    private static func timelineRange(_ range: Range<TimeInterval>) -> CMTimeRange {
+        CMTimeRange(
+            start: timelineTime(range.lowerBound),
+            duration: timelineTime(range.upperBound - range.lowerBound)
+        )
+    }
 }
 
 private struct SourceVideoGeometry {
@@ -762,6 +1045,11 @@ private struct SourceVideoGeometry {
     var displaySize: CGSize {
         CGSize(width: abs(transformedRect.width), height: abs(transformedRect.height))
     }
+}
+
+private struct VideoRenderState {
+    let transform: CGAffineTransform
+    let cropRectangle: CGRect
 }
 
 private struct LoadedSources {

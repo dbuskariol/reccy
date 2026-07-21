@@ -249,6 +249,64 @@ nonisolated struct RecordingRecoveryJournal: Codable, Equatable, Sendable {
         }
         try remove(from: directory)
     }
+
+    /// Permanently removes the exact artifact graph for an explicitly
+    /// cancelled live session. Existing files first move into a unique hidden
+    /// directory on the recording volume. That makes the visible Library and
+    /// recovery journal agree before recursive deletion begins, while a move
+    /// failure can still roll the small transaction back.
+    static func discardCancelledRecording(mediaURL: URL) throws {
+        let directory = mediaURL.deletingLastPathComponent()
+        if let journal = try load(from: directory),
+           journal.mediaFileName != mediaURL.lastPathComponent
+        {
+            throw RecordingRecoveryError.invalidJournal
+        }
+
+        let artifacts = RecordingArtifacts(mediaURL: mediaURL)
+        let candidates = [url(in: directory)] + artifacts.trashOrder
+        let existing = candidates.filter {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
+        guard !existing.isEmpty else { return }
+
+        let quarantine = directory.appendingPathComponent(
+            ".reccy-discard-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: quarantine,
+            withIntermediateDirectories: false
+        )
+
+        var moved: [(source: URL, destination: URL)] = []
+        do {
+            for source in existing {
+                let destination = quarantine.appendingPathComponent(
+                    source.lastPathComponent,
+                    isDirectory: source.hasDirectoryPath
+                )
+                try FileManager.default.moveItem(at: source, to: destination)
+                moved.append((source, destination))
+            }
+        } catch {
+            for item in moved.reversed()
+                where FileManager.default.fileExists(atPath: item.destination.path)
+                    && !FileManager.default.fileExists(atPath: item.source.path)
+            {
+                try? FileManager.default.moveItem(
+                    at: item.destination,
+                    to: item.source
+                )
+            }
+            try? FileManager.default.removeItem(at: quarantine)
+            throw error
+        }
+
+        // The user explicitly confirmed permanent discard. At this point every
+        // session-owned path is hidden from both Library scanning and recovery.
+        try FileManager.default.removeItem(at: quarantine)
+    }
 }
 
 nonisolated enum RecordingRecoveryError: LocalizedError {
