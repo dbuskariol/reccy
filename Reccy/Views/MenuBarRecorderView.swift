@@ -469,14 +469,36 @@ struct MenuBarRecorderView: View {
                 )
 
                 Button {
-                    coordinator.requestStopRecording()
+                    coordinator.requestCancelRecording()
                 } label: {
-                    Label(coordinator.state.stopButtonTitle, systemImage: "stop.fill")
+                    Image(systemName: "xmark")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.bordered)
+                .disabled(coordinator.state != .recording && coordinator.state != .paused)
+                .reccyAccessibleControl(
+                    "Cancel Recording",
+                    help: "Discard this recording after confirmation without adding it to the Library"
+                )
+
+                Button {
+                    coordinator.requestFinishRecording()
+                } label: {
+                    Label(
+                        coordinator.state == .recording || coordinator.state == .paused
+                            ? "Finish"
+                            : coordinator.state.recordingEndButtonTitle,
+                        systemImage: "stop.fill"
+                    )
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .disabled(coordinator.state == .stopping)
+                .reccyAccessibleControl(
+                    coordinator.state.recordingEndButtonTitle,
+                    help: "Finish writing this recording and add it to the Library"
+                )
 
                 Button {
                     showMain(.monitor)

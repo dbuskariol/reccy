@@ -44,7 +44,8 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .display: "Choose a display in the macOS picker."
         case .region: nil
-        case .application: "Choose an application in the macOS picker."
+        case .application:
+            "Select an application, then choose the purple Share button in the macOS picker."
         case .window: "Choose a window in the macOS picker."
         }
     }

@@ -317,9 +317,9 @@ private struct RecordingCommands: Commands {
 
             Divider()
 
-            Button(coordinator.state.isRecording ? coordinator.state.stopButtonTitle : "Start Recording") {
+            Button(coordinator.state.isRecording ? coordinator.state.recordingEndButtonTitle : "Start Recording") {
                 if coordinator.state.isRecording {
-                    coordinator.requestStopRecording()
+                    coordinator.requestFinishRecording()
                 } else {
                     coordinator.startRecording()
                 }
@@ -336,6 +336,13 @@ private struct RecordingCommands: Commands {
             }
             .disabled(coordinator.state != .recording && coordinator.state != .paused)
             .keyboardShortcut("p", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button("Cancel Recording", role: .destructive) {
+                coordinator.requestCancelRecording()
+            }
+            .disabled(coordinator.state != .recording && coordinator.state != .paused)
         }
     }
 

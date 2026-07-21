@@ -237,10 +237,29 @@ struct MonitorView: View {
             .disabled(coordinator.state != .recording && coordinator.state != .paused)
 
             Button {
-                coordinator.requestStopRecording()
+                coordinator.requestCancelRecording()
             } label: {
                 recordingControlLabel(
-                    coordinator.state.stopButtonTitle,
+                    "Cancel",
+                    systemImage: "xmark",
+                    isCompact: isCompact
+                )
+            }
+            .buttonStyle(.bordered)
+            .controlSize(isCompact ? .regular : .large)
+            .disabled(coordinator.state != .recording && coordinator.state != .paused)
+            .reccyAccessibleControl(
+                "Cancel Recording",
+                help: "Discard this recording after confirmation without adding it to the Library"
+            )
+
+            Button {
+                coordinator.requestFinishRecording()
+            } label: {
+                recordingControlLabel(
+                    coordinator.state == .recording || coordinator.state == .paused
+                        ? "Finish"
+                        : coordinator.state.recordingEndButtonTitle,
                     systemImage: "stop.fill",
                     isCompact: isCompact
                 )
@@ -249,6 +268,10 @@ struct MonitorView: View {
             .controlSize(isCompact ? .regular : .large)
             .tint(.red)
             .disabled(coordinator.state == .stopping)
+            .reccyAccessibleControl(
+                coordinator.state.recordingEndButtonTitle,
+                help: "Finish writing this recording and add it to the Library"
+            )
         }
         .buttonBorderShape(.capsule)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
