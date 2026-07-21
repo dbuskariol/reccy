@@ -225,6 +225,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var isMouseFollowZoomActive = false
     @Published private(set) var mouseFollowZoomPosition = CGPoint(x: 0.5, y: 0.5)
     @Published private(set) var cameraVideoEffects = WebcamVideoEffectsState()
+    @Published private(set) var activeCameraPreviewSize: CGSize?
 
     let library: RecordingLibrary
     let previewPipeline = CapturePreviewPipeline()
@@ -353,6 +354,23 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         return CGFloat(manifest.width) / CGFloat(manifest.height)
     }
 
+    var liveCameraOverlayLayout: TimelineVideoLayout {
+        let canvasSize: CGSize
+        if let manifest = activeRecordingManifest, manifest.width > 0, manifest.height > 0 {
+            canvasSize = CGSize(width: manifest.width, height: manifest.height)
+        } else {
+            canvasSize = CGSize(width: 16, height: 9)
+        }
+        let sourceSize = activeCameraPreviewSize
+            ?? activeRecordingManifest?.camera.map { CGSize(width: $0.width, height: $0.height) }
+            ?? CGSize(width: 16, height: 9)
+        let defaultLayout = TimelineVideoLayout.defaultCamera(
+            canvasSize: canvasSize,
+            sourceSize: sourceSize
+        )
+        return settings.cameraOverlayPosition?.applying(to: defaultLayout) ?? defaultLayout
+    }
+
     var liveMouseFollowZoomScale: Double {
         mouseFollowZoomCapture.currentScale ?? 1
     }
@@ -374,6 +392,46 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         updated.normalize()
         guard updated != settings else { return }
         settings = updated
+    }
+
+    /// Commits one normalized live-preview placement. Drag updates remain
+    /// local to the view; settings and the crash-recovery manifest are written
+    /// only when the gesture or an accessibility/keyboard command completes.
+    func setLiveCameraOverlayLayout(_ layout: TimelineVideoLayout) {
+        let position = CameraOverlayPosition(layout: layout)
+        if settings.cameraOverlayPosition != position {
+            var updated = settings
+            updated.cameraOverlayPosition = position
+            settings = updated
+        }
+        updateActiveCameraOverlayPosition(position)
+    }
+
+    func resetLiveCameraOverlayPosition() {
+        if settings.cameraOverlayPosition != nil {
+            var updated = settings
+            updated.cameraOverlayPosition = nil
+            settings = updated
+        }
+        updateActiveCameraOverlayPosition(nil)
+    }
+
+    private func updateActiveCameraOverlayPosition(_ position: CameraOverlayPosition?) {
+        guard var manifest = activeRecordingManifest,
+              var camera = manifest.camera
+        else { return }
+        guard camera.overlayPosition != position else { return }
+        camera.overlayPosition = position
+        manifest.camera = camera
+        activeRecordingManifest = manifest
+        guard let mediaURL = activeOutputURL else { return }
+        do {
+            try RecordingRecoveryJournal.update(manifest: manifest, mediaURL: mediaURL)
+        } catch {
+            logger.error(
+                "Could not persist live camera placement to the recovery journal: \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     private func registerGlobalShortcuts() {
@@ -985,6 +1043,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             microphoneAudioHistory.removeAll(keepingCapacity: true)
             previewPipeline.clear()
             cameraPreviewPipeline.clear()
+            activeCameraPreviewSize = nil
 
             let captureGeometry = captureGeometry(for: filter)
             let streamConfiguration = makeStreamConfiguration(
@@ -1030,7 +1089,8 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                         uniqueID: selectedCameraUniqueID,
                         name: selectedCameraName,
                         width: 1280,
-                        height: 720
+                        height: 720,
+                        overlayPosition: settings.cameraOverlayPosition
                     )
                     : nil,
                 showsCursor: settings.showCursor,
@@ -1078,13 +1138,24 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                         uniqueID: format.deviceID,
                         name: format.deviceName,
                         width: format.width,
+                        height: format.height,
+                        overlayPosition: self.settings.cameraOverlayPosition
+                    )
+                    self.activeCameraPreviewSize = CGSize(
+                        width: format.width,
                         height: format.height
                     )
                     self.activeRecordingManifest?.camera = descriptor
                     if let manifest = self.activeRecordingManifest,
                        let mediaURL = self.activeOutputURL
                     {
-                        try? RecordingRecoveryJournal.update(manifest: manifest, mediaURL: mediaURL)
+                        do {
+                            try RecordingRecoveryJournal.update(manifest: manifest, mediaURL: mediaURL)
+                        } catch {
+                            self.logger.error(
+                                "Could not persist the resolved camera format to the recovery journal: \(error.localizedDescription, privacy: .public)"
+                            )
+                        }
                     }
                 }
             }
@@ -1554,6 +1625,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         systemAudioHistory.removeAll(keepingCapacity: true)
         microphoneAudioHistory.removeAll(keepingCapacity: true)
         activeCaptureGeometry = nil
+        activeCameraPreviewSize = nil
         resetMouseFollowZoomCapture()
     }
 

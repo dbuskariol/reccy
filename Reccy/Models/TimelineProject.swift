@@ -155,6 +155,37 @@ struct TimelineVideoLayout: Codable, Hashable, Sendable {
     }
 }
 
+/// A canvas-relative center point for the live camera overlay. Capture stores
+/// position independently from size so a saved placement remains correct when
+/// the selected camera or capture canvas has a different aspect ratio. The
+/// recording manifest resolves this point against its concrete camera layout,
+/// which is then shared by Editor, Library preview, and export.
+nonisolated struct CameraOverlayPosition: Codable, Hashable, Sendable {
+    var centerX: Double
+    var centerY: Double
+
+    init(centerX: Double, centerY: Double) {
+        self.centerX = centerX
+        self.centerY = centerY
+    }
+
+    init(layout: TimelineVideoLayout) {
+        let layout = layout.clamped()
+        centerX = layout.x + layout.width / 2
+        centerY = layout.y + layout.height / 2
+    }
+
+    nonisolated func applying(to proposedLayout: TimelineVideoLayout) -> TimelineVideoLayout {
+        let layout = proposedLayout.clamped()
+        return TimelineVideoLayout(
+            x: centerX - layout.width / 2,
+            y: centerY - layout.height / 2,
+            width: layout.width,
+            height: layout.height
+        ).clamped()
+    }
+}
+
 enum TimelinePlaybackDirection: String, Codable, CaseIterable, Identifiable, Sendable {
     case forward
     case reverse

@@ -2031,6 +2031,7 @@ struct ReccyTests {
         )
         object.removeValue(forKey: "includeCamera")
         object.removeValue(forKey: "selectedCameraID")
+        object.removeValue(forKey: "cameraOverlayPosition")
 
         let decoded = try JSONDecoder().decode(
             CaptureSettings.self,
@@ -2040,6 +2041,17 @@ struct ReccyTests {
         #expect(decoded.includeMicrophone)
         #expect(!decoded.includeCamera)
         #expect(decoded.selectedCameraID == nil)
+        #expect(decoded.cameraOverlayPosition == nil)
+    }
+
+    @Test func captureSettingsRoundTripCameraOverlayPosition() throws {
+        var settings = CaptureSettings()
+        settings.cameraOverlayPosition = CameraOverlayPosition(centerX: 0.23, centerY: 0.67)
+
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(CaptureSettings.self, from: data)
+
+        #expect(decoded.cameraOverlayPosition == settings.cameraOverlayPosition)
     }
 
     @Test func cameraWriterSettingsUseTheNativeFormatAndRealTimeHardwareEncoding() throws {
@@ -2869,7 +2881,8 @@ struct ReccyTests {
                 uniqueID: "camera-42",
                 name: "Studio Camera",
                 width: 1920,
-                height: 1080
+                height: 1080,
+                overlayPosition: CameraOverlayPosition(centerX: 0.24, centerY: 0.31)
             ),
             showsCursor: true,
             highlightsClicks: false
@@ -2890,6 +2903,7 @@ struct ReccyTests {
         #expect(legacyDecoded.camera == nil)
         #expect(decoded.camera?.uniqueID == "camera-42")
         #expect(decoded.camera?.width == 1920)
+        #expect(decoded.camera?.overlayPosition == CameraOverlayPosition(centerX: 0.24, centerY: 0.31))
         #expect(decoded.source.region?.cgRect == CGRect(x: 100, y: 80, width: 1280, height: 720))
         #expect(decoded.source.detail.contains("1280 × 720"))
     }
@@ -3161,6 +3175,22 @@ struct ReccyTests {
         #expect(abs(maximum.width / maximum.height - layout.width / layout.height) < 0.000_1)
     }
 
+    @Test func liveCameraPositionPreservesAspectAwareSizeAndClampsToTheCanvas() {
+        let base = TimelineVideoLayout.defaultCamera(
+            canvasSize: CGSize(width: 1920, height: 1080),
+            sourceSize: CGSize(width: 1080, height: 1920)
+        )
+        let moved = CameraOverlayPosition(centerX: 0.25, centerY: 0.4).applying(to: base)
+        let bounded = CameraOverlayPosition(centerX: 2, centerY: -1).applying(to: base)
+
+        #expect(abs(moved.width - base.width) < 0.000_1)
+        #expect(abs(moved.height - base.height) < 0.000_1)
+        #expect(abs(moved.x + moved.width / 2 - 0.25) < 0.000_1)
+        #expect(abs(moved.y + moved.height / 2 - 0.4) < 0.000_1)
+        #expect(abs(bounded.x + bounded.width - 1) < 0.000_1)
+        #expect(bounded.y == 0)
+    }
+
     @Test func cameraVideoTransformMapsNormalizedLayoutIntoTheScreenCanvas() {
         let transform = TimelineCompositionBuilder.videoTransform(
             naturalSize: CGSize(width: 1280, height: 720),
@@ -3429,7 +3459,8 @@ struct ReccyTests {
             uniqueID: "camera-test",
             name: "Studio Camera",
             width: 64,
-            height: 64
+            height: 64,
+            overlayPosition: CameraOverlayPosition(centerX: 0.2, centerY: 0.24)
         )
         let item = RecordingItem(
             url: mediaURL,
@@ -3445,10 +3476,11 @@ struct ReccyTests {
         let project = try await RecordingTimelineProjectLoader.initialProject(for: item)
         let cameraLane = try #require(project.lanes.first(where: { $0.kind == .camera }))
         let cameraClip = try #require(cameraLane.clips.first)
-        let expectedLayout = TimelineVideoLayout.defaultCamera(
+        let defaultLayout = TimelineVideoLayout.defaultCamera(
             canvasSize: CGSize(width: 64, height: 64),
             sourceSize: CGSize(width: 64, height: 64)
         )
+        let expectedLayout = try #require(manifest.camera?.overlayPosition).applying(to: defaultLayout)
         let build = try await TimelineCompositionBuilder.build(project)
         let previewColor = try await renderedColor(
             at: 0.5,
@@ -3813,6 +3845,33 @@ struct ReccyTests {
 
         #expect(manifest.version == 2)
         #expect(manifest.mouseFollowZoomTrack == nil)
+    }
+
+    @Test func recordingManifestVersionThreeDecodesWithoutCameraOverlayPosition() throws {
+        var source = makeRecoveryManifest()
+        source.camera = RecordingCameraDescriptor(
+            uniqueID: "legacy-camera",
+            name: "Legacy Camera",
+            width: 1280,
+            height: 720,
+            overlayPosition: CameraOverlayPosition(centerX: 0.25, centerY: 0.25)
+        )
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(source))
+                as? [String: Any]
+        )
+        object["version"] = 3
+        var camera = try #require(object["camera"] as? [String: Any])
+        camera.removeValue(forKey: "overlayPosition")
+        object["camera"] = camera
+
+        let manifest = try JSONDecoder().decode(
+            RecordingManifest.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(manifest.version == 3)
+        #expect(manifest.camera?.overlayPosition == nil)
     }
 
     @Test func mouseFollowZoomTransformCentersTheFocusAfterTheBaseTransform() {
