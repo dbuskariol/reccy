@@ -11,7 +11,9 @@ import UniformTypeIdentifiers
 import VideoToolbox
 @testable import Reccy
 
-@Suite("Reccy")
+// These integration tests share process-global AVFoundation encoders and the hosted app.
+// Keep the real framework coverage deterministic on resource-constrained Intel runners.
+@Suite("Reccy", .serialized)
 struct ReccyTests {
     @Test func screenshotWriterPersistsAndValidatesNativeImage() throws {
         let directoryURL = FileManager.default.temporaryDirectory
