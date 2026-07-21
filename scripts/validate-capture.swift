@@ -5,6 +5,11 @@ import Darwin
 import Foundation
 
 private struct CaptureValidationReport: Encodable {
+    struct CameraOverlayCenter: Encodable {
+        let x: Double
+        let y: Double
+    }
+
     let media: String
     let manifestVersion: Int
     let durationSeconds: Double
@@ -17,6 +22,7 @@ private struct CaptureValidationReport: Encodable {
     let videoTrackCount: Int
     let audioTrackCount: Int
     let camera: String?
+    let cameraOverlayCenter: CameraOverlayCenter?
     let maximumTrackEndDriftSeconds: Double
 }
 
@@ -109,11 +115,24 @@ private func validateCapture(at mediaURL: URL) async throws -> CaptureValidation
     let includesSystemAudio: Bool = try manifestValue("includesSystemAudio", in: manifest)
     let includesMicrophone: Bool = try manifestValue("includesMicrophone", in: manifest)
     let camera = manifest["camera"] as? [String: Any]
+    let cameraOverlayCenter: CaptureValidationReport.CameraOverlayCenter?
+    if let overlayPosition = camera?["overlayPosition"] as? [String: Any] {
+        let centerX: Double = try manifestValue("centerX", in: overlayPosition)
+        let centerY: Double = try manifestValue("centerY", in: overlayPosition)
+        try require(
+            centerX.isFinite && (0...1).contains(centerX)
+                && centerY.isFinite && (0...1).contains(centerY),
+            "Manifest camera overlay position is outside the normalized canvas."
+        )
+        cameraOverlayCenter = .init(x: centerX, y: centerY)
+    } else {
+        cameraOverlayCenter = nil
+    }
     let expectedVideoTracks = camera == nil ? 1 : 2
     let expectedAudioTracks = (includesSystemAudio ? 1 : 0) + (includesMicrophone ? 1 : 0)
 
     try require(
-        (2...3).contains(manifestVersion),
+        (2...4).contains(manifestVersion),
         "Unsupported capture manifest version \(manifestVersion)."
     )
     try require(expectedWidth > 0 && expectedHeight > 0, "Manifest dimensions are invalid.")
@@ -248,6 +267,7 @@ private func validateCapture(at mediaURL: URL) async throws -> CaptureValidation
         videoTrackCount: videoTracks.count,
         audioTrackCount: audioTracks.count,
         camera: cameraName,
+        cameraOverlayCenter: cameraOverlayCenter,
         maximumTrackEndDriftSeconds: drift
     )
 }
@@ -350,7 +370,7 @@ private func makeSelfTestCapture() async throws -> (media: URL, manifest: URL) {
     }
 
     let manifest: [String: Any] = [
-        "version": 2,
+        "version": 4,
         "width": 64,
         "height": 64,
         "frameRate": 30,
@@ -363,6 +383,10 @@ private func makeSelfTestCapture() async throws -> (media: URL, manifest: URL) {
             "name": "Self-Test Camera",
             "width": 32,
             "height": 32,
+            "overlayPosition": [
+                "centerX": 0.25,
+                "centerY": 0.75,
+            ],
         ],
     ]
     try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

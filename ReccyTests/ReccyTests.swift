@@ -1014,6 +1014,7 @@ struct ReccyTests {
 
     @Test func portionCaptureBypassesTheWholeDisplayPicker() {
         #expect(CaptureSourcePickerPolicy.maximumConcurrentStreams == nil)
+        #expect(CaptureSourcePickerPolicy.allowsChangingSelectedContentForNewFilter)
         #expect(CaptureSourceKind.region.pickerMode == nil)
         #expect(CaptureSourceKind.region.contentStyle == nil)
         #expect(CaptureSourceKind.display.pickerMode == .singleDisplay)
