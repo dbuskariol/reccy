@@ -11,7 +11,9 @@ import UniformTypeIdentifiers
 import VideoToolbox
 @testable import Reccy
 
-@Suite("Reccy")
+// These integration tests share process-global AVFoundation encoders and the hosted app.
+// Keep the real framework coverage deterministic on resource-constrained Intel runners.
+@Suite("Reccy", .serialized)
 struct ReccyTests {
     @Test func screenshotWriterPersistsAndValidatesNativeImage() throws {
         let directoryURL = FileManager.default.temporaryDirectory
@@ -1014,12 +1016,16 @@ struct ReccyTests {
 
     @Test func portionCaptureBypassesTheWholeDisplayPicker() {
         #expect(CaptureSourcePickerPolicy.maximumConcurrentStreams == nil)
+        #expect(CaptureSourcePickerPolicy.allowsChangingSelectedContentForNewFilter)
         #expect(CaptureSourceKind.region.pickerMode == nil)
         #expect(CaptureSourceKind.region.contentStyle == nil)
         #expect(CaptureSourceKind.display.pickerMode == .singleDisplay)
         #expect(CaptureSourceKind.display.pickerSelectionPrompt == "Choose a display in the macOS picker.")
         #expect(CaptureSourceKind.region.pickerSelectionPrompt == nil)
-        #expect(CaptureSourceKind.application.pickerSelectionPrompt == "Choose an application in the macOS picker.")
+        #expect(
+            CaptureSourceKind.application.pickerSelectionPrompt
+                == "Select an application, then choose the purple Share button in the macOS picker."
+        )
         #expect(CaptureSourceKind.window.pickerSelectionPrompt == "Choose a window in the macOS picker.")
     }
 
@@ -1135,16 +1141,30 @@ struct ReccyTests {
         #expect(CaptureState.stopping.stopOperation == .none)
         #expect(CaptureState.failed("test").stopOperation == .none)
 
-        #expect(CaptureState.countingDown(3).stopButtonTitle == "Cancel")
-        #expect(CaptureState.starting.stopButtonTitle == "Cancel Start")
-        #expect(CaptureState.recording.stopButtonTitle == "Stop Recording")
-        #expect(CaptureState.stopping.stopButtonTitle == "Finishing…")
+        #expect(CaptureState.countingDown(3).recordingEndButtonTitle == "Cancel")
+        #expect(CaptureState.starting.recordingEndButtonTitle == "Cancel Start")
+        #expect(CaptureState.recording.recordingEndButtonTitle == "Finish Recording")
+        #expect(CaptureState.stopping.recordingEndButtonTitle == "Finishing…")
 
         #expect(!CaptureState.countingDown(3).requiresStopConfirmation)
         #expect(!CaptureState.starting.requiresStopConfirmation)
         #expect(CaptureState.recording.requiresStopConfirmation)
         #expect(CaptureState.paused.requiresStopConfirmation)
         #expect(!CaptureState.stopping.requiresStopConfirmation)
+    }
+
+    @Test func liveRecordingEndChoicesKeepTheSafeActionPrimary() {
+        #expect(RecordingEndIntent.finish.alertTitle == "Finish Recording?")
+        #expect(RecordingEndIntent.finish.actionTitle == "Finish Recording")
+        #expect(RecordingEndIntent.finish.safeTitle == "Keep Recording")
+        #expect(!RecordingEndIntent.finish.isDestructive)
+
+        #expect(RecordingEndIntent.discard.alertTitle == "Cancel This Recording?")
+        #expect(RecordingEndIntent.discard.actionTitle == "Discard Recording")
+        #expect(RecordingEndIntent.discard.safeTitle == "Keep Recording")
+        #expect(RecordingEndIntent.discard.isDestructive)
+        #expect(RecordingEndIntent.discard.informativeText.contains("won’t be added"))
+        #expect(RecordingEndIntent.discard.informativeText.contains("can’t be undone"))
     }
 
     @Test func captureCompletionRoutesOnlySavedMediaToPostRecordingDestinations() {
@@ -2014,6 +2034,7 @@ struct ReccyTests {
         )
         object.removeValue(forKey: "includeCamera")
         object.removeValue(forKey: "selectedCameraID")
+        object.removeValue(forKey: "cameraOverlayPosition")
 
         let decoded = try JSONDecoder().decode(
             CaptureSettings.self,
@@ -2023,6 +2044,17 @@ struct ReccyTests {
         #expect(decoded.includeMicrophone)
         #expect(!decoded.includeCamera)
         #expect(decoded.selectedCameraID == nil)
+        #expect(decoded.cameraOverlayPosition == nil)
+    }
+
+    @Test func captureSettingsRoundTripCameraOverlayPosition() throws {
+        var settings = CaptureSettings()
+        settings.cameraOverlayPosition = CameraOverlayPosition(centerX: 0.23, centerY: 0.67)
+
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(CaptureSettings.self, from: data)
+
+        #expect(decoded.cameraOverlayPosition == settings.cameraOverlayPosition)
     }
 
     @Test func cameraWriterSettingsUseTheNativeFormatAndRealTimeHardwareEncoding() throws {
@@ -2634,6 +2666,45 @@ struct ReccyTests {
         #expect(try RecordingRecoveryJournal.load(from: directory) != nil)
     }
 
+    @Test func confirmedLiveRecordingDiscardRemovesOnlyTheActiveArtifactGraph() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Confirmed Discard \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let mediaURL = directory.appendingPathComponent("Cancelled Recording.mp4")
+        let artifacts = RecordingArtifacts(mediaURL: mediaURL)
+        let unrelatedURL = directory.appendingPathComponent("Keep Me.txt")
+        try Data("partial media".utf8).write(to: mediaURL)
+        try Data("manifest".utf8).write(to: artifacts.manifestURL)
+        try Data("transcript".utf8).write(to: artifacts.transcriptURL)
+        try FileManager.default.createDirectory(
+            at: artifacts.projectPackageURL,
+            withIntermediateDirectories: true
+        )
+        try Data("project".utf8).write(
+            to: artifacts.projectPackageURL.appendingPathComponent("project.json")
+        )
+        try Data("unrelated".utf8).write(to: unrelatedURL)
+        _ = try RecordingRecoveryJournal.write(
+            mediaURL: mediaURL,
+            manifest: makeRecoveryManifest()
+        )
+
+        try RecordingRecoveryJournal.discardCancelledRecording(mediaURL: mediaURL)
+
+        for url in artifacts.trashOrder {
+            #expect(!FileManager.default.fileExists(atPath: url.path))
+        }
+        #expect(try RecordingRecoveryJournal.load(from: directory) == nil)
+        #expect(try Data(contentsOf: unrelatedURL) == Data("unrelated".utf8))
+        let leftovers = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        #expect(!leftovers.contains { $0.lastPathComponent.hasPrefix(".reccy-discard-") })
+    }
+
     @Test func recordingLeaseRejectsAnIndependentWriterProcess() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("Reccy Cross Process Lease \(UUID().uuidString)", isDirectory: true)
@@ -2813,7 +2884,8 @@ struct ReccyTests {
                 uniqueID: "camera-42",
                 name: "Studio Camera",
                 width: 1920,
-                height: 1080
+                height: 1080,
+                overlayPosition: CameraOverlayPosition(centerX: 0.24, centerY: 0.31)
             ),
             showsCursor: true,
             highlightsClicks: false
@@ -2834,6 +2906,7 @@ struct ReccyTests {
         #expect(legacyDecoded.camera == nil)
         #expect(decoded.camera?.uniqueID == "camera-42")
         #expect(decoded.camera?.width == 1920)
+        #expect(decoded.camera?.overlayPosition == CameraOverlayPosition(centerX: 0.24, centerY: 0.31))
         #expect(decoded.source.region?.cgRect == CGRect(x: 100, y: 80, width: 1280, height: 720))
         #expect(decoded.source.detail.contains("1280 × 720"))
     }
@@ -3105,6 +3178,22 @@ struct ReccyTests {
         #expect(abs(maximum.width / maximum.height - layout.width / layout.height) < 0.000_1)
     }
 
+    @Test func liveCameraPositionPreservesAspectAwareSizeAndClampsToTheCanvas() {
+        let base = TimelineVideoLayout.defaultCamera(
+            canvasSize: CGSize(width: 1920, height: 1080),
+            sourceSize: CGSize(width: 1080, height: 1920)
+        )
+        let moved = CameraOverlayPosition(centerX: 0.25, centerY: 0.4).applying(to: base)
+        let bounded = CameraOverlayPosition(centerX: 2, centerY: -1).applying(to: base)
+
+        #expect(abs(moved.width - base.width) < 0.000_1)
+        #expect(abs(moved.height - base.height) < 0.000_1)
+        #expect(abs(moved.x + moved.width / 2 - 0.25) < 0.000_1)
+        #expect(abs(moved.y + moved.height / 2 - 0.4) < 0.000_1)
+        #expect(abs(bounded.x + bounded.width - 1) < 0.000_1)
+        #expect(bounded.y == 0)
+    }
+
     @Test func cameraVideoTransformMapsNormalizedLayoutIntoTheScreenCanvas() {
         let transform = TimelineCompositionBuilder.videoTransform(
             naturalSize: CGSize(width: 1280, height: 720),
@@ -3373,7 +3462,8 @@ struct ReccyTests {
             uniqueID: "camera-test",
             name: "Studio Camera",
             width: 64,
-            height: 64
+            height: 64,
+            overlayPosition: CameraOverlayPosition(centerX: 0.2, centerY: 0.24)
         )
         let item = RecordingItem(
             url: mediaURL,
@@ -3389,10 +3479,11 @@ struct ReccyTests {
         let project = try await RecordingTimelineProjectLoader.initialProject(for: item)
         let cameraLane = try #require(project.lanes.first(where: { $0.kind == .camera }))
         let cameraClip = try #require(cameraLane.clips.first)
-        let expectedLayout = TimelineVideoLayout.defaultCamera(
+        let defaultLayout = TimelineVideoLayout.defaultCamera(
             canvasSize: CGSize(width: 64, height: 64),
             sourceSize: CGSize(width: 64, height: 64)
         )
+        let expectedLayout = try #require(manifest.camera?.overlayPosition).applying(to: defaultLayout)
         let build = try await TimelineCompositionBuilder.build(project)
         let previewColor = try await renderedColor(
             at: 0.5,
@@ -3759,6 +3850,33 @@ struct ReccyTests {
         #expect(manifest.mouseFollowZoomTrack == nil)
     }
 
+    @Test func recordingManifestVersionThreeDecodesWithoutCameraOverlayPosition() throws {
+        var source = makeRecoveryManifest()
+        source.camera = RecordingCameraDescriptor(
+            uniqueID: "legacy-camera",
+            name: "Legacy Camera",
+            width: 1280,
+            height: 720,
+            overlayPosition: CameraOverlayPosition(centerX: 0.25, centerY: 0.25)
+        )
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(source))
+                as? [String: Any]
+        )
+        object["version"] = 3
+        var camera = try #require(object["camera"] as? [String: Any])
+        camera.removeValue(forKey: "overlayPosition")
+        object["camera"] = camera
+
+        let manifest = try JSONDecoder().decode(
+            RecordingManifest.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(manifest.version == 3)
+        #expect(manifest.camera?.overlayPosition == nil)
+    }
+
     @Test func mouseFollowZoomTransformCentersTheFocusAfterTheBaseTransform() {
         let base = CGAffineTransform(scaleX: 2, y: 2)
         let renderSize = CGSize(width: 100, height: 80)
@@ -4000,6 +4118,552 @@ struct ReccyTests {
 
         #expect(Int(overlay.green) > Int(overlay.red) + 80)
         #expect(Int(overlay.green) > Int(overlay.blue) + 80)
+    }
+
+    @Test func clipSelectionUsesNativeCommandAndShiftAnchorSemantics() throws {
+        let ids = [UUID(), UUID(), UUID(), UUID(), UUID()]
+        var selection = TimelineClipSelection()
+
+        selection.select(ids[1], from: ids, intent: .replace)
+        selection.select(ids[3], from: ids, intent: .toggle)
+        #expect(selection.selectedIDs == [ids[1], ids[3]])
+        #expect(selection.anchorID == ids[3])
+
+        selection.select(ids[4], from: ids, intent: .extend(additive: false))
+        #expect(selection.selectedIDs == [ids[3], ids[4]])
+        #expect(selection.anchorID == ids[3])
+
+        selection.select(ids[0], from: ids, intent: .extend(additive: true))
+        #expect(selection.selectedIDs == Set(ids))
+        selection.select(ids[3], from: ids, intent: .toggle)
+        #expect(!selection.selectedIDs.contains(ids[3]))
+    }
+
+    @Test func groupedClipMovementIsRigidAndClampedByTimeZeroAndNeighbours() throws {
+        let url = URL(fileURLWithPath: "/tmp/group.mov")
+        let first = TimelineClip(
+            sourceURL: url,
+            sourceTrackID: 1,
+            sourceStart: 0,
+            timelineStart: 2,
+            duration: 1,
+            name: "First"
+        )
+        let second = TimelineClip(
+            sourceURL: url,
+            sourceTrackID: 1,
+            sourceStart: 1,
+            timelineStart: 5,
+            duration: 1,
+            name: "Second"
+        )
+        let blocker = TimelineClip(
+            sourceURL: url,
+            sourceTrackID: 1,
+            sourceStart: 2,
+            timelineStart: 8,
+            duration: 1,
+            name: "Blocker"
+        )
+        var project = TimelineProject(
+            name: "Grouped",
+            lanes: [TimelineLane(kind: .video, name: "Screen", clips: [first, second, blocker])]
+        )
+
+        _ = project.moveClips(ids: [first.id, second.id], anchorID: first.id, to: -20)
+        let movedToZero = try #require(project.clip(id: first.id))
+        let movedSecond = try #require(project.clip(id: second.id))
+        #expect(movedToZero.timelineStart == 0)
+        #expect(movedSecond.timelineStart == 3)
+
+        _ = project.moveClips(ids: [first.id, second.id], anchorID: first.id, to: 20)
+        let clampedFirst = try #require(project.clip(id: first.id))
+        let clampedSecond = try #require(project.clip(id: second.id))
+        #expect(clampedSecond.timelineEnd <= blocker.timelineStart + 0.000_1)
+        #expect(abs((clampedSecond.timelineStart - clampedFirst.timelineStart) - 3) < 0.000_1)
+    }
+
+    @Test func timelineMinimumZoomFitsAnyDurationAndAdaptsToViewport() {
+        #expect(abs(TimelineViewportPolicy.minimumPixelsPerSecond(
+            duration: 120,
+            viewportWidth: 600
+        ) - 5) < 0.000_1)
+        #expect(abs(TimelineViewportPolicy.minimumPixelsPerSecond(
+            duration: 3_600,
+            viewportWidth: 900
+        ) - 0.25) < 0.000_1)
+        #expect(TimelineViewportPolicy.minimumPixelsPerSecond(
+            duration: 1,
+            viewportWidth: 1_000
+        ) == TimelineViewportPolicy.maximumPixelsPerSecond)
+        #expect(TimelineViewportPolicy.rulerInterval(pixelsPerSecond: 0.25) >= 300)
+    }
+
+    @Test func playbackFollowUsesDirectionAwareMarginsWithoutJitter() {
+        let stationary = TimelinePlaybackFollowPolicy.targetOffset(
+            previousTime: 4,
+            currentTime: 4.1,
+            pixelsPerSecond: 100,
+            viewportOffset: 100,
+            viewportWidth: 500
+        )
+        let forward = TimelinePlaybackFollowPolicy.targetOffset(
+            previousTime: 5.3,
+            currentTime: 5.5,
+            pixelsPerSecond: 100,
+            viewportOffset: 100,
+            viewportWidth: 500
+        )
+        let backward = TimelinePlaybackFollowPolicy.targetOffset(
+            previousTime: 1.6,
+            currentTime: 1.4,
+            pixelsPerSecond: 100,
+            viewportOffset: 100,
+            viewportWidth: 500
+        )
+
+        #expect(stationary == nil)
+        #expect(abs((forward ?? -1) - 190) < 0.000_1)
+        #expect(abs((backward ?? -1) - 0) < 0.000_1)
+    }
+
+    @Test func speedReverseSplitAndTrimPreserveExactSourceRange() throws {
+        let url = URL(fileURLWithPath: "/tmp/effect.mov")
+        let clip = TimelineClip(
+            sourceURL: url,
+            sourceTrackID: 1,
+            sourceStart: 2,
+            timelineStart: 1,
+            duration: 4,
+            name: "Effect"
+        )
+        var project = TimelineProject(
+            name: "Effects",
+            lanes: [TimelineLane(kind: .video, name: "Screen", clips: [clip])]
+        )
+
+        project.setPlaybackRate(2, clipIDs: [clip.id], includeLinked: false)
+        var edited = try #require(project.clip(id: clip.id))
+        #expect(edited.duration == 2)
+        #expect(edited.sourceStart == 2)
+        #expect(edited.sourceEnd == 6)
+
+        project.setPlaybackDirection(.reverse, clipIDs: [clip.id], includeLinked: false)
+        edited = try #require(project.clip(id: clip.id))
+        #expect(edited.sourceTime(atTimelineOffset: 0) == 6)
+        #expect(edited.sourceTime(atTimelineOffset: 1) == 4)
+
+        let splitID = project.splitClip(id: clip.id, at: 2)
+        let rightID = try #require(splitID)
+        let left = try #require(project.lanes[0].clips.first(where: { $0.id != rightID }))
+        let right = try #require(project.clip(id: rightID))
+        #expect(left.sourceStart == 4)
+        #expect(left.sourceEnd == 6)
+        #expect(right.sourceStart == 2)
+        #expect(right.sourceEnd == 4)
+
+        _ = project.trimClip(
+            id: right.id,
+            edge: .trailing,
+            to: right.timelineStart + 0.5,
+            sourceDuration: 10
+        )
+        let trimmed = try #require(project.clip(id: right.id))
+        #expect(trimmed.sourceStart == 3)
+        #expect(trimmed.sourceEnd == 4)
+    }
+
+    @Test func effectsAndVideoAdjustmentsRoundTripWithoutFlatteningSource() throws {
+        var project = makeProject()
+        let originalURL = project.lanes[0].clips[0].sourceURL
+        let clipID = project.lanes[0].clips[0].id
+        project.setPlaybackRate(0.5, clipIDs: [clipID], includeLinked: false)
+        project.setPlaybackDirection(.reverse, clipIDs: [clipID], includeLinked: false)
+        project.setFadeDurations(fadeIn: 0.5, fadeOut: 1, clipIDs: [clipID], includeLinked: false)
+        project.setVideoAdjustment(
+            TimelineVideoAdjustment(
+                cropTop: 0.1,
+                cropLeading: 0.2,
+                cropBottom: 0.05,
+                cropTrailing: 0.1,
+                scale: 1.4
+            ),
+            clipIDs: [clipID]
+        )
+
+        let data = try JSONEncoder().encode(project)
+        let decoded = try JSONDecoder().decode(TimelineProject.self, from: data)
+        let clip = try #require(decoded.clip(id: clipID))
+        #expect(decoded.formatVersion == 7)
+        #expect(clip.sourceURL == originalURL)
+        #expect(clip.effectiveEffects.playbackRate == 0.5)
+        #expect(clip.effectiveEffects.direction == .reverse)
+        #expect(clip.effectiveEffects.fadeInDuration == 0.5)
+        #expect(clip.effectiveVideoAdjustment.cropLeading == 0.2)
+        #expect(clip.effectiveVideoAdjustment.scale == 1.4)
+    }
+
+    @Test func primaryVideoSpeedRemapsSavedCaptionsMouseEffectsAndPosterFrame() throws {
+        let url = URL(fileURLWithPath: "/tmp/time-warp.mov")
+        let clip = TimelineClip(
+            sourceURL: url,
+            sourceTrackID: 1,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: 4,
+            name: "Screen"
+        )
+        var project = TimelineProject(
+            name: "Time Warp",
+            lanes: [TimelineLane(kind: .video, name: "Screen", clips: [clip])],
+            mouseFollowZoomTrack: MouseFollowZoomTrack(segments: [MouseFollowZoomSegment(
+                timelineStart: 1,
+                duration: 2,
+                zoomScale: 2,
+                points: [
+                    MouseFollowZoomPoint(timelineTime: 1, position: CGPoint(x: 0.2, y: 0.3)),
+                    MouseFollowZoomPoint(timelineTime: 3, position: CGPoint(x: 0.8, y: 0.7)),
+                ]
+            )]),
+            captionTrack: TimelineCaptionTrack(cues: [TimelineCaptionCue(
+                text: "Mapped",
+                timelineStart: 2,
+                duration: 1
+            )]),
+            posterFrameTime: 2.5
+        )
+
+        project.setPlaybackRate(2, clipIDs: [clip.id], includeLinked: false)
+
+        let cue = try #require(project.captionTrack?.cues.first)
+        let zoom = try #require(project.mouseFollowZoomTrack?.segments.first)
+        #expect(abs(cue.timelineStart - 1) < 0.000_1)
+        #expect(abs(cue.duration - 0.5) < 0.000_1)
+        #expect(abs(zoom.timelineStart - 0.5) < 0.000_1)
+        #expect(abs(zoom.duration - 1) < 0.000_1)
+        #expect(zoom.points.map(\.timelineTime) == [0.5, 1.5])
+        #expect(abs((project.posterFrameTime ?? -1) - 1.25) < 0.000_1)
+    }
+
+    @Test @MainActor func compositionRendersReverseVideoFramesInSourceReverseOrder() async throws {
+        let sourceURL = try await makeColorTestVideo(frameCount: 90)
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Reverse Video \(UUID().uuidString)")
+            .appendingPathExtension("mov")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: destination)
+        }
+        let asset = AVURLAsset(url: sourceURL)
+        let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let clip = TimelineClip(
+            sourceURL: sourceURL,
+            sourceTrackID: track.trackID,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: 3,
+            name: "Reverse",
+            effects: TimelineClipEffects(direction: .reverse)
+        )
+        let project = TimelineProject(
+            name: "Reverse Video",
+            lanes: [TimelineLane(kind: .video, name: "Screen", clips: [clip])]
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+
+        let beginning = try await renderedColor(
+            at: 0.1,
+            composition: build.composition,
+            videoComposition: build.videoComposition
+        )
+        let ending = try await renderedColor(
+            at: 2.1,
+            composition: build.composition,
+            videoComposition: build.videoComposition
+        )
+        #expect(Int(beginning.blue) > Int(beginning.red) + 80)
+        #expect(Int(ending.red) > Int(ending.blue) + 80)
+
+        let exporter = try #require(AVAssetExportSession(
+            asset: build.composition,
+            presetName: AVAssetExportPresetHighestQuality
+        ))
+        exporter.videoComposition = build.videoComposition
+        try await exporter.export(to: destination, as: .mov)
+        let exportedBeginning = try await renderedColor(
+            at: 0.1,
+            composition: AVURLAsset(url: destination),
+            videoComposition: nil
+        )
+        let exportedEnding = try await renderedColor(
+            at: 2.1,
+            composition: AVURLAsset(url: destination),
+            videoComposition: nil
+        )
+        #expect(Int(exportedBeginning.blue) > Int(exportedBeginning.red) + 60)
+        #expect(Int(exportedEnding.red) > Int(exportedEnding.blue) + 60)
+    }
+
+    @Test @MainActor func compositionRendersVideoCropScaleAndFade() async throws {
+        let sourceURL = try await makeHorizontalSplitTestVideo(frameCount: 60)
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Crop Export \(UUID().uuidString)")
+            .appendingPathExtension("mov")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: destination)
+        }
+        let asset = AVURLAsset(url: sourceURL)
+        let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let clip = TimelineClip(
+            sourceURL: sourceURL,
+            sourceTrackID: track.trackID,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: 2,
+            name: "Crop",
+            effects: TimelineClipEffects(fadeInDuration: 0.5, fadeOutDuration: 0),
+            videoAdjustment: TimelineVideoAdjustment(
+                cropTop: 0,
+                cropLeading: 0.5,
+                cropBottom: 0,
+                cropTrailing: 0,
+                scale: 0.75
+            )
+        )
+        let project = TimelineProject(
+            name: "Crop and Fade",
+            lanes: [TimelineLane(kind: .video, name: "Screen", clips: [clip])]
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+
+        let faded = try await renderedColor(
+            at: 0.05,
+            composition: build.composition,
+            videoComposition: build.videoComposition
+        )
+        let visible = try await renderedColor(
+            at: 1,
+            composition: build.composition,
+            videoComposition: build.videoComposition
+        )
+        let outside = try await renderedColor(
+            at: 1,
+            composition: build.composition,
+            videoComposition: build.videoComposition,
+            normalizedPoint: CGPoint(x: 0.05, y: 0.5)
+        )
+        #expect(visible.blue > 150)
+        #expect(faded.blue < visible.blue / 2)
+        #expect(outside.red < 30 && outside.green < 30 && outside.blue < 30)
+
+        let exporter = try #require(AVAssetExportSession(
+            asset: build.composition,
+            presetName: AVAssetExportPresetHighestQuality
+        ))
+        exporter.videoComposition = build.videoComposition
+        try await exporter.export(to: destination, as: .mov)
+        let exportedAsset = AVURLAsset(url: destination)
+        let exportedVisible = try await renderedColor(
+            at: 1,
+            composition: exportedAsset,
+            videoComposition: nil
+        )
+        let exportedOutside = try await renderedColor(
+            at: 1,
+            composition: exportedAsset,
+            videoComposition: nil,
+            normalizedPoint: CGPoint(x: 0.05, y: 0.5)
+        )
+        #expect(exportedVisible.blue > 120)
+        #expect(
+            exportedOutside.red < 45
+                && exportedOutside.green < 45
+                && exportedOutside.blue < 45
+        )
+    }
+
+    @Test @MainActor func identityCropResetsThePreviousClipAtAnAdjacentBoundary() async throws {
+        let sourceURL = try await makeHorizontalSplitTestVideo(frameCount: 60)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let asset = AVURLAsset(url: sourceURL)
+        let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let cropped = TimelineClip(
+            sourceURL: sourceURL,
+            sourceTrackID: track.trackID,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: 1,
+            name: "Cropped",
+            videoAdjustment: TimelineVideoAdjustment(cropLeading: 0.5)
+        )
+        let identity = TimelineClip(
+            sourceURL: sourceURL,
+            sourceTrackID: track.trackID,
+            sourceStart: 1,
+            timelineStart: 1,
+            duration: 1,
+            name: "Identity"
+        )
+        let project = TimelineProject(
+            name: "Crop Reset",
+            lanes: [TimelineLane(kind: .video, name: "Screen", clips: [cropped, identity])]
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        let color = try await renderedColor(
+            at: 1.5,
+            composition: build.composition,
+            videoComposition: build.videoComposition,
+            normalizedPoint: CGPoint(x: 0.25, y: 0.5)
+        )
+        #expect(Int(color.red) > Int(color.blue) + 80)
+    }
+
+    @Test func reverseAudioRendererProducesSampleAccurateReversePCM() async throws {
+        let sourceURL = try makeWaveformTestAudio(duration: 0.1) { frame, sampleRate in
+            Float(Double(frame) / (sampleRate * 0.1) * 2 - 1)
+        }
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let asset = AVURLAsset(url: sourceURL)
+        let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let reversedURL = try await TimelineReverseAudioRenderer.shared.reversedTrack(
+            sourceURL: sourceURL,
+            sourceTrackID: track.trackID,
+            sourceStart: 0,
+            sourceDuration: 0.1
+        )
+        defer { try? FileManager.default.removeItem(at: reversedURL) }
+
+        let file = try AVAudioFile(forReading: reversedURL)
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: file.processingFormat,
+            frameCapacity: AVAudioFrameCount(file.length)
+        ))
+        try file.read(into: buffer)
+        let samples = try #require(buffer.floatChannelData?[0])
+        #expect(samples[0] > 0.9)
+        #expect(samples[Int(buffer.frameLength) - 1] < -0.9)
+    }
+
+    @Test @MainActor func compositionExportsReversedAudioFromThePersistedEffect() async throws {
+        let sourceURL = try makeWaveformTestAudio(duration: 0.25) { frame, sampleRate in
+            Float(Double(frame) / (sampleRate * 0.25) * 2 - 1)
+        }
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Reverse Audio Export \(UUID().uuidString)")
+            .appendingPathExtension("m4a")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: destination)
+        }
+        let asset = AVURLAsset(url: sourceURL)
+        let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let clip = TimelineClip(
+            sourceURL: sourceURL,
+            sourceTrackID: track.trackID,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: 0.25,
+            name: "Reverse Audio",
+            effects: TimelineClipEffects(direction: .reverse)
+        )
+        let project = TimelineProject(
+            name: "Reverse Audio Export",
+            lanes: [TimelineLane(kind: .systemAudio, name: "Audio", clips: [clip])]
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        let exporter = try #require(AVAssetExportSession(
+            asset: build.composition,
+            presetName: AVAssetExportPresetAppleM4A
+        ))
+        exporter.audioMix = build.audioMix
+        try await exporter.export(to: destination, as: .m4a)
+
+        let output = try AVAudioFile(forReading: destination)
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: output.processingFormat,
+            frameCapacity: AVAudioFrameCount(output.length)
+        ))
+        try output.read(into: buffer)
+        let channel = try #require(buffer.floatChannelData?[0])
+        let frames = Int(buffer.frameLength)
+        let quarter = max(frames / 4, 1)
+        let beginning = (0..<quarter).reduce(Float(0)) { $0 + channel[$1] } / Float(quarter)
+        let ending = ((frames - quarter)..<frames).reduce(Float(0)) { $0 + channel[$1] } / Float(quarter)
+        #expect(beginning > 0.25)
+        #expect(ending < -0.25)
+    }
+
+    @Test @MainActor func retimedLinkedAudioVideoExportRemainsSynchronized() async throws {
+        let sourceURL = try await makeExportFixture(audioTrackCount: 1)
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Retimed Export \(UUID().uuidString)")
+            .appendingPathExtension("mov")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: destination)
+        }
+        let asset = AVURLAsset(url: sourceURL)
+        let video = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let audio = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let duration = try await asset.load(.duration).seconds
+        let groupID = UUID()
+        let videoClip = TimelineClip(
+            sourceURL: sourceURL,
+            sourceTrackID: video.trackID,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: duration,
+            name: "Video",
+            linkedGroupID: groupID
+        )
+        let audioClip = TimelineClip(
+            sourceURL: sourceURL,
+            sourceTrackID: audio.trackID,
+            sourceStart: 0,
+            timelineStart: 0,
+            duration: duration,
+            name: "Audio",
+            linkedGroupID: groupID
+        )
+        var project = TimelineProject(
+            name: "Retimed Export",
+            lanes: [
+                TimelineLane(kind: .video, name: "Video", clips: [videoClip]),
+                TimelineLane(kind: .systemAudio, name: "Audio", clips: [audioClip]),
+            ]
+        )
+        project.setPlaybackRate(2, clipIDs: [videoClip.id], includeLinked: true)
+        project.setFadeDurations(
+            fadeIn: 0.25,
+            fadeOut: 0.25,
+            clipIDs: [videoClip.id],
+            includeLinked: true
+        )
+        let build = try await TimelineCompositionBuilder.build(project)
+        let compositionVideo = try #require(build.composition.tracks(withMediaType: .video).first)
+        let compositionAudio = try #require(build.composition.tracks(withMediaType: .audio).first)
+        #expect(abs(compositionVideo.timeRange.duration.seconds - project.duration) < 0.001)
+        #expect(abs(compositionAudio.timeRange.duration.seconds - project.duration) < 0.001)
+        let exporter = try #require(AVAssetExportSession(
+            asset: build.composition,
+            presetName: AVAssetExportPresetHighestQuality
+        ))
+        exporter.videoComposition = build.videoComposition
+        exporter.audioMix = build.audioMix
+        try await exporter.export(to: destination, as: .mov)
+
+        let exported = AVURLAsset(url: destination)
+        let exportedVideo = try #require(try await exported.loadTracks(withMediaType: .video).first)
+        let exportedAudio = try #require(try await exported.loadTracks(withMediaType: .audio).first)
+        let videoRange = try await exportedVideo.load(.timeRange)
+        let audioRange = try await exportedAudio.load(.timeRange)
+        #expect(abs(videoRange.duration.seconds - project.duration) < 0.05)
+        #expect(abs(audioRange.duration.seconds - project.duration) < 0.05)
+        // Encoded video ends on a frame boundary while AAC/PCM packetization
+        // can end between frames. Keep export drift below one and a half 30 fps
+        // frames while the composition itself remains exactly aligned.
+        #expect(abs(videoRange.duration.seconds - audioRange.duration.seconds) < 0.05)
     }
 
     private func makeProject() -> TimelineProject {

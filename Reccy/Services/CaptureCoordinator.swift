@@ -43,12 +43,12 @@ enum CaptureState: Equatable, Sendable {
         }
     }
 
-    var stopButtonTitle: String {
+    var recordingEndButtonTitle: String {
         switch self {
         case .countingDown: "Cancel"
         case .starting: "Cancel Start"
         case .stopping: "Finishing…"
-        default: "Stop Recording"
+        default: "Finish Recording"
         }
     }
 
@@ -74,6 +74,38 @@ enum CaptureStopOperation: Equatable, Sendable {
     case cancelCountdown
     case cancelStartup
     case finishRecording
+}
+
+enum RecordingEndIntent: Equatable, Sendable {
+    case finish
+    case discard
+
+    var alertTitle: String {
+        switch self {
+        case .finish: "Finish Recording?"
+        case .discard: "Cancel This Recording?"
+        }
+    }
+
+    var informativeText: String {
+        switch self {
+        case .finish:
+            "Reccy will finish writing the current recording and add it to your Library."
+        case .discard:
+            "The recording in progress will be discarded and won’t be added to your Library. This can’t be undone."
+        }
+    }
+
+    var actionTitle: String {
+        switch self {
+        case .finish: "Finish Recording"
+        case .discard: "Discard Recording"
+        }
+    }
+
+    var safeTitle: String { "Keep Recording" }
+
+    var isDestructive: Bool { self == .discard }
 }
 
 enum CaptureFailureArtifactDisposition: Equatable, Sendable {
@@ -193,6 +225,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     @Published private(set) var isMouseFollowZoomActive = false
     @Published private(set) var mouseFollowZoomPosition = CGPoint(x: 0.5, y: 0.5)
     @Published private(set) var cameraVideoEffects = WebcamVideoEffectsState()
+    @Published private(set) var activeCameraPreviewSize: CGSize?
 
     let library: RecordingLibrary
     let previewPipeline = CapturePreviewPipeline()
@@ -218,7 +251,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     private var activationCancellable: AnyCancellable?
     private let regionSelectionController = RegionSelectionController()
     private let boundaryController = CaptureBoundaryController()
-    private var isPresentingStopRecordingConfirmation = false
+    private var isPresentingRecordingEndConfirmation = false
 #if DEBUG
     private var suppressesPermissionRefreshForQA = false
     private var isSimulatingRecordingForQA = false
@@ -321,6 +354,23 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         return CGFloat(manifest.width) / CGFloat(manifest.height)
     }
 
+    var liveCameraOverlayLayout: TimelineVideoLayout {
+        let canvasSize: CGSize
+        if let manifest = activeRecordingManifest, manifest.width > 0, manifest.height > 0 {
+            canvasSize = CGSize(width: manifest.width, height: manifest.height)
+        } else {
+            canvasSize = CGSize(width: 16, height: 9)
+        }
+        let sourceSize = activeCameraPreviewSize
+            ?? activeRecordingManifest?.camera.map { CGSize(width: $0.width, height: $0.height) }
+            ?? CGSize(width: 16, height: 9)
+        let defaultLayout = TimelineVideoLayout.defaultCamera(
+            canvasSize: canvasSize,
+            sourceSize: sourceSize
+        )
+        return settings.cameraOverlayPosition?.applying(to: defaultLayout) ?? defaultLayout
+    }
+
     var liveMouseFollowZoomScale: Double {
         mouseFollowZoomCapture.currentScale ?? 1
     }
@@ -344,12 +394,52 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         settings = updated
     }
 
+    /// Commits one normalized live-preview placement. Drag updates remain
+    /// local to the view; settings and the crash-recovery manifest are written
+    /// only when the gesture or an accessibility/keyboard command completes.
+    func setLiveCameraOverlayLayout(_ layout: TimelineVideoLayout) {
+        let position = CameraOverlayPosition(layout: layout)
+        if settings.cameraOverlayPosition != position {
+            var updated = settings
+            updated.cameraOverlayPosition = position
+            settings = updated
+        }
+        updateActiveCameraOverlayPosition(position)
+    }
+
+    func resetLiveCameraOverlayPosition() {
+        if settings.cameraOverlayPosition != nil {
+            var updated = settings
+            updated.cameraOverlayPosition = nil
+            settings = updated
+        }
+        updateActiveCameraOverlayPosition(nil)
+    }
+
+    private func updateActiveCameraOverlayPosition(_ position: CameraOverlayPosition?) {
+        guard var manifest = activeRecordingManifest,
+              var camera = manifest.camera
+        else { return }
+        guard camera.overlayPosition != position else { return }
+        camera.overlayPosition = position
+        manifest.camera = camera
+        activeRecordingManifest = manifest
+        guard let mediaURL = activeOutputURL else { return }
+        do {
+            try RecordingRecoveryJournal.update(manifest: manifest, mediaURL: mediaURL)
+        } catch {
+            logger.error(
+                "Could not persist live camera placement to the recovery journal: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
     private func registerGlobalShortcuts() {
         KeyboardShortcuts.onKeyUp(for: .toggleRecording) { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
                 if self.state.isRecording {
-                    self.requestStopRecording()
+                    self.requestFinishRecording()
                 } else {
                     self.startRecording()
                 }
@@ -413,9 +503,14 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 
         var pickerConfiguration = SCContentSharingPickerConfiguration()
         pickerConfiguration.allowedPickerModes = pickerMode
-        // The picker is used to create a new filter, not to mutate the
-        // recorder's private SCStream after capture has begun.
-        pickerConfiguration.allowsChangingSelectedContent = false
+        // This presentation creates a filter without an associated SCStream.
+        // Keep initial selection mutable through Apple's Share action; setting
+        // this to false can dismiss the macOS 26 application picker without
+        // delivering its initial-filter callback. Reccy deactivates the picker
+        // immediately after the callback and never lets it mutate a recording
+        // stream after capture begins.
+        pickerConfiguration.allowsChangingSelectedContent =
+            CaptureSourcePickerPolicy.allowsChangingSelectedContentForNewFilter
         if let bundleID = Bundle.main.bundleIdentifier {
             pickerConfiguration.excludedBundleIDs = [bundleID]
         }
@@ -423,6 +518,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         let picker = SCContentSharingPicker.shared
         picker.defaultConfiguration = pickerConfiguration
         picker.isActive = true
+        logger.info("Presenting the system source picker for a new filter")
         picker.present(using: contentStyle)
     }
 
@@ -635,36 +731,56 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
-    /// Routes every user-initiated stop through one native confirmation. Capture
-    /// startup cancellation remains immediate, and automatic safety stops call
-    /// `stopRecording()` directly so low-space or failure recovery cannot wait
-    /// on modal UI while primary media is at risk.
-    func requestStopRecording() {
+    /// Routes every user-initiated finish through one native confirmation.
+    /// Capture startup cancellation remains immediate, and automatic safety
+    /// stops call `stopRecording()` directly so low-space or failure recovery
+    /// cannot wait on modal UI while primary media is at risk.
+    func requestFinishRecording() {
         guard state.requiresStopConfirmation else {
             stopRecording()
             return
         }
-        guard !isPresentingStopRecordingConfirmation else { return }
-        isPresentingStopRecordingConfirmation = true
+        presentRecordingEndConfirmation(.finish)
+    }
+
+    /// Cancelling an active recording is deliberately separate from cancelling
+    /// countdown/startup. The confirmed path shuts down every producer and the
+    /// writer before removing only this session's exact staged artifacts.
+    func requestCancelRecording() {
+        guard state.requiresStopConfirmation else { return }
+        presentRecordingEndConfirmation(.discard)
+    }
+
+    private func presentRecordingEndConfirmation(_ intent: RecordingEndIntent) {
+        guard !isPresentingRecordingEndConfirmation else { return }
+        isPresentingRecordingEndConfirmation = true
 
         let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Stop Recording?"
-        alert.informativeText = "Reccy will finish writing the current recording and add it to your Library."
+        alert.alertStyle = intent.isDestructive ? .warning : .informational
+        alert.messageText = intent.alertTitle
+        alert.informativeText = intent.informativeText
 
-        let cancelButton = alert.addButton(withTitle: "Cancel")
-        cancelButton.keyEquivalent = "\r"
-        let stopButton = alert.addButton(withTitle: "Stop Recording")
-        stopButton.hasDestructiveAction = true
-        stopButton.keyEquivalent = ""
+        // NSAlert places the first button at the trailing edge. Keep the safe
+        // choice there as the Return-key default, with the irreversible action
+        // immediately to its left and never keyboard-defaulted.
+        let keepButton = alert.addButton(withTitle: intent.safeTitle)
+        keepButton.keyEquivalent = "\r"
+        let actionButton = alert.addButton(withTitle: intent.actionTitle)
+        actionButton.hasDestructiveAction = intent.isDestructive
+        actionButton.keyEquivalent = ""
 
         let handleResponse: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard let self else { return }
-            self.isPresentingStopRecordingConfirmation = false
+            self.isPresentingRecordingEndConfirmation = false
             guard response == .alertSecondButtonReturn,
                   self.state.requiresStopConfirmation
             else { return }
-            self.stopRecording()
+            switch intent {
+            case .finish:
+                self.stopRecording()
+            case .discard:
+                self.discardActiveRecording()
+            }
         }
 
         if let window = NSApp.keyWindow,
@@ -674,6 +790,33 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             alert.beginSheetModal(for: window, completionHandler: handleResponse)
         } else {
             handleResponse(alert.runModal())
+        }
+    }
+
+    private func discardActiveRecording() {
+#if DEBUG
+        if isSimulatingRecordingForQA {
+            isSimulatingRecordingForQA = false
+            completeDiscardedRecording(at: nil)
+            return
+        }
+#endif
+        guard recordingStopTask == nil,
+              let recorder = multitrackRecorder,
+              state == .recording || state == .paused
+        else { return }
+
+        sessionGeneration &+= 1
+        recordingStartTask?.cancel()
+        recordingStartTask = nil
+        state = .stopping
+        meterTask?.cancel()
+        let outputURL = activeOutputURL
+
+        recordingStopTask = Task { [weak self] in
+            await recorder.cancel()
+            guard let self, self.state == .stopping else { return }
+            self.completeDiscardedRecording(at: outputURL)
         }
     }
 
@@ -906,6 +1049,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
             microphoneAudioHistory.removeAll(keepingCapacity: true)
             previewPipeline.clear()
             cameraPreviewPipeline.clear()
+            activeCameraPreviewSize = nil
 
             let captureGeometry = captureGeometry(for: filter)
             let streamConfiguration = makeStreamConfiguration(
@@ -951,7 +1095,8 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                         uniqueID: selectedCameraUniqueID,
                         name: selectedCameraName,
                         width: 1280,
-                        height: 720
+                        height: 720,
+                        overlayPosition: settings.cameraOverlayPosition
                     )
                     : nil,
                 showsCursor: settings.showCursor,
@@ -999,13 +1144,24 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                         uniqueID: format.deviceID,
                         name: format.deviceName,
                         width: format.width,
+                        height: format.height,
+                        overlayPosition: self.settings.cameraOverlayPosition
+                    )
+                    self.activeCameraPreviewSize = CGSize(
+                        width: format.width,
                         height: format.height
                     )
                     self.activeRecordingManifest?.camera = descriptor
                     if let manifest = self.activeRecordingManifest,
                        let mediaURL = self.activeOutputURL
                     {
-                        try? RecordingRecoveryJournal.update(manifest: manifest, mediaURL: mediaURL)
+                        do {
+                            try RecordingRecoveryJournal.update(manifest: manifest, mediaURL: mediaURL)
+                        } catch {
+                            self.logger.error(
+                                "Could not persist the resolved camera format to the recovery journal: \(error.localizedDescription, privacy: .public)"
+                            )
+                        }
                     }
                 }
             }
@@ -1405,6 +1561,45 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         }
     }
 
+    private func completeDiscardedRecording(at outputURL: URL?) {
+        transcription.cancelLive()
+        var cleanupError: Error?
+        if let outputURL {
+            do {
+                try RecordingRecoveryJournal.discardCancelledRecording(mediaURL: outputURL)
+            } catch {
+                cleanupError = error
+            }
+        }
+
+        recordingStartTask = nil
+        recordingStopTask = nil
+        meterTask?.cancel()
+        meterTask = nil
+        multitrackRecorder = nil
+        activeOutputURL = nil
+        activeRecordingManifest = nil
+        activeTranscriptionConfiguration = nil
+        pendingCompletionNotice = nil
+        recordingLease = nil
+        previewPipeline.clear()
+        cameraPreviewPipeline.clear()
+        clearSourceSelection()
+        resetSessionTelemetry()
+        state = .idle
+        sessionCompletion = CaptureSessionCompletion(outcome: .cancelled)
+
+        if let cleanupError {
+            library.presentNotice(
+                kind: .warning,
+                title: "Recording discard needs attention",
+                message: "Reccy did not add the recording to your Library, but couldn’t remove every temporary artifact. \(cleanupError.localizedDescription)"
+            )
+        } else {
+            library.refresh()
+        }
+    }
+
     private func isCurrentSession(_ generation: UInt) -> Bool {
         generation == sessionGeneration
     }
@@ -1436,6 +1631,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
         systemAudioHistory.removeAll(keepingCapacity: true)
         microphoneAudioHistory.removeAll(keepingCapacity: true)
         activeCaptureGeometry = nil
+        activeCameraPreviewSize = nil
         resetMouseFollowZoomCapture()
     }
 
@@ -1865,6 +2061,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard isSelectingSource else { return }
+            logger.info("The system source picker cancelled new-filter selection")
             isSelectingSource = false
             deactivateSystemPicker()
             if !hasSelectedSource {
@@ -1882,6 +2079,7 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard isSelectingSource else { return }
+            logger.info("The system source picker delivered a new approved filter")
             isSelectingSource = false
             deactivateSystemPicker()
             completeSourceSelection(filter: filter)
@@ -1893,6 +2091,9 @@ extension CaptureCoordinator: SCContentSharingPickerObserver {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard isSelectingSource else { return }
+            logger.error(
+                "The system source picker failed before selection: \(message, privacy: .public)"
+            )
             isSelectingSource = false
             handleFailure(CaptureError.sourcePickerFailed(message))
         }

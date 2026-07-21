@@ -53,10 +53,11 @@ nonisolated struct RecordingCameraDescriptor: Codable, Hashable, Sendable {
     var name: String
     var width: Int
     var height: Int
+    var overlayPosition: CameraOverlayPosition? = nil
 }
 
 nonisolated struct RecordingManifest: Codable, Hashable, Sendable {
-    static let currentVersion = 3
+    static let currentVersion = 4
 
     var version = currentVersion
     var createdAt: Date
