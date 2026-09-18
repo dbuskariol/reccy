@@ -87,6 +87,10 @@ The horizontal timeline viewport derives its minimum scale from `viewportWidth /
 
 Every committed editor mutation atomically autosaves the project package and registers the complete project, selection, playhead, package, and source-duration state with the window’s native `UndoManager`. Standard Undo and Redo therefore cover discrete and drag-based clip edits, track mute/volume, overlay layout, captions, poster choice, media import, and voiceover additions while continuing to use the same rebuild-and-save path as direct edits. Opening another project clears only this controller’s prior undo registrations, leaving ordinary text-field undo behavior to the macOS responder chain.
 
+An edit decision list with no remaining media clips is a valid empty project, not a playable composition. Editor clears its player and render state while retaining the project for imports, Undo, and Reset Edits. The shared composition builder rejects an empty timeline before creating an AVPlayer item; Library presents the same empty state rather than silently playing the unedited source, and export reports an actionable error. Split All returns the actual right-hand clip identifiers, avoiding tolerance-based selection of the wrong side near time zero. Delete and Close Gap confirms that the selected time range is deleted across all tracks, regardless of the selected lane or linked-movement setting.
+
+Reset Edits rebuilds the original independent tracks from the recording before changing the saved project. It first atomically archives the existing `project.json` under `Previous Edits/<UUID>.json`, then atomically replaces the active JSON. A backup failure leaves the active JSON intact; reset never removes the project package or its `Media` directory. The same safe path handles unsupported project versions. Reset is undoable in the current editing session, but undo history itself is not persisted across reopening. Controller tests cover empty-project reopening, normal split/ripple playback, reset/undo/redo, byte-preserved media and edit backups, and backup failure rollback.
+
 The project also owns a non-destructive timed caption track. Transcript projection creates sentence-bounded cues, removes strongly matching cross-track acoustic echoes, and serializes genuinely concurrent speakers so two caption layers never draw over one another. Caption text, manual cues, visibility, placement, and size are editable without rebuilding the media composition. Playback uses one shared native SwiftUI overlay in Editor and Library; exports use `AVVideoCompositionCoreAnimationTool` with `CATextLayer` because Apple defines that tool as an offline render path. The export pass reuses the base composition instructions and color metadata, so captions do not flatten or alter the source tracks.
 
 `TimelineCompositionBuild` creates AVPlayer items from its canonical composition. The layer instructions and player asset therefore always reference the same composition tracks; independently copying the asset after instructions are built can make layered screen and camera previews resolve against different track instances. Library sizes its player surface from the actual render aspect rather than assuming 16:9, preserving window, application, portrait, and portion geometry.
@@ -98,6 +102,8 @@ Project packages use this shape:
 ```text
 Example.reccyproject/
 ├── project.json
+├── Previous Edits/              # Created by explicit Reset Edits
+│   └── <UUID>.json
 └── Media/
     ├── Voiceover <UUID>.m4a
     ├── Imported Movie.mov

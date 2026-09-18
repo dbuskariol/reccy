@@ -3,6 +3,7 @@ import CoreGraphics
 import Foundation
 
 enum TimelineCompositionBuildError: LocalizedError {
+    case emptyTimeline
     case couldNotCreateTrack(TimelineLaneKind)
     case missingSourceTrack(URL, CMPersistentTrackID)
     case couldNotInsertClip(String, Error)
@@ -10,6 +11,8 @@ enum TimelineCompositionBuildError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .emptyTimeline:
+            "This timeline has no clips. Open the Editor to import media or reset its edits. The source recording is unchanged."
         case .couldNotCreateTrack(let kind):
             "Reccy couldn’t create the \(laneTitle(kind).lowercased()) timeline track."
         case .missingSourceTrack(let url, let trackID):
@@ -44,7 +47,7 @@ enum TimelineCompositionBuildError: LocalizedError {
     var underlyingError: Error? {
         switch self {
         case .couldNotInsertClip(_, let error), .couldNotFillGap(_, let error): error
-        case .couldNotCreateTrack, .missingSourceTrack: nil
+        case .emptyTimeline, .couldNotCreateTrack, .missingSourceTrack: nil
         }
     }
 }
@@ -78,6 +81,7 @@ struct TimelineCompositionBuild {
 @MainActor
 enum TimelineCompositionBuilder {
     static func build(_ project: TimelineProject) async throws -> TimelineCompositionBuild {
+        guard project.hasMedia else { throw TimelineCompositionBuildError.emptyTimeline }
         let sources = try await loadSources(for: project)
         let composition = AVMutableComposition()
         var audioParameters: [AVMutableAudioMixInputParameters] = []

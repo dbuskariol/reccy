@@ -26,6 +26,7 @@ struct EditorView: View {
     @State private var previousObservedPlayhead: TimeInterval = 0
     @State private var isProgrammaticTimelineScroll = false
     @State private var confirmsClipDeletion = false
+    @State private var confirmsRippleDeletion = false
 
     private let trackHeaderWidth: CGFloat = 176
     private let rulerHeight: CGFloat = 32
@@ -117,6 +118,22 @@ struct EditorView: View {
         } message: {
             Text(deleteConfirmationMessage)
         }
+        .alert("Delete Time Across All Tracks?", isPresented: $confirmsRippleDeletion) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete and Close Gap", role: .destructive) {
+                editor.rippleDeleteSelection()
+            }
+        } message: {
+            Text("This deletes the selected clip’s time range from every track and shifts later clips earlier. It does not just remove empty space. Source media stays unchanged, and you can undo the edit.")
+        }
+        .alert("Reset All Edits?", isPresented: $editor.confirmsResetEdits) {
+            Button("Cancel", role: .cancel) {}
+            Button("Reset Edits", role: .destructive) {
+                Task { await editor.resetProjectEdits() }
+            }
+        } message: {
+            Text("This restores the original recording’s tracks. Your previous edit decisions are backed up inside the project, and all source, imported, and voiceover media is kept. You can undo this reset until you close the project.")
+        }
     }
 
     private func editorWorkspace(_ project: TimelineProject) -> some View {
@@ -189,8 +206,19 @@ struct EditorView: View {
     private func previewPane(_ project: TimelineProject) -> some View {
         VStack(spacing: 0) {
             ZStack {
-                NativeVideoPlayer(player: editor.player)
-                    .background(.black)
+                if project.hasMedia {
+                    NativeVideoPlayer(player: editor.player)
+                        .background(.black)
+                } else {
+                    ContentUnavailableView {
+                        Label("No Clips in Timeline", systemImage: "timeline.selection")
+                    } description: {
+                        Text("Your source recording is unchanged. Undo the deletion, import media, or reset edits to restore the original tracks.")
+                    } actions: {
+                        Button("Reset Edits…") { editor.requestResetEdits() }
+                            .disabled(!editor.canResetProjectEdits)
+                    }
+                }
 
                 if editor.previewRenderSize.width > 0,
                    editor.previewRenderSize.height > 0
@@ -214,7 +242,7 @@ struct EditorView: View {
                     }
                 }
 
-                if let captionTrack = project.captionTrack {
+                if project.hasMedia, let captionTrack = project.captionTrack {
                     TimelineCaptionOverlay(
                         track: captionTrack,
                         time: editor.playhead,
@@ -303,6 +331,7 @@ struct EditorView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
         .background(.bar)
+        .disabled(!editor.hasTimelineMedia)
     }
 
     private func transportButton(
@@ -881,11 +910,11 @@ struct EditorView: View {
                     .keyboardShortcut(.delete, modifiers: [])
 
                     timelineToolbarButton(
-                        "Close Gap",
+                        "Delete and Close Gap",
                         systemImage: "arrow.left.and.right",
-                        help: "Delete the selected clip and close its gap"
+                        help: "Delete the selected time range across all tracks and close the gap (⌘Delete)"
                     ) {
-                        editor.rippleDeleteSelection()
+                        confirmsRippleDeletion = true
                     }
                     .disabled(!editor.canRippleSelection)
                     .keyboardShortcut(.delete, modifiers: .command)
@@ -1233,7 +1262,7 @@ struct EditorView: View {
             Label("Export", systemImage: "square.and.arrow.up")
                 .labelStyle(.iconOnly)
         }
-        .disabled(!editor.hasProject || editor.isRebuilding)
+        .disabled(!editor.hasTimelineMedia || editor.isRebuilding)
         .reccyAccessibleControl("Export")
         .reccyTooltip("Export the current project")
     }

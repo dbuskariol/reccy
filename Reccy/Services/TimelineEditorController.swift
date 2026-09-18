@@ -43,6 +43,8 @@ final class TimelineEditorController: ObservableObject {
     @Published private(set) var minimumPixelsPerSecond: Double = TimelineViewportPolicy.fallbackMinimumPixelsPerSecond
     @Published var errorMessage: String?
     @Published private(set) var canResetUnsupportedProject = false
+    @Published var confirmsResetEdits = false
+    @Published private var openedRecording: RecordingItem?
     @Published var moveLinkedClips = false
     @Published private(set) var voiceoverInputDevices: [AudioInputDevice] = []
     @Published var selectedVoiceoverInputID: String? = UserDefaults.standard.string(
@@ -79,6 +81,7 @@ final class TimelineEditorController: ObservableObject {
     private var mouseZoomInteractionOriginalSnapshot: EditorProjectSnapshot?
     private var mouseZoomInteractionKind: MouseZoomInteractionKind?
     private var rebuildGeneration: UInt = 0
+    private var loadGeneration: UInt = 0
     private var rebuildTask: Task<Void, Never>?
     private var unsupportedProjectRecovery: UnsupportedProjectRecovery?
     private weak var undoManager: UndoManager?
@@ -91,6 +94,11 @@ final class TimelineEditorController: ObservableObject {
     var duration: TimeInterval { max(project?.duration ?? 0, 0.01) }
     var frameDuration: TimeInterval { project?.frameDuration ?? 1 / 30 }
     var hasProject: Bool { project != nil }
+    var hasTimelineMedia: Bool { project?.hasMedia == true }
+    var canResetProjectEdits: Bool {
+        openedRecording != nil && !isLoading && !isRebuilding
+            && !isImportingMedia && !isVoiceoverRecording
+    }
     var isPlaying: Bool { player.timeControlStatus == .playing }
     var selectedClipID: UUID? {
         get { clipSelection.primaryID }
@@ -147,7 +155,7 @@ final class TimelineEditorController: ObservableObject {
         guard let project else { return false }
         return clipSelection.selectedIDs.contains { project.clip(id: $0)?.contains(playhead) == true }
     }
-    var canRippleSelection: Bool { clipSelection.selectedIDs.count == 1 }
+    var canRippleSelection: Bool { clipSelection.selectedIDs.count == 1 && selectedClip != nil }
     var canSplitAll: Bool {
         project?.lanes.flatMap(\.clips).contains(where: { $0.contains(playhead) }) == true
     }
@@ -182,15 +190,26 @@ final class TimelineEditorController: ObservableObject {
     }
 
     func open(_ item: RecordingItem) async {
+        loadGeneration &+= 1
+        let generation = loadGeneration
         isLoading = true
         dismissError()
-        defer { isLoading = false }
+        defer {
+            if generation == loadGeneration { isLoading = false }
+        }
+        await rebuildTask?.value
+        guard generation == loadGeneration else { return }
+        dismissError()
 
         let packageURL = item.artifacts.projectPackageURL
         do {
             let loaded = try await loadProject(for: item, packageURL: packageURL)
-            try await installLoadedProject(loaded, packageURL: packageURL)
+            try await installLoadedProject(loaded, packageURL: packageURL, generation: generation)
+            openedRecording = item
+        } catch is CancellationError {
+            return
         } catch TimelineEditorError.projectFormatUnsupported {
+            guard generation == loadGeneration else { return }
             unsupportedProjectRecovery = UnsupportedProjectRecovery(
                 item: item,
                 packageURL: packageURL
@@ -198,6 +217,7 @@ final class TimelineEditorController: ObservableObject {
             canResetUnsupportedProject = true
             errorMessage = TimelineEditorError.projectFormatUnsupported.localizedDescription
         } catch {
+            guard generation == loadGeneration else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -210,14 +230,48 @@ final class TimelineEditorController: ObservableObject {
 
     func resetUnsupportedProject() async {
         guard let recovery = unsupportedProjectRecovery else { return }
+        await resetProjectEdits(for: recovery.item, packageURL: recovery.packageURL)
+    }
+
+    func requestResetEdits() {
+        guard canResetProjectEdits else { return }
+        confirmsResetEdits = true
+    }
+
+    func resetProjectEdits() async {
+        guard canResetProjectEdits, let openedRecording, let projectPackageURL else { return }
+        await resetProjectEdits(for: openedRecording, packageURL: projectPackageURL)
+    }
+
+    private func resetProjectEdits(for item: RecordingItem, packageURL: URL) async {
+        guard !isLoading else { return }
+        let canUndoReset = openedRecording?.url == item.url && project != nil
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        isLoading = true
+        confirmsResetEdits = false
+        dismissError()
+        defer {
+            if generation == loadGeneration { isLoading = false }
+        }
+        await rebuildTask?.value
+        guard generation == loadGeneration else { return }
         dismissError()
 
         do {
-            if FileManager.default.fileExists(atPath: recovery.packageURL.path) {
-                try FileManager.default.removeItem(at: recovery.packageURL)
-            }
-            await open(recovery.item)
+            let loaded = try await RecordingTimelineProjectLoader.makeInitialProject(for: item)
+            try await installLoadedProject(
+                loaded,
+                packageURL: packageURL,
+                generation: generation,
+                preservingPreviousEdits: true,
+                undoActionName: canUndoReset ? "Reset Edits" : nil
+            )
+            openedRecording = item
+        } catch is CancellationError {
+            return
         } catch {
+            guard generation == loadGeneration else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -234,19 +288,31 @@ final class TimelineEditorController: ObservableObject {
 
     private func installLoadedProject(
         _ loaded: LoadedTimelineProject,
-        packageURL: URL
+        packageURL: URL,
+        generation: UInt,
+        preservingPreviousEdits: Bool = false,
+        undoActionName: String? = nil
     ) async throws {
-        let previous = EditorProjectSnapshot(
-            project: project,
-            projectPackageURL: projectPackageURL,
-            sourceDurations: sourceDurations,
-            clipSelection: clipSelection,
-            selectedGapID: selectedGapID,
-            selectedCaptionID: selectedCaptionID,
-            selectedMouseFollowZoomSegmentID: selectedMouseFollowZoomSegmentID,
-            playhead: playhead
-        )
+        let previous = currentSnapshot()
+        let build = loaded.project.hasMedia
+            ? try await TimelineCompositionBuilder.build(loaded.project)
+            : nil
+        try Task.checkCancellation()
+        guard generation == loadGeneration else { throw CancellationError() }
 
+        // Prepare playback and preserve the old JSON before publishing any
+        // replacement state. A failed reset leaves the live editor unchanged.
+        if loaded.needsInitialSave || preservingPreviousEdits {
+            try RecordingTimelineProjectLoader.save(
+                loaded.project,
+                packageURL: packageURL,
+                preservingPreviousEdits: preservingPreviousEdits
+            )
+        }
+
+        rebuildTask?.cancel()
+        rebuildGeneration &+= 1
+        isRebuilding = false
         project = loaded.project
         projectPackageURL = packageURL
         sourceDurations = loaded.sourceDurations
@@ -259,43 +325,24 @@ final class TimelineEditorController: ObservableObject {
         selectedCaptionID = nil
         selectedMouseFollowZoomSegmentID = nil
 
-        do {
-            try await rebuildComposition()
-            if loaded.needsInitialSave {
-                try save()
-            }
+        if let build {
+            installComposition(build, for: loaded.project)
+        } else {
+            clearComposition()
+        }
+        if let undoActionName {
+            registerUndo(previous, actionName: undoActionName)
+        } else {
             undoManager?.removeAllActions(withTarget: self)
-        } catch {
-            project = previous.project
-            projectPackageURL = previous.projectPackageURL
-            sourceDurations = previous.sourceDurations
-            clipSelection = previous.clipSelection
-            selectedGapID = previous.selectedGapID
-            selectedCaptionID = previous.selectedCaptionID
-            selectedMouseFollowZoomSegmentID = previous.selectedMouseFollowZoomSegmentID
-            playhead = previous.playhead
-
-            if previous.project != nil {
-                try? await rebuildComposition()
-            } else {
-                rebuildGeneration &+= 1
-                composition = nil
-                compositionVideoComposition = nil
-                compositionAudioMix = nil
-                player.replaceCurrentItem(with: nil)
-            }
-            throw error
         }
     }
 
     func splitAllAtPlayhead() {
         let undoSnapshot = currentSnapshot()
-        guard var project else { return }
-        project.splitAll(at: playhead)
+        guard canSplitAll, var project else { return }
+        let rightClipIDs = project.splitAll(at: playhead)
         self.project = project
-        selectedClipID = project.lanes
-            .flatMap(\.clips)
-            .first(where: { abs($0.timelineStart - playhead) < 0.002 })?.id
+        selectedClipID = rightClipIDs.first
         registerUndo(undoSnapshot, actionName: "Split All Tracks")
         rebuildAndSave()
     }
@@ -346,6 +393,7 @@ final class TimelineEditorController: ObservableObject {
     func rippleDeleteSelection() {
         let undoSnapshot = currentSnapshot()
         guard
+            canRippleSelection,
             var project,
             let selectedClipID,
             let selected = project.lanes.flatMap(\.clips).first(where: { $0.id == selectedClipID })
@@ -355,7 +403,7 @@ final class TimelineEditorController: ObservableObject {
         self.project = project
         self.selectedClipID = nil
         playhead = min(playhead, project.duration)
-        registerUndo(undoSnapshot, actionName: "Close Gap")
+        registerUndo(undoSnapshot, actionName: "Delete and Close Gap")
         rebuildAndSave()
     }
 
@@ -1147,11 +1195,13 @@ final class TimelineEditorController: ObservableObject {
     }
 
     var sourceRecordingURL: URL? {
-        project?.lanes.first(where: { $0.kind == .video })?.clips.first?.sourceURL
+        openedRecording?.url
     }
 
     func makeExportSource() throws -> ExportSource {
-        guard let project, let composition else { throw TimelineEditorError.noProject }
+        guard let project else { throw TimelineEditorError.noProject }
+        guard project.hasMedia else { throw TimelineCompositionBuildError.emptyTimeline }
+        guard let composition else { throw TimelineEditorError.noProject }
         return ExportSource(
             name: project.name,
             asset: composition,
@@ -1273,13 +1323,33 @@ final class TimelineEditorController: ObservableObject {
             }
         }
 
+        // An empty edit decision list is valid and must remain undoable, but
+        // an empty AVComposition never becomes a playable AVPlayerItem.
+        guard project.hasMedia else {
+            clearComposition()
+            return
+        }
+
         let build = try await TimelineCompositionBuilder.build(project)
-        let item = build.makePlayerItem()
 
         // A prior edit may still be assembling while the user makes a newer
         // one. Never let the older composition overwrite the current project.
         guard generation == rebuildGeneration, self.project == project else { return }
+        installComposition(build, for: project)
+    }
 
+    private func clearComposition() {
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        composition = nil
+        compositionVideoComposition = nil
+        compositionAudioMix = nil
+        previewRenderSize = .zero
+        playhead = 0
+    }
+
+    private func installComposition(_ build: TimelineCompositionBuild, for project: TimelineProject) {
+        let item = build.makePlayerItem()
         composition = build.composition
         compositionVideoComposition = build.videoComposition
         compositionAudioMix = build.audioMix
