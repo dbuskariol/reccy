@@ -52,10 +52,11 @@ Reccy's `.reccyproject` package is a non-destructive edit decision list. Screen 
 - Fit the complete project timeline at any window size with a duration- and viewport-derived minimum zoom, then zoom precisely back into clip detail.
 - Select discontiguous clips with Command-click, extend an anchored range with Shift-click, add a range with Command-Shift-click, or use Command-A in the timeline. Move the selection as one rigid group and delete it through one non-destructive confirmation.
 - Reorder clips magnetically, snap to useful boundaries, or link matching audio and video when desired.
-- Trim either edge, split one clip, split every lane, delete independently, or close time across the project.
+- Trim either edge, split one clip, split every lane, or delete independently. Delete and Close Gap explicitly confirms deletion of the selected time range across every track before shifting later clips earlier.
 - Apply 0.25×, 0.5×, 1×, 2×, or 4× speed, forward/reverse playback, and independent fade-in/fade-out while linked picture and audio remain synchronized.
 - Crop any video source and adjust its centered size from the native Video inspector; preview, saved projects, undo/redo, and export reuse the same normalized parameters.
 - Undo and redo clip, track-audio, overlay-layout, caption, poster-frame, import, and voiceover edits through the standard macOS Edit commands and keyboard shortcuts.
+- An empty timeline remains editable and undoable, with an explicit empty state instead of a stalled preview. After reopening, choose **Editor > Reset Edits…** to restore the original recording's tracks; previous edit decisions are backed up inside the project and source, imported, and voiceover media is retained.
 - Keep every committed edit atomically autosaved in the project package; source media is never rewritten.
 - Move and resize camera and imported video overlays directly over the player with a pointer or equivalent VoiceOver actions; normalized layouts are reused by preview and export.
 - Import movies, audio, or images with Command-I. Reccy copies them into the project package, keeps movie audio on a separate linked lane, and represents a still image with a bounded proxy whose duration remains freely editable.

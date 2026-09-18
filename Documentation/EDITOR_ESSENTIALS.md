@@ -6,7 +6,8 @@ This audit compares Reccy's editor with the essential interactions users expect 
 
 - Frame-accurate ruler seeking, playback stepping, pointer scrubbing, and timeline timecode.
 - Magnetic single-clip reorder plus boundary/playhead snapping.
-- Leading and trailing trim, selected-clip split, all-track split, ordinary delete, and explicit close-gap ripple delete.
+- Leading and trailing trim, selected-clip split, all-track split, ordinary delete, and confirmed Delete and Close Gap across every track.
+- Explicit empty-timeline presentation in Editor and Library, with session Undo or Reset Edits recovery. Reset preserves previous edit JSON, imported media, voiceover files, and the original recording.
 - Optional linked A/V movement and trim without flattening independent tracks.
 - Native undo/redo, keyboard nudging, VoiceOver custom actions, source-aligned transcript projection, captions, voiceover, imported media, editable gaps, overlays, and mouse-follow zoom.
 - Atomic project persistence and shared AVFoundation preview/Library/export composition.
@@ -23,7 +24,7 @@ This audit compares Reccy's editor with the essential interactions users expect 
 ## Deliberately deferred
 
 - **Arbitrary time-range selection:** Reccy's operations currently act on whole clips or the playhead. A real range model must coordinate media, captions, effects, and ripple semantics; a decorative drag rectangle would be misleading.
-- **Global ripple/non-ripple editing modes:** Close Gap remains the explicit ripple command, while move, trim, delete, and speed have documented local behavior. A persistent mode would need unmistakable toolbar/menu state and broader collision tests to avoid destructive surprises.
+- **Global ripple/non-ripple editing modes:** Delete and Close Gap remains the explicit ripple command, while move, trim, delete, and speed have documented local behavior. A persistent mode would need unmistakable toolbar/menu state and broader collision tests to avoid destructive surprises.
 - **Roll, slip, slide, and multi-edge trim:** Useful for a general-purpose NLE, but lower value than reliable clip grouping, effects, and screen-recording-specific zoom/caption workflows in this release.
 - **Transitions, keyframes, effect stacks, and presets:** The format-7 effect model is extensible, but shipping placeholder controls or flattening generated intermediates would violate source fidelity. Future effects should add typed parameters and matching preview/export tests.
 - **Nested groups and compound clips:** Current multi-selection is transient and native. Persisted compound clips introduce ownership, transcript, audio-mix, and source-master questions that need a separate design.
