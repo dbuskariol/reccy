@@ -2,6 +2,9 @@
 
 This editor release expands Reccy's non-destructive timeline without changing the local-first source-master contract:
 
+- Fixes the persistent loading preview after the last timeline clips are deleted. Empty projects now show an explicit state in Editor and Library, remain undoable, and reject empty exports with recovery guidance.
+- Adds Editor > Reset Edits to restore original recording tracks after reopening. Reset backs up the previous edit JSON, retains imported and voiceover media, and is itself undoable within the current session; unsupported-project recovery uses the same non-destructive path.
+- Renames Close Gap to Delete and Close Gap and confirms its all-track deletion scope. Split All selects the actual newly split right-hand clip, including splits very close to time zero.
 - Keeps the playhead visible during forward or reverse playback with editor-style edge margins, while pausing automatic follow after manual navigation, selection, scrubbing, or zooming.
 - Derives the timeline's minimum zoom from the current project duration and clip viewport, so the complete project fits after imports, edits, and window resizing without imposing a fixed lower limit.
 - Adds native multi-clip selection: Command-click toggles, Shift-click extends from a stable anchor, Command-Shift adds a range, Command-A selects the timeline scope, and empty-space clicks clear the selection. Selected clips move as one rigid group, remain clear of time zero and neighbouring media, delete through one count-aware confirmation, and participate coherently in undo, keyboard, and VoiceOver paths.

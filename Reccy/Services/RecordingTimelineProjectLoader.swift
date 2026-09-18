@@ -79,16 +79,30 @@ enum RecordingTimelineProjectLoader {
         )
     }
 
-    static func save(_ project: TimelineProject, packageURL: URL) throws {
+    static func save(
+        _ project: TimelineProject,
+        packageURL: URL,
+        preservingPreviousEdits: Bool = false
+    ) throws {
         try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(project)
-        try data.write(to: packageURL.appendingPathComponent("project.json"), options: .atomic)
+        let projectURL = packageURL.appendingPathComponent("project.json")
+        if preservingPreviousEdits, FileManager.default.fileExists(atPath: projectURL.path) {
+            let previousData = try Data(contentsOf: projectURL)
+            let recoveryURL = packageURL.appendingPathComponent("Previous Edits", isDirectory: true)
+            try FileManager.default.createDirectory(at: recoveryURL, withIntermediateDirectories: true)
+            try previousData.write(
+                to: recoveryURL.appendingPathComponent("\(UUID().uuidString).json"),
+                options: .atomic
+            )
+        }
+        try data.write(to: projectURL, options: .atomic)
     }
 
-    private static func makeInitialProject(for item: RecordingItem) async throws -> LoadedTimelineProject {
+    static func makeInitialProject(for item: RecordingItem) async throws -> LoadedTimelineProject {
         let asset = AVURLAsset(url: item.url)
         let duration = try await asset.load(.duration).seconds
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
