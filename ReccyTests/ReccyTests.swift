@@ -2166,6 +2166,136 @@ struct ReccyTests {
         ) == nil)
     }
 
+    @Test func heldScreenFramesFillAStaticScreenAtTheNominalCadence() {
+        let frameDuration = CMTime(value: 1, timescale: 30)
+        func values(_ times: [CMTime]) -> [Int64] {
+            times.map { CMTimeConvertScale($0, timescale: 600, method: .roundHalfAwayFromZero).value }
+        }
+
+        #expect(values(MultitrackRecorder.heldScreenFrameTimes(
+            after: CMTime(value: 600, timescale: 600),
+            through: CMTime(value: 660, timescale: 600),
+            frameDuration: frameDuration,
+            maximumCount: 30
+        )) == [620, 640, 660])
+        #expect(MultitrackRecorder.heldScreenFrameTimes(
+            after: CMTime(value: 600, timescale: 600),
+            through: CMTime(value: 619, timescale: 600),
+            frameDuration: frameDuration,
+            maximumCount: 30
+        ).isEmpty)
+
+        let caughtUp = MultitrackRecorder.heldScreenFrameTimes(
+            after: .zero,
+            through: CMTime(value: 6_000, timescale: 600),
+            frameDuration: frameDuration,
+            maximumCount: 30
+        )
+        #expect(caughtUp.count == 30)
+        #expect(values(Array(caughtUp.prefix(1) + caughtUp.suffix(1))) == [5_420, 6_000])
+
+        #expect(MultitrackRecorder.heldScreenFrameTimes(
+            after: .invalid,
+            through: CMTime(value: 6_000, timescale: 600),
+            frameDuration: frameDuration,
+            maximumCount: 30
+        ).isEmpty)
+        #expect(MultitrackRecorder.heldScreenFrameTimes(
+            after: .zero,
+            through: CMTime(seconds: 1e9, preferredTimescale: 1),
+            frameDuration: frameDuration,
+            maximumCount: 30
+        ).isEmpty)
+    }
+
+    @Test func exportRejectsPictureThatStopsInsideALongLivedScreenFrame() async throws {
+        // a static screen once recorded as one long sample; when a clip ends
+        // inside it, AVFoundation's compositor stops writing picture early.
+        let sparseURL = try await makeColorTestVideo(
+            presentationTimes: (0..<15).map { CMTime(value: Int64($0), timescale: 30) }
+                + (240..<270).map { CMTime(value: Int64($0), timescale: 30) }
+        )
+        let denseURL = try await makeColorTestVideo()
+        let audioURL = try makeWaveformTestAudio(duration: 12) { frame, sampleRate in
+            Float(sin(2 * Double.pi * 440 * Double(frame) / sampleRate) * 0.3)
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Long Frame Export \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            for url in [sparseURL, denseURL, audioURL, directory] {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+
+        let audioAsset = AVURLAsset(url: audioURL)
+        func timelineSource(videoURL: URL, videoSeconds: Int64, totalSeconds: Int64) async throws -> ExportSource {
+            let videoAsset = AVURLAsset(url: videoURL)
+            let composition = AVMutableComposition()
+            let sourceVideo = try #require(try await videoAsset.loadTracks(withMediaType: .video).first)
+            let video = try #require(composition.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ))
+            let videoDuration = CMTime(value: videoSeconds, timescale: 1)
+            let totalDuration = CMTime(value: totalSeconds, timescale: 1)
+            try video.insertTimeRange(CMTimeRange(start: .zero, duration: videoDuration), of: sourceVideo, at: .zero)
+            if totalSeconds > videoSeconds {
+                video.insertEmptyTimeRange(CMTimeRange(start: videoDuration, end: totalDuration))
+            }
+            let sourceAudio = try #require(try await audioAsset.loadTracks(withMediaType: .audio).first)
+            let audio = try #require(composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ))
+            try audio.insertTimeRange(CMTimeRange(start: .zero, duration: totalDuration), of: sourceAudio, at: .zero)
+
+            var instructionConfiguration = AVVideoCompositionInstruction.Configuration()
+            instructionConfiguration.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
+            instructionConfiguration.backgroundColor = CGColor.black
+            instructionConfiguration.layerInstructions = [
+                AVVideoCompositionLayerInstruction(
+                    configuration: AVVideoCompositionLayerInstruction.Configuration(trackID: video.trackID)
+                ),
+            ]
+            var configuration = AVVideoComposition.Configuration()
+            configuration.renderSize = CGSize(width: 64, height: 64)
+            configuration.frameDuration = CMTime(value: 1, timescale: 30)
+            configuration.instructions = [AVVideoCompositionInstruction(configuration: instructionConfiguration)]
+            return ExportSource(
+                name: "Long Frame",
+                asset: composition,
+                videoComposition: AVVideoComposition(configuration: configuration)
+            )
+        }
+
+        let truncated = directory.appendingPathComponent("Truncated.mp4")
+        do {
+            _ = try await ExportService().export(
+                source: try await timelineSource(videoURL: sparseURL, videoSeconds: 5, totalSeconds: 5),
+                destinationURL: truncated,
+                preset: .h264720
+            )
+            Issue.record("An export whose picture stopped early was accepted")
+        } catch let error as ExportServiceError {
+            guard case let .videoEndedEarly(expected, actual) = error else {
+                Issue.record("Unexpected export error: \(error)")
+                return
+            }
+            #expect(abs(expected - 5) < 0.01)
+            #expect(actual < 1)
+        }
+        #expect(!FileManager.default.fileExists(atPath: truncated.path))
+
+        let voiceoverPastPicture = try await ExportService().export(
+            source: try await timelineSource(videoURL: denseURL, videoSeconds: 3, totalSeconds: 10),
+            destinationURL: directory.appendingPathComponent("Voiceover.mp4"),
+            preset: .h264720
+        )
+        #expect(voiceoverPastPicture.videoTrackCount == 1)
+        #expect(abs(voiceoverPastPicture.duration - 10) < 0.25)
+    }
+
     @Test func exportCompatibilityIsDeterminedFromTheActualAsset() async throws {
         let videoURL = try await makeColorTestVideo()
         defer { try? FileManager.default.removeItem(at: videoURL) }
@@ -5128,6 +5258,7 @@ struct ReccyTests {
 
     private func makeColorTestVideo(
         frameCount: Int = 90,
+        presentationTimes: [CMTime]? = nil,
         solidColor: RGBAColor? = nil,
         size: CGSize = CGSize(width: 64, height: 64)
     ) async throws -> URL {
@@ -5157,7 +5288,9 @@ struct ReccyTests {
         guard writer.startWriting() else { throw writer.error ?? TestMediaError.writerFailed }
         writer.startSession(atSourceTime: .zero)
 
-        for frame in 0..<frameCount {
+        let times = presentationTimes
+            ?? (0..<frameCount).map { CMTime(value: Int64($0), timescale: 30) }
+        for (frame, presentationTime) in times.enumerated() {
             while !input.isReadyForMoreMediaData {
                 try await Task.sleep(for: .milliseconds(1))
             }
@@ -5172,7 +5305,7 @@ struct ReccyTests {
                 color = RGBAColor(red: 0, green: 0, blue: 255)
             }
             let pixelBuffer = try makePixelBuffer(color: color, size: size)
-            guard adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)) else {
+            guard adaptor.append(pixelBuffer, withPresentationTime: presentationTime) else {
                 throw writer.error ?? TestMediaError.writerFailed
             }
         }
