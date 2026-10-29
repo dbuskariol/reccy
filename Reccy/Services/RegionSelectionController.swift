@@ -6,6 +6,36 @@ nonisolated struct RegionSelection: Codable, Equatable, Sendable {
 
     let displayID: CGDirectDisplayID
     let sourceRect: CGRect
+    /// `CGDirectDisplayID` can be reassigned across restarts or reconnection,
+    /// so the remembered monitor is matched by its persistent UUID. Selections
+    /// saved before this field existed fall back to the display ID.
+    let displayUUID: String?
+
+    init(
+        displayID: CGDirectDisplayID,
+        sourceRect: CGRect,
+        displayUUID: String? = nil
+    ) {
+        self.displayID = displayID
+        self.sourceRect = sourceRect
+        self.displayUUID = displayUUID ?? Self.persistentIdentifier(for: displayID)
+    }
+
+    static func persistentIdentifier(for displayID: CGDirectDisplayID) -> String? {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue() else { return nil }
+        return CFUUIDCreateString(nil, uuid) as String?
+    }
+
+    func isOnDisplay(
+        _ displayID: CGDirectDisplayID,
+        displayUUID: String? = nil
+    ) -> Bool {
+        let candidateUUID = displayUUID ?? Self.persistentIdentifier(for: displayID)
+        if let rememberedUUID = self.displayUUID, let candidateUUID {
+            return rememberedUUID == candidateUUID
+        }
+        return self.displayID == displayID
+    }
 
     /// The last accepted portion, reused like QuickTime's area selection. It is
     /// only a starting rectangle for the overlay; the user still approves it.
@@ -80,6 +110,7 @@ final class RegionSelectionController {
                 let initialSelection = Self.restoredSelection(
                     remembered,
                     displayID: display.displayID,
+                    displayUUID: display.displayUUID,
                     screenSize: display.screen.frame.size
                 )
                 let panel = self.makePanel(for: display, initialSelection: initialSelection)
@@ -111,9 +142,12 @@ final class RegionSelectionController {
     static func restoredSelection(
         _ remembered: RegionSelection?,
         displayID: CGDirectDisplayID,
+        displayUUID: String?,
         screenSize: CGSize
     ) -> CGRect? {
-        guard let remembered, remembered.displayID == displayID else { return nil }
+        guard let remembered,
+              remembered.isOnDisplay(displayID, displayUUID: displayUUID)
+        else { return nil }
         let rect = remembered.sourceRect.standardized
         let width = min(rect.width, screenSize.width)
         let height = min(rect.height, screenSize.height)
@@ -169,7 +203,8 @@ final class RegionSelectionController {
                 sourceRect: Self.sourceRect(
                     from: selection,
                     screenSize: screen.frame.size
-                )
+                ),
+                displayUUID: display.displayUUID
             ))
         }
         selectionView.onBeginSelection = { [weak self, weak selectionView] in
@@ -206,6 +241,14 @@ private struct RegionSelectionDisplay {
     let displayID: CGDirectDisplayID
     let screen: NSScreen
     let pixelWidth: CGFloat
+    let displayUUID: String?
+
+    init(displayID: CGDirectDisplayID, screen: NSScreen, pixelWidth: CGFloat) {
+        self.displayID = displayID
+        self.screen = screen
+        self.pixelWidth = pixelWidth
+        displayUUID = RegionSelection.persistentIdentifier(for: displayID)
+    }
 }
 
 private final class RegionSelectionPanel: NSPanel {
