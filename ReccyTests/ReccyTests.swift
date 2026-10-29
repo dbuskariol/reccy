@@ -5,6 +5,7 @@ import CoreImage
 import CoreVideo
 import Foundation
 import IOSurface
+import ScreenCaptureKit
 import Speech
 import Testing
 import UniformTypeIdentifiers
@@ -2260,6 +2261,171 @@ struct ReccyTests {
             sampleDuration: frameDuration,
             lastPresentationTime: CMTime(seconds: 9.767, preferredTimescale: 600)
         ) == nil)
+    }
+
+    @Test func idleScreenStatusBuffersRepeatTheHeldPicture() throws {
+        func statusBuffer(
+            _ status: SCFrameStatus,
+            withImage: Bool,
+            at frame: Int64 = 30
+        ) throws -> CMSampleBuffer {
+            var timing = CMSampleTimingInfo(
+                duration: .invalid,
+                presentationTimeStamp: CMTime(value: frame, timescale: 30),
+                decodeTimeStamp: .invalid
+            )
+            var buffer: CMSampleBuffer?
+            if withImage {
+                let pixelBuffer = try makePixelBuffer(color: RGBAColor(red: 0, green: 0, blue: 255), size: CGSize(width: 16, height: 16))
+                var format: CMVideoFormatDescription?
+                CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: pixelBuffer, formatDescriptionOut: &format)
+                CMSampleBufferCreateReadyWithImageBuffer(
+                    allocator: nil,
+                    imageBuffer: pixelBuffer,
+                    formatDescription: try #require(format),
+                    sampleTiming: &timing,
+                    sampleBufferOut: &buffer
+                )
+            } else {
+                CMSampleBufferCreate(
+                    allocator: nil, dataBuffer: nil, dataReady: true,
+                    makeDataReadyCallback: nil, refcon: nil, formatDescription: nil,
+                    sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                    sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &buffer
+                )
+            }
+            let sample = try #require(buffer)
+            let attachments = try #require(CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true))
+            let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: NSMutableDictionary.self)
+            dictionary[SCStreamFrameInfo.status.rawValue] = NSNumber(value: status.rawValue)
+            return sample
+        }
+
+        let idle = try statusBuffer(.idle, withImage: false)
+        #expect(MultitrackRecorder.screenFrameStatus(idle) == .idle)
+        #expect(!MultitrackRecorder.isCompleteVideoFrame(idle))
+        let complete = try statusBuffer(.complete, withImage: true)
+        #expect(MultitrackRecorder.screenFrameStatus(complete) == .complete)
+        #expect(MultitrackRecorder.isCompleteVideoFrame(complete))
+        #expect(!MultitrackRecorder.isCompleteVideoFrame(try statusBuffer(.complete, withImage: false)))
+
+        // A complete picture becomes the held frame; each idle buffer repeats
+        // that picture at the idle time, so a static screen keeps its cadence.
+        guard case .picture(let picture) = MultitrackRecorder.screenSampleToRecord(complete, holding: nil) else {
+            Issue.record("A complete frame must be recorded")
+            return
+        }
+        #expect(MultitrackRecorder.screenSampleToRecord(idle, holding: nil) == nil)
+        for frame in Int64(31)...33 {
+            let idleAtFrame = try statusBuffer(.idle, withImage: false, at: frame)
+            guard case .heldPicture(let held) = MultitrackRecorder.screenSampleToRecord(
+                idleAtFrame,
+                holding: picture
+            ) else {
+                Issue.record("An idle buffer must repeat the held picture")
+                return
+            }
+            #expect(held.presentationTimeStamp == CMTime(value: frame, timescale: 30))
+            #expect(CMSampleBufferGetImageBuffer(held) === CMSampleBufferGetImageBuffer(picture))
+        }
+        for status in [SCFrameStatus.blank, .suspended, .stopped] {
+            #expect(MultitrackRecorder.screenSampleToRecord(
+                try statusBuffer(status, withImage: false),
+                holding: picture
+            ) == nil)
+        }
+        #expect(MultitrackRecorder.screenSampleToRecord(
+            try statusBuffer(.complete, withImage: false),
+            holding: picture
+        ) == nil)
+    }
+
+    @Test func exportRejectsPictureThatStopsInsideALongLivedScreenFrame() async throws {
+        // a static screen once recorded as one long sample; when a clip ends
+        // inside it, AVFoundation's compositor stops writing picture early.
+        let sparseURL = try await makeColorTestVideo(
+            presentationTimes: (0..<15).map { CMTime(value: Int64($0), timescale: 30) }
+                + (240..<270).map { CMTime(value: Int64($0), timescale: 30) }
+        )
+        let denseURL = try await makeColorTestVideo()
+        let audioURL = try makeWaveformTestAudio(duration: 12) { frame, sampleRate in
+            Float(sin(2 * Double.pi * 440 * Double(frame) / sampleRate) * 0.3)
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Reccy Long Frame Export \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            for url in [sparseURL, denseURL, audioURL, directory] {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+
+        let audioAsset = AVURLAsset(url: audioURL)
+        func timelineSource(videoURL: URL, videoSeconds: Int64, totalSeconds: Int64) async throws -> ExportSource {
+            let videoAsset = AVURLAsset(url: videoURL)
+            let composition = AVMutableComposition()
+            let sourceVideo = try #require(try await videoAsset.loadTracks(withMediaType: .video).first)
+            let video = try #require(composition.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ))
+            let videoDuration = CMTime(value: videoSeconds, timescale: 1)
+            let totalDuration = CMTime(value: totalSeconds, timescale: 1)
+            try video.insertTimeRange(CMTimeRange(start: .zero, duration: videoDuration), of: sourceVideo, at: .zero)
+            if totalSeconds > videoSeconds {
+                video.insertEmptyTimeRange(CMTimeRange(start: videoDuration, end: totalDuration))
+            }
+            let sourceAudio = try #require(try await audioAsset.loadTracks(withMediaType: .audio).first)
+            let audio = try #require(composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ))
+            try audio.insertTimeRange(CMTimeRange(start: .zero, duration: totalDuration), of: sourceAudio, at: .zero)
+
+            var instructionConfiguration = AVVideoCompositionInstruction.Configuration()
+            instructionConfiguration.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
+            instructionConfiguration.backgroundColor = CGColor.black
+            instructionConfiguration.layerInstructions = [
+                AVVideoCompositionLayerInstruction(
+                    configuration: AVVideoCompositionLayerInstruction.Configuration(trackID: video.trackID)
+                ),
+            ]
+            var configuration = AVVideoComposition.Configuration()
+            configuration.renderSize = CGSize(width: 64, height: 64)
+            configuration.frameDuration = CMTime(value: 1, timescale: 30)
+            configuration.instructions = [AVVideoCompositionInstruction(configuration: instructionConfiguration)]
+            return ExportSource(
+                name: "Long Frame",
+                asset: composition,
+                videoComposition: AVVideoComposition(configuration: configuration)
+            )
+        }
+
+        let truncated = directory.appendingPathComponent("Truncated.mp4")
+        do {
+            _ = try await ExportService().export(
+                source: try await timelineSource(videoURL: sparseURL, videoSeconds: 5, totalSeconds: 5),
+                destinationURL: truncated,
+                preset: .h264720
+            )
+            Issue.record("An export whose picture stopped early was accepted")
+        } catch let error as ExportServiceError {
+            guard case let .videoEndedEarly(expected, actual) = error else {
+                Issue.record("Unexpected export error: \(error)")
+                return
+            }
+            #expect(abs(expected - 5) < 0.01)
+            #expect(actual < 1)
+        }
+        #expect(!FileManager.default.fileExists(atPath: truncated.path))
+
+        let voiceoverPastPicture = try await ExportService().export(
+            source: try await timelineSource(videoURL: denseURL, videoSeconds: 3, totalSeconds: 10),
+            destinationURL: directory.appendingPathComponent("Voiceover.mp4"),
+            preset: .h264720
+        )
+        #expect(voiceoverPastPicture.videoTrackCount == 1)
+        #expect(abs(voiceoverPastPicture.duration - 10) < 0.25)
     }
 
     @Test func exportCompatibilityIsDeterminedFromTheActualAsset() async throws {
@@ -5224,6 +5390,7 @@ struct ReccyTests {
 
     private func makeColorTestVideo(
         frameCount: Int = 90,
+        presentationTimes: [CMTime]? = nil,
         solidColor: RGBAColor? = nil,
         size: CGSize = CGSize(width: 64, height: 64)
     ) async throws -> URL {
@@ -5253,7 +5420,9 @@ struct ReccyTests {
         guard writer.startWriting() else { throw writer.error ?? TestMediaError.writerFailed }
         writer.startSession(atSourceTime: .zero)
 
-        for frame in 0..<frameCount {
+        let times = presentationTimes
+            ?? (0..<frameCount).map { CMTime(value: Int64($0), timescale: 30) }
+        for (frame, presentationTime) in times.enumerated() {
             while !input.isReadyForMoreMediaData {
                 try await Task.sleep(for: .milliseconds(1))
             }
@@ -5268,7 +5437,7 @@ struct ReccyTests {
                 color = RGBAColor(red: 0, green: 0, blue: 255)
             }
             let pixelBuffer = try makePixelBuffer(color: color, size: size)
-            guard adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)) else {
+            guard adaptor.append(pixelBuffer, withPresentationTime: presentationTime) else {
                 throw writer.error ?? TestMediaError.writerFailed
             }
         }

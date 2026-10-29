@@ -186,6 +186,7 @@ nonisolated enum ExportServiceError: LocalizedError, Equatable {
     case audioMixPreparationFailed
     case invalidOutput
     case durationMismatch(expected: TimeInterval, actual: TimeInterval)
+    case videoEndedEarly(expected: TimeInterval, actual: TimeInterval)
     case capacityUnavailable
     case insufficientCapacity(availableBytes: Int64, requiredBytes: Int64)
 
@@ -205,6 +206,8 @@ nonisolated enum ExportServiceError: LocalizedError, Equatable {
             return "The finished export could not be validated as playable. The destination was left unchanged."
         case let .durationMismatch(expected, actual):
             return "The finished export has an unexpected duration (expected \(Self.time(expected)), received \(Self.time(actual))). The destination was left unchanged."
+        case let .videoEndedEarly(expected, actual):
+            return "The finished export’s picture stops at \(Self.time(actual)) instead of \(Self.time(expected)). This can happen when a clip ends during a long stretch where the recorded screen didn’t change; move that clip’s end to where the screen changes, then export again. The destination was left unchanged."
         case .capacityUnavailable:
             return "Reccy couldn’t verify free space at the export destination. Choose another folder or try again."
         case let .insufficientCapacity(available, required):
@@ -592,6 +595,26 @@ struct ExportService {
             }
         }
 
+        // audio alone can satisfy the overall duration while the compositor
+        // stopped writing picture early, e.g. a clip ending inside a long-lived
+        // screen frame. trailing empty video ranges are not part of a track's
+        // time range, so a voiceover running past the picture is unaffected.
+        if preset.includesVideo {
+            let expectedVideoEnd = try await Self.latestEnd(
+                of: try await source.asset.loadTracks(withMediaType: .video)
+            )
+            let videoEnd = try await Self.latestEnd(of: videos)
+            if expectedVideoEnd > 0 {
+                let tolerance = max(0.25, expectedVideoEnd * 0.02)
+                guard videoEnd >= expectedVideoEnd - tolerance else {
+                    throw ExportServiceError.videoEndedEarly(
+                        expected: expectedVideoEnd,
+                        actual: videoEnd
+                    )
+                }
+            }
+        }
+
         return ExportResult(
             url: url,
             duration: duration,
@@ -599,5 +622,14 @@ struct ExportService {
             videoTrackCount: videos.count,
             audioTrackCount: audio.count
         )
+    }
+
+    private static func latestEnd(of tracks: [AVAssetTrack]) async throws -> TimeInterval {
+        var latest: TimeInterval = 0
+        for track in tracks {
+            let end = try await track.load(.timeRange).end.seconds
+            if end.isFinite { latest = max(latest, end) }
+        }
+        return latest
     }
 }
