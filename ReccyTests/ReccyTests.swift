@@ -2167,53 +2167,15 @@ struct ReccyTests {
         ) == nil)
     }
 
-    @Test func heldScreenFramesFillAStaticScreenAtTheNominalCadence() {
-        let frameDuration = CMTime(value: 1, timescale: 30)
-        func values(_ times: [CMTime]) -> [Int64] {
-            times.map { CMTimeConvertScale($0, timescale: 600, method: .roundHalfAwayFromZero).value }
-        }
-
-        #expect(values(MultitrackRecorder.heldScreenFrameTimes(
-            after: CMTime(value: 600, timescale: 600),
-            through: CMTime(value: 660, timescale: 600),
-            frameDuration: frameDuration,
-            maximumCount: 30
-        )) == [620, 640, 660])
-        #expect(MultitrackRecorder.heldScreenFrameTimes(
-            after: CMTime(value: 600, timescale: 600),
-            through: CMTime(value: 619, timescale: 600),
-            frameDuration: frameDuration,
-            maximumCount: 30
-        ).isEmpty)
-
-        let caughtUp = MultitrackRecorder.heldScreenFrameTimes(
-            after: .zero,
-            through: CMTime(value: 6_000, timescale: 600),
-            frameDuration: frameDuration,
-            maximumCount: 30
-        )
-        #expect(caughtUp.count == 30)
-        #expect(values(Array(caughtUp.prefix(1) + caughtUp.suffix(1))) == [5_420, 6_000])
-
-        #expect(MultitrackRecorder.heldScreenFrameTimes(
-            after: .invalid,
-            through: CMTime(value: 6_000, timescale: 600),
-            frameDuration: frameDuration,
-            maximumCount: 30
-        ).isEmpty)
-        #expect(MultitrackRecorder.heldScreenFrameTimes(
-            after: .zero,
-            through: CMTime(seconds: 1e9, preferredTimescale: 1),
-            frameDuration: frameDuration,
-            maximumCount: 30
-        ).isEmpty)
-    }
-
-    @Test func idleScreenStatusBuffersAreRecognizedWithoutAPicture() throws {
-        func statusBuffer(_ status: SCFrameStatus, withImage: Bool) throws -> CMSampleBuffer {
+    @Test func idleScreenStatusBuffersRepeatTheHeldPicture() throws {
+        func statusBuffer(
+            _ status: SCFrameStatus,
+            withImage: Bool,
+            at frame: Int64 = 30
+        ) throws -> CMSampleBuffer {
             var timing = CMSampleTimingInfo(
                 duration: .invalid,
-                presentationTimeStamp: CMTime(value: 30, timescale: 30),
+                presentationTimeStamp: CMTime(value: frame, timescale: 30),
                 decodeTimeStamp: .invalid
             )
             var buffer: CMSampleBuffer?
@@ -2238,12 +2200,8 @@ struct ReccyTests {
             }
             let sample = try #require(buffer)
             let attachments = try #require(CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true))
-            let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(
-                dictionary,
-                Unmanaged.passUnretained(SCStreamFrameInfo.status.rawValue as CFString).toOpaque(),
-                Unmanaged.passUnretained(status.rawValue as CFNumber).toOpaque()
-            )
+            let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: NSMutableDictionary.self)
+            dictionary[SCStreamFrameInfo.status.rawValue] = NSNumber(value: status.rawValue)
             return sample
         }
 
@@ -2254,6 +2212,36 @@ struct ReccyTests {
         #expect(MultitrackRecorder.screenFrameStatus(complete) == .complete)
         #expect(MultitrackRecorder.isCompleteVideoFrame(complete))
         #expect(!MultitrackRecorder.isCompleteVideoFrame(try statusBuffer(.complete, withImage: false)))
+
+        // A complete picture becomes the held frame; each idle buffer repeats
+        // that picture at the idle time, so a static screen keeps its cadence.
+        guard case .picture(let picture) = MultitrackRecorder.screenSampleToRecord(complete, holding: nil) else {
+            Issue.record("A complete frame must be recorded")
+            return
+        }
+        #expect(MultitrackRecorder.screenSampleToRecord(idle, holding: nil) == nil)
+        for frame in Int64(31)...33 {
+            let idleAtFrame = try statusBuffer(.idle, withImage: false, at: frame)
+            guard case .heldPicture(let held) = MultitrackRecorder.screenSampleToRecord(
+                idleAtFrame,
+                holding: picture
+            ) else {
+                Issue.record("An idle buffer must repeat the held picture")
+                return
+            }
+            #expect(held.presentationTimeStamp == CMTime(value: frame, timescale: 30))
+            #expect(CMSampleBufferGetImageBuffer(held) === CMSampleBufferGetImageBuffer(picture))
+        }
+        for status in [SCFrameStatus.blank, .suspended, .stopped] {
+            #expect(MultitrackRecorder.screenSampleToRecord(
+                try statusBuffer(status, withImage: false),
+                holding: picture
+            ) == nil)
+        }
+        #expect(MultitrackRecorder.screenSampleToRecord(
+            try statusBuffer(.complete, withImage: false),
+            holding: picture
+        ) == nil)
     }
 
     @Test func exportRejectsPictureThatStopsInsideALongLivedScreenFrame() async throws {
