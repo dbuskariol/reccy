@@ -73,6 +73,7 @@ enum MultitrackRecorderError: LocalizedError {
     case noVideoFrames
     case couldNotRetimeSample
     case cameraTrackEndedEarly
+    case screenTrackEndedEarly
     case captureNotPrepared
 
     var errorDescription: String? {
@@ -95,6 +96,8 @@ enum MultitrackRecorderError: LocalizedError {
         case .couldNotRetimeSample: "The recorder couldn’t close the paused section of the media timeline."
         case .cameraTrackEndedEarly:
             "The camera stopped sending video before the screen recording ended. Reccy preserved the recoverable media."
+        case .screenTrackEndedEarly:
+            "The recorder couldn’t write the final screen frames before the recording ended. Reccy preserved the recoverable media."
         case .captureNotPrepared:
             "The approved capture source wasn’t ready to begin recording. Try starting the recording again."
         }
@@ -201,6 +204,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     private var latestPresentationEndTime: CMTime = .invalid
     private var latestCameraPresentationEndTime: CMTime = .invalid
     private var lastCameraSample: CMSampleBuffer?
+    private var lastScreenSample: CMSampleBuffer?
+    private var lastScreenWriterSample: CMSampleBuffer?
     private var nominalVideoFrameDuration: CMTime = .invalid
     private var pauseTimeline = RecordingPauseTimeline()
     private var outputURL: URL?
@@ -323,8 +328,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     }
 
     /// Promotes the already-live preview session to recording on the serial
-    /// sample queue. The next complete screen frame becomes the shared timeline
-    /// origin, so countdown samples cannot leak into any source track.
+    /// sample queue. The next complete or idle screen frame becomes the shared
+    /// timeline origin, so countdown samples cannot leak into any source track.
     func beginRecording(
         outputURL: URL,
         options: MultitrackRecordingOptions
@@ -621,6 +626,9 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         latestPresentationEndTime = .invalid
         latestCameraPresentationEndTime = .invalid
         lastCameraSample = nil
+        // lastScreenSample is the live stream's current picture and is kept, so
+        // an idle frame on a static screen can anchor the timeline origin.
+        lastScreenWriterSample = nil
         nominalVideoFrameDuration = CMTime(
             value: 1,
             timescale: CMTimeScale(options.frameRate)
@@ -702,15 +710,30 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         return item
     }
 
-    private func handle(_ sampleBuffer: CMSampleBuffer, type: SCStreamOutputType) {
-        guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer) else { return }
-        let presentationTime = sampleBuffer.presentationTimeStamp
+    private func handle(_ incomingSampleBuffer: CMSampleBuffer, type: SCStreamOutputType) {
+        guard incomingSampleBuffer.isValid, CMSampleBufferDataIsReady(incomingSampleBuffer) else { return }
+        let presentationTime = incomingSampleBuffer.presentationTimeStamp
         guard presentationTime.isValid else { return }
+        var sampleBuffer = incomingSampleBuffer
 
         switch type {
         case .screen:
-            guard Self.isCompleteVideoFrame(sampleBuffer) else { return }
-            onVideoFrame?(sampleBuffer)
+            switch Self.screenSampleToRecord(incomingSampleBuffer, holding: lastScreenSample) {
+            case .picture(let picture):
+                onVideoFrame?(picture)
+                lastScreenSample = picture
+            case .heldPicture(let held):
+                // ScreenCaptureKit reports an unchanged screen with image-less
+                // idle buffers at the configured cadence. Writing the previous
+                // picture at each idle time keeps the screen track at its
+                // nominal frame rate instead of one sample lasting minutes,
+                // which AVFoundation's compositor cannot trim inside, and lets
+                // a static screen anchor resume after pause.
+                guard writer != nil else { return }
+                sampleBuffer = held
+            case .none:
+                return
+            }
         case .audio:
             systemAudioLevel = Self.smoothedLevel(
                 current: systemAudioLevel,
@@ -741,11 +764,13 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         switch type {
         case .screen:
             startSessionIfNeeded(at: writerPresentationTime)
-            append(
+            if append(
                 writerBuffer,
                 to: videoInput,
                 fallbackDuration: nominalVideoFrameDuration
-            )
+            ) {
+                lastScreenWriterSample = writerBuffer
+            }
         case .audio:
             handleAudio(
                 writerBuffer,
@@ -778,7 +803,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
         onCameraFrame?(sampleBuffer)
         guard writer != nil else { return }
-        // Only a complete screen frame may reopen the shared media timeline
+        // Only a complete or idle screen frame may reopen the shared media timeline
         // after pause. Camera frames remain preview-only until that anchor lands.
         guard let offset = pauseTimeline.offset(
             for: sampleBuffer.presentationTimeStamp,
@@ -802,15 +827,73 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     /// ScreenCaptureKit also emits idle, blank, suspended, and stopped status
     /// buffers. They are stream state, not recordable video frames.
     static func isCompleteVideoFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
-        guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil,
-              let attachments = CMSampleBufferGetSampleAttachmentsArray(
+        CMSampleBufferGetImageBuffer(sampleBuffer) != nil && screenFrameStatus(sampleBuffer) == .complete
+    }
+
+    static func screenFrameStatus(_ sampleBuffer: CMSampleBuffer) -> SCFrameStatus? {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
                 sampleBuffer,
                 createIfNecessary: false
               ) as? [[SCStreamFrameInfo: Any]],
-              let rawStatus = attachments.first?[.status] as? Int,
-              let status = SCFrameStatus(rawValue: rawStatus)
-        else { return false }
-        return status == .complete
+              let rawStatus = attachments.first?[.status] as? Int
+        else { return nil }
+        return SCFrameStatus(rawValue: rawStatus)
+    }
+
+    enum ScreenSampleDisposition {
+        case picture(CMSampleBuffer)
+        case heldPicture(CMSampleBuffer)
+    }
+
+    /// A complete frame is recorded and becomes the held picture. An idle
+    /// status buffer repeats the held picture at the idle buffer's time.
+    /// Every other status (blank, suspended, stopped, or a picture-less
+    /// complete buffer) is stream state and records nothing.
+    static func screenSampleToRecord(
+        _ sampleBuffer: CMSampleBuffer,
+        holding lastPicture: CMSampleBuffer?
+    ) -> ScreenSampleDisposition? {
+        switch screenFrameStatus(sampleBuffer) {
+        case .complete where CMSampleBufferGetImageBuffer(sampleBuffer) != nil:
+            return .picture(sampleBuffer)
+        case .idle:
+            guard let lastPicture,
+                  let held = retimed(lastPicture, toPresentationTime: sampleBuffer.presentationTimeStamp)
+            else { return nil }
+            return .heldPicture(held)
+        default:
+            return nil
+        }
+    }
+
+    /// Holds the final screen frame through the last written sample of any
+    /// lane, so the screen track never ends on one long-lived frame. Capture
+    /// has already stopped, so a frame refused for writer backpressure is
+    /// retried rather than dropped; only the deadline or a failed writer can
+    /// leave the tail short, and export validation then reports the gap.
+    private func appendScreenTail(until deadline: DispatchTime, then completion: @escaping (_ completed: Bool) -> Void) {
+        let target = CMTimeSubtract(latestPresentationEndTime, nominalVideoFrameDuration)
+        while let last = lastScreenWriterSample {
+            let next = CMTimeAdd(last.presentationTimeStamp, nominalVideoFrameDuration)
+            guard nominalVideoFrameDuration.isValid,
+                  CMTimeCompare(nominalVideoFrameDuration, .zero) > 0,
+                  CMTimeCompare(next, target) <= 0,
+                  let held = Self.retimed(last, toPresentationTime: next)
+            else { break }
+            guard append(held, to: videoInput, fallbackDuration: nominalVideoFrameDuration) else {
+                guard writer?.status == .writing, DispatchTime.now() < deadline else {
+                    logger.error("Screen tail ended \(CMTimeSubtract(target, last.presentationTimeStamp).seconds, privacy: .public)s early")
+                    completion(false)
+                    return
+                }
+                sampleQueue.asyncAfter(deadline: .now() + .milliseconds(5)) { [self] in
+                    appendScreenTail(until: deadline, then: completion)
+                }
+                return
+            }
+            lastScreenWriterSample = held
+        }
+        completion(true)
     }
 
     private func startSessionIfNeeded(at time: CMTime) {
@@ -1185,35 +1268,49 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                     return
                 }
 
-                let cameraTail = appendCameraTailIfNeeded()
-                let recordingDuration = max(
-                    0,
-                    CMTimeSubtract(latestPresentationEndTime, sessionStartTime ?? .zero).seconds
-                )
-                videoInput?.markAsFinished()
-                cameraInput?.markAsFinished()
-                systemAudioInput?.markAsFinished()
-                microphoneInput?.markAsFinished()
-                writer.finishWriting { [self] in
-                    sampleQueue.async { [self] in
-                        let status = self.writer?.status
-                        let error = self.writer?.error
-                        resetWriterState(keepOutputURL: true)
-                        if status == .completed {
-                            if cameraTail.gapSeconds > 0, !cameraTail.appended {
-                                continuation.resume(
-                                    throwing: MultitrackRecorderError.cameraTrackEndedEarly
-                                )
-                            } else {
-                                continuation.resume(returning: MultitrackRecordingCompletion(
-                                    cameraTailPaddingSeconds: cameraTail.gapSeconds,
-                                    durationSeconds: recordingDuration
-                                ))
-                            }
-                        } else {
-                            continuation.resume(throwing: MultitrackRecorderError.writerFailed(error))
-                        }
+                appendScreenTail(until: .now() + .seconds(2)) { [self] screenTailCompleted in
+                    finishWriting(writer, screenTailCompleted: screenTailCompleted, resuming: continuation)
+                }
+            }
+        }
+    }
+
+    private func finishWriting(
+        _ writer: AVAssetWriter,
+        screenTailCompleted: Bool,
+        resuming continuation: CheckedContinuation<MultitrackRecordingCompletion, Error>
+    ) {
+        let cameraTail = appendCameraTailIfNeeded()
+        let recordingDuration = max(
+            0,
+            CMTimeSubtract(latestPresentationEndTime, sessionStartTime ?? .zero).seconds
+        )
+        videoInput?.markAsFinished()
+        cameraInput?.markAsFinished()
+        systemAudioInput?.markAsFinished()
+        microphoneInput?.markAsFinished()
+        writer.finishWriting { [self] in
+            sampleQueue.async { [self] in
+                let status = self.writer?.status
+                let error = self.writer?.error
+                resetWriterState(keepOutputURL: true)
+                if status == .completed {
+                    if !screenTailCompleted {
+                        continuation.resume(
+                            throwing: MultitrackRecorderError.screenTrackEndedEarly
+                        )
+                    } else if cameraTail.gapSeconds > 0, !cameraTail.appended {
+                        continuation.resume(
+                            throwing: MultitrackRecorderError.cameraTrackEndedEarly
+                        )
+                    } else {
+                        continuation.resume(returning: MultitrackRecordingCompletion(
+                            cameraTailPaddingSeconds: cameraTail.gapSeconds,
+                            durationSeconds: recordingDuration
+                        ))
                     }
+                } else {
+                    continuation.resume(throwing: MultitrackRecorderError.writerFailed(error))
                 }
             }
         }
@@ -1240,6 +1337,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         latestPresentationEndTime = .invalid
         latestCameraPresentationEndTime = .invalid
         lastCameraSample = nil
+        lastScreenSample = nil
+        lastScreenWriterSample = nil
         nominalVideoFrameDuration = .invalid
         pauseTimeline.reset()
         systemAudioLevel = 0
