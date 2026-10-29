@@ -5,6 +5,7 @@ import CoreImage
 import CoreVideo
 import Foundation
 import IOSurface
+import ScreenCaptureKit
 import Speech
 import Testing
 import UniformTypeIdentifiers
@@ -2206,6 +2207,53 @@ struct ReccyTests {
             frameDuration: frameDuration,
             maximumCount: 30
         ).isEmpty)
+    }
+
+    @Test func idleScreenStatusBuffersAreRecognizedWithoutAPicture() throws {
+        func statusBuffer(_ status: SCFrameStatus, withImage: Bool) throws -> CMSampleBuffer {
+            var timing = CMSampleTimingInfo(
+                duration: .invalid,
+                presentationTimeStamp: CMTime(value: 30, timescale: 30),
+                decodeTimeStamp: .invalid
+            )
+            var buffer: CMSampleBuffer?
+            if withImage {
+                let pixelBuffer = try makePixelBuffer(color: RGBAColor(red: 0, green: 0, blue: 255), size: CGSize(width: 16, height: 16))
+                var format: CMVideoFormatDescription?
+                CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: pixelBuffer, formatDescriptionOut: &format)
+                CMSampleBufferCreateReadyWithImageBuffer(
+                    allocator: nil,
+                    imageBuffer: pixelBuffer,
+                    formatDescription: try #require(format),
+                    sampleTiming: &timing,
+                    sampleBufferOut: &buffer
+                )
+            } else {
+                CMSampleBufferCreate(
+                    allocator: nil, dataBuffer: nil, dataReady: true,
+                    makeDataReadyCallback: nil, refcon: nil, formatDescription: nil,
+                    sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                    sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &buffer
+                )
+            }
+            let sample = try #require(buffer)
+            let attachments = try #require(CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true))
+            let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(
+                dictionary,
+                Unmanaged.passUnretained(SCStreamFrameInfo.status.rawValue as CFString).toOpaque(),
+                Unmanaged.passUnretained(status.rawValue as CFNumber).toOpaque()
+            )
+            return sample
+        }
+
+        let idle = try statusBuffer(.idle, withImage: false)
+        #expect(MultitrackRecorder.screenFrameStatus(idle) == .idle)
+        #expect(!MultitrackRecorder.isCompleteVideoFrame(idle))
+        let complete = try statusBuffer(.complete, withImage: true)
+        #expect(MultitrackRecorder.screenFrameStatus(complete) == .complete)
+        #expect(MultitrackRecorder.isCompleteVideoFrame(complete))
+        #expect(!MultitrackRecorder.isCompleteVideoFrame(try statusBuffer(.complete, withImage: false)))
     }
 
     @Test func exportRejectsPictureThatStopsInsideALongLivedScreenFrame() async throws {
