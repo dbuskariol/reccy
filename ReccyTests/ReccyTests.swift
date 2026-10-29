@@ -1098,6 +1098,64 @@ struct ReccyTests {
         #expect(converted == CGRect(x: 100, y: 520, width: 640, height: 360))
     }
 
+    @Test func rememberedPortionRoundTripsThroughDefaults() throws {
+        let suiteName = "ReccyTests.RememberedPortion.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(RegionSelection.loadRemembered(defaults: defaults) == nil)
+
+        let selection = RegionSelection(displayID: 7, sourceRect: CGRect(x: 100, y: 520, width: 640, height: 360))
+        selection.remember(defaults: defaults)
+
+        #expect(RegionSelection.loadRemembered(defaults: defaults) == selection)
+    }
+
+    @Test func rememberedPortionRestoresOnItsOwnDisplayInAppKitCoordinates() throws {
+        let screenSize = CGSize(width: 1920, height: 1080)
+        let remembered = RegionSelection(displayID: 7, sourceRect: CGRect(x: 100, y: 520, width: 640, height: 360))
+
+        let restored = RegionSelectionController.restoredSelection(
+            remembered,
+            displayID: 7,
+            screenSize: screenSize
+        )
+        #expect(restored == CGRect(x: 100, y: 200, width: 640, height: 360))
+        #expect(RegionSelectionController.sourceRect(
+            from: try #require(restored),
+            screenSize: screenSize
+        ) == remembered.sourceRect)
+
+        #expect(RegionSelectionController.restoredSelection(
+            remembered,
+            displayID: 8,
+            screenSize: screenSize
+        ) == nil)
+        #expect(RegionSelectionController.restoredSelection(
+            nil,
+            displayID: 7,
+            screenSize: screenSize
+        ) == nil)
+    }
+
+    @Test func rememberedPortionShiftsInsideASmallerDisplay() {
+        let remembered = RegionSelection(displayID: 7, sourceRect: CGRect(x: 2000, y: 1200, width: 800, height: 600))
+
+        let restored = RegionSelectionController.restoredSelection(
+            remembered,
+            displayID: 7,
+            screenSize: CGSize(width: 1440, height: 900)
+        )
+        #expect(restored == CGRect(x: 640, y: 0, width: 800, height: 600))
+
+        let oversized = RegionSelection(displayID: 7, sourceRect: CGRect(x: 0, y: 0, width: 3000, height: 2000))
+        #expect(RegionSelectionController.restoredSelection(
+            oversized,
+            displayID: 7,
+            screenSize: CGSize(width: 1440, height: 900)
+        ) == CGRect(x: 0, y: 0, width: 1440, height: 900))
+    }
+
     @Test func staleBoundaryRefreshesCannotRestoreOverlaysAfterSessionCleanup() {
         let targets: [CaptureBoundaryTarget] = [
             .display(1),

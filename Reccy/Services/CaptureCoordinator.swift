@@ -546,7 +546,15 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 false,
                 onScreenWindowsOnly: true
             )
-            guard let selection = await regionSelectionController.selectRegion(across: content.displays),
+            let remembered = RegionSelection.loadRemembered()
+            if let remembered, content.displays.contains(where: { $0.displayID == remembered.displayID }) {
+                sourceSelectionMessage = "Your last portion is selected. Press Return to use it, drag to adjust it, or press Escape to cancel."
+            }
+            let selection = await regionSelectionController.selectRegion(
+                across: content.displays,
+                restoring: remembered
+            )
+            guard let selection,
                   let display = content.displays.first(where: { $0.displayID == selection.displayID })
             else {
                 isSelectingSource = false
@@ -555,6 +563,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 return
             }
 
+            selection.remember()
             let filter = SCContentFilter(display: display, excludingWindows: [])
             isSelectingSource = false
             completeSourceSelection(filter: filter, sourceRect: selection.sourceRect)
