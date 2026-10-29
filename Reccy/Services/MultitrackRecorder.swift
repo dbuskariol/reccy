@@ -73,6 +73,7 @@ enum MultitrackRecorderError: LocalizedError {
     case noVideoFrames
     case couldNotRetimeSample
     case cameraTrackEndedEarly
+    case screenTrackEndedEarly
     case captureNotPrepared
 
     var errorDescription: String? {
@@ -95,6 +96,8 @@ enum MultitrackRecorderError: LocalizedError {
         case .couldNotRetimeSample: "The recorder couldn’t close the paused section of the media timeline."
         case .cameraTrackEndedEarly:
             "The camera stopped sending video before the screen recording ended. Reccy preserved the recoverable media."
+        case .screenTrackEndedEarly:
+            "The recorder couldn’t write the final screen frames before the recording ended. Reccy preserved the recoverable media."
         case .captureNotPrepared:
             "The approved capture source wasn’t ready to begin recording. Try starting the recording again."
         }
@@ -868,7 +871,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     /// has already stopped, so a frame refused for writer backpressure is
     /// retried rather than dropped; only the deadline or a failed writer can
     /// leave the tail short, and export validation then reports the gap.
-    private func appendScreenTail(until deadline: DispatchTime, then completion: @escaping () -> Void) {
+    private func appendScreenTail(until deadline: DispatchTime, then completion: @escaping (_ completed: Bool) -> Void) {
         let target = CMTimeSubtract(latestPresentationEndTime, nominalVideoFrameDuration)
         while let last = lastScreenWriterSample {
             let next = CMTimeAdd(last.presentationTimeStamp, nominalVideoFrameDuration)
@@ -880,7 +883,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             guard append(held, to: videoInput, fallbackDuration: nominalVideoFrameDuration) else {
                 guard writer?.status == .writing, DispatchTime.now() < deadline else {
                     logger.error("Screen tail ended \(CMTimeSubtract(target, last.presentationTimeStamp).seconds, privacy: .public)s early")
-                    break
+                    completion(false)
+                    return
                 }
                 sampleQueue.asyncAfter(deadline: .now() + .milliseconds(5)) { [self] in
                     appendScreenTail(until: deadline, then: completion)
@@ -889,7 +893,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
             }
             lastScreenWriterSample = held
         }
-        completion()
+        completion(true)
     }
 
     private func startSessionIfNeeded(at time: CMTime) {
@@ -1264,8 +1268,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                     return
                 }
 
-                appendScreenTail(until: .now() + .seconds(2)) { [self] in
-                    finishWriting(writer, resuming: continuation)
+                appendScreenTail(until: .now() + .seconds(2)) { [self] screenTailCompleted in
+                    finishWriting(writer, screenTailCompleted: screenTailCompleted, resuming: continuation)
                 }
             }
         }
@@ -1273,6 +1277,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
 
     private func finishWriting(
         _ writer: AVAssetWriter,
+        screenTailCompleted: Bool,
         resuming continuation: CheckedContinuation<MultitrackRecordingCompletion, Error>
     ) {
         let cameraTail = appendCameraTailIfNeeded()
@@ -1290,7 +1295,11 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                 let error = self.writer?.error
                 resetWriterState(keepOutputURL: true)
                 if status == .completed {
-                    if cameraTail.gapSeconds > 0, !cameraTail.appended {
+                    if !screenTailCompleted {
+                        continuation.resume(
+                            throwing: MultitrackRecorderError.screenTrackEndedEarly
+                        )
+                    } else if cameraTail.gapSeconds > 0, !cameraTail.appended {
                         continuation.resume(
                             throwing: MultitrackRecorderError.cameraTrackEndedEarly
                         )
