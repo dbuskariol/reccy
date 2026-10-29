@@ -17,6 +17,7 @@ struct LibraryView: View {
     @State private var player = AVPlayer()
     @State private var isPreviewPlaying = false
     @State private var isPreviewLoading = false
+    @State private var isPreviewEmpty = false
     @State private var previewLoadTask: Task<Void, Never>?
     @State private var playbackTime: TimeInterval = 0
     @State private var previewCaptionTrack: TimelineCaptionTrack?
@@ -467,7 +468,18 @@ struct LibraryView: View {
 
     private func compactPreview(_ item: RecordingItem) -> some View {
         ZStack {
-            NativeLibraryVideoPlayer(player: player)
+            if isPreviewEmpty {
+                ContentUnavailableView {
+                    Label("No Clips in Timeline", systemImage: "timeline.selection")
+                } description: {
+                    Text("The saved timeline is empty. Your source recording is unchanged.")
+                } actions: {
+                    Button("Open Editor") { onEdit(item) }
+                }
+            } else {
+                NativeLibraryVideoPlayer(player: player)
+                    .accessibilityLabel("Preview of \(item.name)")
+            }
 
             if let previewCaptionTrack {
                 TimelineCaptionOverlay(
@@ -488,14 +500,13 @@ struct LibraryView: View {
         }
             .aspectRatio(previewAspectRatio(for: item), contentMode: .fit)
             .frame(maxWidth: .infinity)
-            .background(.black)
+            .background(isPreviewEmpty ? Color(nsColor: .controlBackgroundColor) : .black)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(.separator.opacity(0.5), lineWidth: 0.5)
             }
             .frame(maxWidth: .infinity, alignment: .center)
-            .accessibilityLabel("Preview of \(item.name)")
     }
 
     @ViewBuilder
@@ -638,6 +649,7 @@ struct LibraryView: View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
                 playbackButton("gobackward.5", help: "Back 5 seconds") { seekBy(-5) }
+                    .disabled(isPreviewEmpty)
 
                 Button {
                     togglePlayback()
@@ -648,10 +660,12 @@ struct LibraryView: View {
                 .buttonStyle(.borderedProminent)
                 .clipShape(Circle())
                 .reccyAccessibleControl(isPreviewPlaying ? "Pause" : "Play")
+                .disabled(isPreviewEmpty)
 
                 playbackButton("goforward.5", help: "Forward 5 seconds") { seekBy(5) }
+                    .disabled(isPreviewEmpty)
 
-                Text("\(playbackTimecode(playbackTime)) / \(playbackTimecode(item.duration))")
+                Text("\(playbackTimecode(playbackTime)) / \(playbackTimecode(isPreviewEmpty ? 0 : item.duration))")
                     .font(.callout.monospacedDigit().weight(.medium))
                     .foregroundStyle(.secondary)
 
@@ -668,6 +682,7 @@ struct LibraryView: View {
                     "Use Current Frame as Poster",
                     help: "Use this composed frame for recording previews"
                 )
+                .disabled(isPreviewEmpty)
 
                 Button {
                     library.reveal(item)
@@ -680,6 +695,7 @@ struct LibraryView: View {
             }
 
             waveformScrubber(item)
+                .disabled(isPreviewEmpty)
         }
         .padding(12)
         .frame(maxWidth: .infinity)
@@ -889,6 +905,7 @@ struct LibraryView: View {
         }
         isPreviewPlaying = false
         isPreviewLoading = true
+        isPreviewEmpty = false
         playbackTime = 0
         previewCaptionTrack = nil
         previewRenderSize = CGSize(
@@ -921,6 +938,10 @@ struct LibraryView: View {
                     "Prepared composed preview videoTracks=\(build.composition.tracks(withMediaType: .video).count) file=\(item.url.lastPathComponent, privacy: .public)"
                 )
                 if autoplay { player.play() }
+            } catch TimelineCompositionBuildError.emptyTimeline {
+                guard !Task.isCancelled, selection.primaryID == item.id else { return }
+                isPreviewEmpty = true
+                isPreviewLoading = false
             } catch is CancellationError {
                 return
             } catch {

@@ -727,6 +727,8 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         lanes.flatMap(\.clips).map(\.timelineEnd).max() ?? 0
     }
 
+    var hasMedia: Bool { lanes.contains { !$0.clips.isEmpty } }
+
     var frameDuration: TimeInterval { 1 / max(frameRate, 1) }
 
     var effectivePosterFrameTime: TimeInterval {
@@ -813,12 +815,15 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         modifiedAt = Date()
     }
 
-    mutating func splitAll(at time: TimeInterval) {
+    @discardableResult
+    mutating func splitAll(at time: TimeInterval) -> [UUID] {
+        var rightClipIDs: [UUID] = []
         for laneIndex in lanes.indices {
             var updated: [TimelineClip] = []
             for clip in lanes[laneIndex].clips {
                 if let (left, right) = clip.split(at: time) {
                     updated.append(contentsOf: [left, right])
+                    rightClipIDs.append(right.id)
                 } else {
                     updated.append(clip)
                 }
@@ -831,6 +836,7 @@ struct TimelineProject: Identifiable, Codable, Equatable, Sendable {
         }
         reconcileVideoGaps()
         modifiedAt = Date()
+        return rightClipIDs
     }
 
     @discardableResult
