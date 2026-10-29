@@ -547,7 +547,7 @@ final class CaptureCoordinator: NSObject, ObservableObject {
                 onScreenWindowsOnly: true
             )
             let remembered = RegionSelection.loadRemembered()
-            if let remembered, content.displays.contains(where: { $0.displayID == remembered.displayID }) {
+            if let remembered, content.displays.contains(where: { remembered.isOnDisplay($0.displayID) }) {
                 sourceSelectionMessage = "Your last portion is selected. Press Return to use it, drag to adjust it, or press Escape to cancel."
             }
             let selection = await regionSelectionController.selectRegion(
