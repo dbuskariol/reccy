@@ -1520,6 +1520,11 @@ struct ReccyTests {
         try Data("{\"formatVersion\":2}".utf8).write(
             to: packageURL.appendingPathComponent("project.json")
         )
+        let retainedMediaURL = packageURL.appendingPathComponent("Media", isDirectory: true)
+        try FileManager.default.createDirectory(at: retainedMediaURL, withIntermediateDirectories: true)
+        let retainedFileURL = retainedMediaURL.appendingPathComponent("voiceover.m4a")
+        let retainedBytes = Data("project-owned media must survive reset".utf8)
+        try retainedBytes.write(to: retainedFileURL)
         let sourceData = try Data(contentsOf: mediaURL)
         let fileSize = try mediaURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         let item = RecordingItem(
@@ -1544,6 +1549,13 @@ struct ReccyTests {
         #expect(controller.errorMessage == nil)
         #expect(!controller.canResetUnsupportedProject)
         #expect(try Data(contentsOf: mediaURL) == sourceData)
+        #expect(try Data(contentsOf: retainedFileURL) == retainedBytes)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: packageURL.appendingPathComponent("Previous Edits"),
+            includingPropertiesForKeys: nil
+        )
+        #expect(backups.count == 1)
+        #expect(try Data(contentsOf: #require(backups.first)) == Data("{\"formatVersion\":2}".utf8))
         let savedData = try Data(contentsOf: packageURL.appendingPathComponent("project.json"))
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -4664,6 +4676,345 @@ struct ReccyTests {
         // can end between frames. Keep export drift below one and a half 30 fps
         // frames while the composition itself remains exactly aligned.
         #expect(abs(videoRange.duration.seconds - audioRange.duration.seconds) < 0.05)
+    }
+
+    @Test @MainActor func splitAllThenRippleDeleteKeepsRemainingMediaPlayableAfterReopen() async throws {
+        let mediaURL = try await makeExportFixture(audioTrackCount: 1)
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+        }
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 0,
+            duration: 3,
+            manifest: makeRecoveryManifest()
+        )
+        for splitTime in [1 / 600.0, 1 / 30.0, 1.0, 1.5, 2.99] {
+            let original = try await RecordingTimelineProjectLoader.initialProject(for: item)
+            try RecordingTimelineProjectLoader.save(original, packageURL: packageURL)
+            let controller = TimelineEditorController()
+            await controller.open(item)
+            #expect(controller.selectedClipCount == 1)
+            #expect(controller.selectedClipID == original.lanes[0].clips[0].id)
+            let beforeNoOp = controller.project
+            controller.splitAllAtPlayhead()
+            #expect(controller.project == beforeNoOp)
+            #expect(controller.selectedClipID == original.lanes[0].clips[0].id)
+            controller.playhead = splitTime
+            #expect(controller.canSplitAll)
+            controller.splitAllAtPlayhead()
+            let selected = try #require(controller.selectedClip)
+            #expect(selected.timelineStart == splitTime)
+            let expectedDuration = original.duration - selected.duration
+            controller.rippleDeleteSelection()
+            try await waitForEditorAutosave(controller, packageURL: packageURL)
+            #expect(controller.errorMessage == nil)
+            #expect(abs((controller.project?.duration ?? -1) - expectedDuration) < 0.001)
+            #expect(controller.project?.lanes.allSatisfy { $0.clips.count == 1 } == true)
+
+            let reopened = TimelineEditorController()
+            await reopened.open(item)
+            #expect(reopened.errorMessage == nil)
+            #expect(abs((reopened.project?.duration ?? -1) - expectedDuration) < 0.001)
+            let playerItem = try #require(reopened.player.currentItem)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while playerItem.status == .unknown, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(playerItem.status == .readyToPlay)
+            controller.player.replaceCurrentItem(with: nil)
+            reopened.player.replaceCurrentItem(with: nil)
+        }
+    }
+
+    @Test @MainActor func emptyTimelinePersistsWithoutPlayerAndRemainsUndoable() async throws {
+        let mediaURL = try await makeExportFixture(audioTrackCount: 1)
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+        }
+        let sourceBytes = try Data(contentsOf: mediaURL)
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 0,
+            duration: 3,
+            manifest: makeRecoveryManifest()
+        )
+        let controller = TimelineEditorController()
+        let undoManager = UndoManager()
+        undoManager.groupsByEvent = false
+        controller.connectUndoManager(undoManager)
+        await controller.open(item)
+        #expect(controller.selectedClipCount == 1)
+        #expect(controller.canRippleSelection)
+        undoManager.beginUndoGrouping()
+        controller.rippleDeleteSelection()
+        undoManager.endUndoGrouping()
+        try await waitForEditorAutosave(controller, packageURL: packageURL)
+        #expect(controller.project?.duration == 0)
+        #expect(controller.project?.lanes.allSatisfy { $0.clips.isEmpty } == true)
+        #expect(controller.errorMessage == nil)
+        #expect(undoManager.canUndo)
+        #expect(controller.player.currentItem == nil)
+        #expect(!controller.hasTimelineMedia)
+        #expect(controller.sourceRecordingURL == mediaURL)
+        #expect(controller.canResetProjectEdits)
+        let emptyProject = try #require(controller.project)
+        await #expect(throws: TimelineCompositionBuildError.self) {
+            try await TimelineCompositionBuilder.build(emptyProject)
+        }
+        #expect(throws: TimelineCompositionBuildError.self) {
+            try controller.makeExportSource()
+        }
+        await #expect(throws: TimelineCompositionBuildError.self) {
+            try await RecordingTimelineProjectLoader.exportSource(for: item)
+        }
+
+        let reopened = TimelineEditorController()
+        let reopenedUndoManager = UndoManager()
+        reopened.connectUndoManager(reopenedUndoManager)
+        await reopened.open(item)
+        #expect(reopened.project?.duration == 0)
+        #expect(reopened.errorMessage == nil)
+        #expect(!reopened.canResetUnsupportedProject)
+        #expect(!reopenedUndoManager.canUndo)
+        #expect(reopened.player.currentItem == nil)
+        #expect(reopened.canResetProjectEdits)
+        #expect(try Data(contentsOf: mediaURL) == sourceBytes)
+
+        undoManager.undo()
+        try await waitForEditorAutosave(controller, packageURL: packageURL)
+        #expect((controller.project?.duration ?? 0) > 2.9)
+        #expect(controller.project?.lanes.allSatisfy { !$0.clips.isEmpty } == true)
+        #expect(controller.errorMessage == nil)
+        #expect(controller.player.currentItem != nil)
+        #expect(try Data(contentsOf: mediaURL) == sourceBytes)
+        controller.player.replaceCurrentItem(with: nil)
+        reopened.player.replaceCurrentItem(with: nil)
+    }
+
+    @Test @MainActor func deletingLastSplitClipReopensAsExplicitEmptyTimeline() async throws {
+        let mediaURL = try await makeColorTestVideo()
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+        }
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 0,
+            duration: 3,
+            manifest: makeRecoveryManifest()
+        )
+        let controller = TimelineEditorController()
+        await controller.open(item)
+        controller.playhead = 1
+        controller.splitAllAtPlayhead()
+        controller.rippleDeleteSelection()
+        try await waitForEditorAutosave(controller, packageURL: packageURL)
+        #expect(controller.project?.duration == 1)
+        let remaining = try #require(controller.project?.lanes[0].clips.first)
+        controller.select(remaining)
+        #expect(controller.canRippleSelection)
+        controller.rippleDeleteSelection()
+        try await waitForEditorAutosave(controller, packageURL: packageURL)
+        #expect(controller.project?.duration == 0)
+        #expect(controller.errorMessage == nil)
+        await controller.open(item)
+        #expect(controller.project?.duration == 0)
+        #expect(controller.errorMessage == nil)
+        #expect(controller.player.currentItem == nil)
+        #expect(controller.canResetProjectEdits)
+        controller.player.replaceCurrentItem(with: nil)
+    }
+
+    @Test @MainActor func resettingEmptyTimelinePreservesPreviousEditsAndAllMedia() async throws {
+        let mediaURL = try await makeExportFixture(audioTrackCount: 1)
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+        }
+        let sourceBytes = try Data(contentsOf: mediaURL)
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 0,
+            duration: 3,
+            manifest: makeRecoveryManifest()
+        )
+        var empty = try await RecordingTimelineProjectLoader.initialProject(for: item)
+        empty.rippleDelete(timeRange: 0..<empty.duration)
+        try RecordingTimelineProjectLoader.save(empty, packageURL: packageURL)
+        let jsonURL = packageURL.appendingPathComponent("project.json")
+        let savedBytes = try Data(contentsOf: jsonURL)
+        let mediaDirectory = packageURL.appendingPathComponent("Media", isDirectory: true)
+        try FileManager.default.createDirectory(at: mediaDirectory, withIntermediateDirectories: true)
+        let importedURL = mediaDirectory.appendingPathComponent("imported.mov")
+        let voiceoverURL = mediaDirectory.appendingPathComponent("voiceover.m4a")
+        let retainedBytes = Data("retained project-owned media".utf8)
+        try retainedBytes.write(to: importedURL)
+        try retainedBytes.write(to: voiceoverURL)
+
+        let controller = TimelineEditorController()
+        let undoManager = UndoManager()
+        undoManager.groupsByEvent = false
+        controller.connectUndoManager(undoManager)
+        await controller.open(item)
+        #expect(!controller.hasTimelineMedia)
+        undoManager.beginUndoGrouping()
+        await controller.resetProjectEdits()
+        undoManager.endUndoGrouping()
+        #expect(controller.errorMessage == nil)
+        #expect(controller.hasTimelineMedia)
+        #expect(controller.project?.lanes.count == 2)
+        #expect((controller.project?.duration ?? 0) > 2.9)
+        #expect(controller.player.currentItem != nil)
+        #expect(undoManager.undoActionName == "Reset Edits")
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: packageURL.appendingPathComponent("Previous Edits"),
+            includingPropertiesForKeys: nil
+        )
+        #expect(backups.count == 1)
+        #expect(try Data(contentsOf: #require(backups.first)) == savedBytes)
+        #expect(try Data(contentsOf: importedURL) == retainedBytes)
+        #expect(try Data(contentsOf: voiceoverURL) == retainedBytes)
+        #expect(try Data(contentsOf: mediaURL) == sourceBytes)
+        undoManager.undo()
+        try await waitForEditorAutosave(controller, packageURL: packageURL)
+        #expect(!controller.hasTimelineMedia)
+        #expect(controller.player.currentItem == nil)
+        undoManager.redo()
+        try await waitForEditorAutosave(controller, packageURL: packageURL)
+        #expect(controller.hasTimelineMedia)
+        #expect(controller.player.currentItem != nil)
+        controller.player.replaceCurrentItem(with: nil)
+    }
+
+    @Test @MainActor func resetBackupFailurePreservesExistingProject() async throws {
+        let mediaURL = try await makeColorTestVideo()
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+        }
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 0,
+            duration: 3,
+            manifest: makeRecoveryManifest()
+        )
+        var empty = try await RecordingTimelineProjectLoader.initialProject(for: item)
+        empty.rippleDelete(timeRange: 0..<empty.duration)
+        try RecordingTimelineProjectLoader.save(empty, packageURL: packageURL)
+        let jsonURL = packageURL.appendingPathComponent("project.json")
+        let savedBytes = try Data(contentsOf: jsonURL)
+        try Data("not a directory".utf8).write(
+            to: packageURL.appendingPathComponent("Previous Edits")
+        )
+        let controller = TimelineEditorController()
+        await controller.open(item)
+        await controller.resetProjectEdits()
+        #expect(controller.errorMessage != nil)
+        #expect(controller.project?.lanes == empty.lanes)
+        #expect(controller.player.currentItem == nil)
+        #expect(controller.canResetProjectEdits)
+        #expect(try Data(contentsOf: jsonURL) == savedBytes)
+    }
+
+    @MainActor private func waitForEditorAutosave(
+        _ controller: TimelineEditorController,
+        packageURL: URL
+    ) async throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+            let saved = try decoder.decode(
+                TimelineProject.self,
+                from: Data(contentsOf: packageURL.appendingPathComponent("project.json"))
+            )
+            if saved.lanes == controller.project?.lanes, !controller.isRebuilding {
+                return
+            }
+        }
+        Issue.record("Editor autosave timed out: \(controller.errorMessage ?? "no editor error")")
+    }
+
+    @Test @MainActor func reopeningWaitsForPendingEmptyTimelineAutosave() async throws {
+        let mediaURL = try await makeColorTestVideo()
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+        }
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 0,
+            duration: 3,
+            manifest: makeRecoveryManifest()
+        )
+        let controller = TimelineEditorController()
+        await controller.open(item)
+        controller.rippleDeleteSelection()
+        await controller.open(item)
+        #expect(controller.errorMessage == nil)
+        #expect(!controller.hasTimelineMedia)
+        #expect(controller.player.currentItem == nil)
+        let loaded = try await RecordingTimelineProjectLoader.load(for: item)
+        #expect(!loaded.project.hasMedia)
+    }
+
+    @Test @MainActor func failedProjectOpenPreservesLivePreviewAndUndo() async throws {
+        let mediaURL = try await makeColorTestVideo()
+        let packageURL = RecordingArtifacts(mediaURL: mediaURL).projectPackageURL
+        defer {
+            try? FileManager.default.removeItem(at: mediaURL)
+            try? FileManager.default.removeItem(at: packageURL)
+        }
+        let item = RecordingItem(
+            url: mediaURL,
+            createdAt: Date(),
+            fileSize: 0,
+            duration: 3,
+            manifest: makeRecoveryManifest()
+        )
+        let controller = TimelineEditorController()
+        let undoManager = UndoManager()
+        undoManager.groupsByEvent = false
+        controller.connectUndoManager(undoManager)
+        await controller.open(item)
+        controller.playhead = 1
+        undoManager.beginUndoGrouping()
+        controller.splitAllAtPlayhead()
+        undoManager.endUndoGrouping()
+        try await waitForEditorAutosave(controller, packageURL: packageURL)
+        let previous = controller.project
+        let previousPlayerItem = controller.player.currentItem
+        let missing = RecordingItem(
+            url: mediaURL.appendingPathExtension("missing"),
+            createdAt: Date(),
+            fileSize: 0,
+            duration: 3,
+            manifest: makeRecoveryManifest()
+        )
+        await controller.open(missing)
+        #expect(controller.errorMessage != nil)
+        #expect(controller.project == previous)
+        #expect(controller.player.currentItem === previousPlayerItem)
+        #expect(controller.sourceRecordingURL == mediaURL)
+        #expect(undoManager.canUndo)
+        #expect(!controller.isLoading)
+        controller.player.replaceCurrentItem(with: nil)
     }
 
     private func makeProject() -> TimelineProject {

@@ -52,16 +52,23 @@ struct ReccyApp: App {
             }
 
             CommandMenu("Editor") {
+                Button("Reset Edits…") {
+                    editor.requestResetEdits()
+                }
+                .disabled(navigation.section != .editor || !editor.canResetProjectEdits)
+
+                Divider()
+
                 Button("Previous Frame") {
                     editor.stepFrames(-1)
                 }
-                .disabled(!editor.hasProject)
+                .disabled(!editor.hasTimelineMedia)
                 .keyboardShortcut(.leftArrow, modifiers: .control)
 
                 Button("Next Frame") {
                     editor.stepFrames(1)
                 }
-                .disabled(!editor.hasProject)
+                .disabled(!editor.hasTimelineMedia)
                 .keyboardShortcut(.rightArrow, modifiers: .control)
 
                 Button("Use Current Frame as Poster") {
@@ -72,7 +79,7 @@ struct ReccyApp: App {
                         Task { await coordinator.library.refreshThumbnail(for: item) }
                     }
                 }
-                .disabled(!editor.hasProject)
+                .disabled(!editor.hasTimelineMedia)
 
                 Divider()
 

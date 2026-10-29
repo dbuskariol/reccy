@@ -329,6 +329,7 @@ final class RecordingLibrary: ObservableObject {
     private func makeThumbnail(item: RecordingItem) async -> NSImage? {
         do {
             let loaded = try await RecordingTimelineProjectLoader.load(for: item)
+            guard loaded.project.hasMedia else { return nil }
             let build = try await TimelineCompositionBuilder.build(loaded.project)
             guard !build.composition.tracks(withMediaType: .video).isEmpty else {
                 return await makeQuickLookThumbnail(url: item.url)
