@@ -1,9 +1,23 @@
 import AppKit
 import ScreenCaptureKit
 
-struct RegionSelection: Equatable, Sendable {
+nonisolated struct RegionSelection: Codable, Equatable, Sendable {
+    static let storageKey = "capture.last-portion"
+
     let displayID: CGDirectDisplayID
     let sourceRect: CGRect
+
+    /// The last accepted portion, reused like QuickTime's area selection. It is
+    /// only a starting rectangle for the overlay; the user still approves it.
+    static func loadRemembered(defaults: UserDefaults = .standard) -> RegionSelection? {
+        guard let data = defaults.data(forKey: storageKey) else { return nil }
+        return try? JSONDecoder().decode(RegionSelection.self, from: data)
+    }
+
+    func remember(defaults: UserDefaults = .standard) {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        defaults.set(data, forKey: Self.storageKey)
+    }
 }
 
 @MainActor
@@ -14,7 +28,10 @@ final class RegionSelectionController {
     /// Presents one coordinated overlay per connected display. A selection is
     /// intentionally constrained to one display because ScreenCaptureKit's
     /// source rectangle is expressed in a single display's coordinate space.
-    func selectRegion(across displays: [SCDisplay]) async -> RegionSelection? {
+    func selectRegion(
+        across displays: [SCDisplay],
+        restoring remembered: RegionSelection? = nil
+    ) async -> RegionSelection? {
         let availableDisplays = displays.compactMap { display -> (SCDisplay, NSScreen)? in
             guard let screen = NSScreen.screen(displayID: display.displayID) else { return nil }
             return (display, screen)
@@ -25,7 +42,7 @@ final class RegionSelectionController {
                 pixelWidth: CGFloat(display.width)
             )
         }
-        return await selectRegion(across: availableDisplays)
+        return await selectRegion(across: availableDisplays, restoring: remembered)
     }
 
     /// Cancels an active region interaction and resumes its awaiting caller.
@@ -44,22 +61,33 @@ final class RegionSelectionController {
                 pixelWidth: screen.frame.width * screen.backingScaleFactor
             )
         }
-        return await selectRegion(across: displays)
+        return await selectRegion(across: displays, restoring: RegionSelection.loadRemembered())
     }
 #endif
 
-    private func selectRegion(across displays: [RegionSelectionDisplay]) async -> RegionSelection? {
+    private func selectRegion(
+        across displays: [RegionSelectionDisplay],
+        restoring remembered: RegionSelection?
+    ) async -> RegionSelection? {
         finish(with: nil)
         let availableDisplays = displays.filter { $0.screen.frame.width > 0 && $0.screen.frame.height > 0 }
         guard !availableDisplays.isEmpty else { return nil }
 
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
+            var keyPanel: RegionSelectionPanel?
             self.panels = availableDisplays.map { display in
-                self.makePanel(for: display)
+                let initialSelection = Self.restoredSelection(
+                    remembered,
+                    displayID: display.displayID,
+                    screenSize: display.screen.frame.size
+                )
+                let panel = self.makePanel(for: display, initialSelection: initialSelection)
+                if initialSelection != nil { keyPanel = panel }
+                return panel
             }
             for panel in self.panels { panel.orderFrontRegardless() }
-            if let panel = self.panels.first,
+            if let panel = keyPanel ?? self.panels.first,
                let selectionView = panel.contentView as? RegionSelectionView {
                 panel.makeKey()
                 panel.makeFirstResponder(selectionView)
@@ -77,7 +105,33 @@ final class RegionSelectionController {
         ).integral
     }
 
-    private func makePanel(for display: RegionSelectionDisplay) -> RegionSelectionPanel {
+    /// Places a remembered capture-space rectangle back into the overlay's
+    /// AppKit coordinates. A display that has since become smaller shifts the
+    /// rectangle inward first, so the chosen dimensions survive when they fit.
+    static func restoredSelection(
+        _ remembered: RegionSelection?,
+        displayID: CGDirectDisplayID,
+        screenSize: CGSize
+    ) -> CGRect? {
+        guard let remembered, remembered.displayID == displayID else { return nil }
+        let rect = remembered.sourceRect.standardized
+        let width = min(rect.width, screenSize.width)
+        let height = min(rect.height, screenSize.height)
+        guard width >= 64, height >= 64 else { return nil }
+        let x = min(max(rect.minX, 0), screenSize.width - width)
+        let y = min(max(rect.minY, 0), screenSize.height - height)
+        return CGRect(
+            x: x,
+            y: screenSize.height - y - height,
+            width: width,
+            height: height
+        ).integral
+    }
+
+    private func makePanel(
+        for display: RegionSelectionDisplay,
+        initialSelection: CGRect?
+    ) -> RegionSelectionPanel {
         let screen = display.screen
         let panel = RegionSelectionPanel(
             contentRect: screen.frame,
@@ -102,7 +156,8 @@ final class RegionSelectionController {
             : 1
         let selectionView = RegionSelectionView(
             frame: CGRect(origin: .zero, size: screen.frame.size),
-            pointPixelScale: pointPixelScale
+            pointPixelScale: pointPixelScale,
+            initialSelection: initialSelection
         )
         selectionView.onComplete = { [weak self] selection in
             guard let selection else {
@@ -163,8 +218,9 @@ private final class RegionSelectionView: NSView {
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { false }
 
-    init(frame frameRect: NSRect, pointPixelScale: CGFloat) {
+    init(frame frameRect: NSRect, pointPixelScale: CGFloat, initialSelection: CGRect?) {
         self.pointPixelScale = max(pointPixelScale, 1)
+        self.selection = initialSelection
         super.init(frame: frameRect)
         wantsLayer = true
 
@@ -216,6 +272,7 @@ private final class RegionSelectionView: NSView {
             controls.topAnchor.constraint(equalTo: material.topAnchor),
             controls.bottomAnchor.constraint(equalTo: material.bottomAnchor),
         ])
+        updateControls()
     }
 
     @available(*, unavailable)
