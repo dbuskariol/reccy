@@ -201,6 +201,10 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
     private var latestPresentationEndTime: CMTime = .invalid
     private var latestCameraPresentationEndTime: CMTime = .invalid
     private var lastCameraSample: CMSampleBuffer?
+    private var lastScreenSample: CMSampleBuffer?
+    private var lastScreenSourceTime: CMTime = .invalid
+    private var lastScreenWriterSample: CMSampleBuffer?
+    private var screenFrameHoldTimer: DispatchSourceTimer?
     private var nominalVideoFrameDuration: CMTime = .invalid
     private var pauseTimeline = RecordingPauseTimeline()
     private var outputURL: URL?
@@ -350,6 +354,9 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         guard let stream = request.stream else {
             throw MultitrackRecorderError.noVideoFrames
         }
+        // held frames would otherwise keep extending the screen track while
+        // capture and camera shutdown are in flight, past the final audio.
+        sampleQueue.sync { stopScreenFrameHold() }
         if request.startWasInFlight {
             let webcam = webcamSession
             webcamSession = nil
@@ -621,6 +628,9 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         latestPresentationEndTime = .invalid
         latestCameraPresentationEndTime = .invalid
         lastCameraSample = nil
+        lastScreenSample = nil
+        lastScreenSourceTime = .invalid
+        lastScreenWriterSample = nil
         nominalVideoFrameDuration = CMTime(
             value: 1,
             timescale: CMTimeScale(options.frameRate)
@@ -629,6 +639,7 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         hasNotifiedFailure = false
         systemAudioLevel = 0
         microphoneAudioLevel = 0
+        startScreenFrameHold()
     }
 
     static func videoSettings(options: MultitrackRecordingOptions) -> [String: Any] {
@@ -729,6 +740,19 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         // is created atomically only after the countdown reaches zero.
         guard writer != nil else { return }
 
+        if type == .screen {
+            // a frame delivered later than the hold latency would land behind an
+            // already-written held frame; the writer requires increasing times.
+            if lastScreenSourceTime.isValid,
+               CMTimeCompare(presentationTime, lastScreenSourceTime) <= 0
+            {
+                logger.debug("Dropped a late screen frame behind a held frame")
+                return
+            }
+            lastScreenSample = sampleBuffer
+            lastScreenSourceTime = presentationTime
+        }
+
         guard let offset = pauseTimeline.offset(for: presentationTime, isVideo: type == .screen) else {
             return
         }
@@ -741,11 +765,13 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         switch type {
         case .screen:
             startSessionIfNeeded(at: writerPresentationTime)
-            append(
+            if append(
                 writerBuffer,
                 to: videoInput,
                 fallbackDuration: nominalVideoFrameDuration
-            )
+            ) {
+                lastScreenWriterSample = writerBuffer
+            }
         case .audio:
             handleAudio(
                 writerBuffer,
@@ -811,6 +837,121 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
               let status = SCFrameStatus(rawValue: rawStatus)
         else { return false }
         return status == .complete
+    }
+
+    /// How far held screen frames trail the host clock. ScreenCaptureKit
+    /// delivers a frame shortly after its capture time, so a slot is only
+    /// filled once a newer real frame can no longer arrive for it.
+    static let screenFrameHoldLatency = CMTime(value: 1, timescale: 4)
+    static let screenFrameHoldInterval = DispatchTimeInterval.milliseconds(100)
+    static let maximumHeldScreenFramesPerPass = 30
+
+    /// Presentation times for repeats of the latest screen frame: one per
+    /// nominal frame after `lastPresentationTime`, none later than `deadline`.
+    /// When more slots are due than `maximumCount`, the earliest are skipped so
+    /// a stalled queue catches up with bounded work and keeps the newest slot.
+    static func heldScreenFrameTimes(
+        after lastPresentationTime: CMTime,
+        through deadline: CMTime,
+        frameDuration: CMTime,
+        maximumCount: Int
+    ) -> [CMTime] {
+        guard lastPresentationTime.isValid,
+              deadline.isValid,
+              frameDuration.isValid,
+              CMTimeCompare(frameDuration, .zero) > 0,
+              maximumCount > 0,
+              CMTimeCompare(deadline, lastPresentationTime) > 0
+        else { return [] }
+
+        let estimate = CMTimeSubtract(deadline, lastPresentationTime).seconds / frameDuration.seconds
+        guard estimate.isFinite, estimate < Double(Int32.max - 1) else { return [] }
+        func slot(_ index: Int) -> CMTime {
+            CMTimeAdd(lastPresentationTime, CMTimeMultiply(frameDuration, multiplier: Int32(index)))
+        }
+        var count = Int(estimate)
+        while count > 0, CMTimeCompare(slot(count), deadline) > 0 { count -= 1 }
+        while CMTimeCompare(slot(count + 1), deadline) <= 0 { count += 1 }
+        guard count > 0 else { return [] }
+        return (max(1, count - maximumCount + 1)...count).map(slot)
+    }
+
+    /// ScreenCaptureKit only delivers a frame when the captured content
+    /// changes, so a static screen would otherwise become one sample lasting
+    /// minutes. AVFoundation's video compositor stops rendering after such a
+    /// sample when a timeline clip ends inside it, which exports as black. The
+    /// latest complete frame is therefore re-appended at the nominal cadence.
+    /// Cost: one retained frame (the newest, which Monitor also holds) and an
+    /// encode of an unchanged picture per nominal frame, the same load as a
+    /// continuously changing screen. Work is bounded per 100 ms pass on the
+    /// serial sample queue, and the timer lives and dies with the writer.
+    private func startScreenFrameHold() {
+        stopScreenFrameHold()
+        let timer = DispatchSource.makeTimerSource(queue: sampleQueue)
+        timer.schedule(
+            deadline: .now() + Self.screenFrameHoldInterval,
+            repeating: Self.screenFrameHoldInterval,
+            leeway: .milliseconds(20)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.appendHeldScreenFrames()
+        }
+        screenFrameHoldTimer = timer
+        timer.resume()
+    }
+
+    private func stopScreenFrameHold() {
+        screenFrameHoldTimer?.cancel()
+        screenFrameHoldTimer = nil
+    }
+
+    private func appendHeldScreenFrames() {
+        // a held slot trails the clock, so letting one anchor a resume could
+        // admit audio captured while still paused; resume waits for a real frame.
+        guard writer != nil,
+              sessionStartTime != nil,
+              !hasNotifiedFailure,
+              !pauseTimeline.isPaused,
+              let lastScreenSample
+        else { return }
+
+        let deadline = CMTimeSubtract(
+            CMClockGetTime(CMClockGetHostTimeClock()),
+            Self.screenFrameHoldLatency
+        )
+        for time in Self.heldScreenFrameTimes(
+            after: lastScreenSourceTime,
+            through: deadline,
+            frameDuration: nominalVideoFrameDuration,
+            maximumCount: Self.maximumHeldScreenFramesPerPass
+        ) {
+            lastScreenSourceTime = time
+            guard let held = Self.retimed(lastScreenSample, toPresentationTime: time),
+                  let offset = pauseTimeline.offset(for: time, isVideo: true),
+                  let writerBuffer = Self.retimed(held, subtracting: offset)
+            else { continue }
+            if append(writerBuffer, to: videoInput, fallbackDuration: nominalVideoFrameDuration) {
+                lastScreenWriterSample = writerBuffer
+            }
+        }
+        if writer?.status == .failed {
+            notifyFailure(MultitrackRecorderError.writerFailed(writer?.error))
+        }
+    }
+
+    /// Holds the final screen frame through the last written sample of any
+    /// lane, so the screen track never ends on one long-lived frame.
+    private func appendScreenTailIfNeeded() {
+        guard let lastScreenWriterSample else { return }
+        for time in Self.heldScreenFrameTimes(
+            after: lastScreenWriterSample.presentationTimeStamp,
+            through: CMTimeSubtract(latestPresentationEndTime, nominalVideoFrameDuration),
+            frameDuration: nominalVideoFrameDuration,
+            maximumCount: Self.maximumHeldScreenFramesPerPass
+        ) {
+            guard let held = Self.retimed(lastScreenWriterSample, toPresentationTime: time) else { return }
+            append(held, to: videoInput, fallbackDuration: nominalVideoFrameDuration)
+        }
     }
 
     private func startSessionIfNeeded(at time: CMTime) {
@@ -1185,6 +1326,8 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
                     return
                 }
 
+                stopScreenFrameHold()
+                appendScreenTailIfNeeded()
                 let cameraTail = appendCameraTailIfNeeded()
                 let recordingDuration = max(
                     0,
@@ -1240,6 +1383,10 @@ nonisolated final class MultitrackRecorder: NSObject, @unchecked Sendable {
         latestPresentationEndTime = .invalid
         latestCameraPresentationEndTime = .invalid
         lastCameraSample = nil
+        stopScreenFrameHold()
+        lastScreenSample = nil
+        lastScreenSourceTime = .invalid
+        lastScreenWriterSample = nil
         nominalVideoFrameDuration = .invalid
         pauseTimeline.reset()
         systemAudioLevel = 0
