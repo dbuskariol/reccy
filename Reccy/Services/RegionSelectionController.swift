@@ -172,6 +172,15 @@ final class RegionSelectionController {
                 )
             ))
         }
+        selectionView.onBeginSelection = { [weak self, weak selectionView] in
+            guard let self else { return }
+            for other in self.panels {
+                guard let view = other.contentView as? RegionSelectionView,
+                      view !== selectionView
+                else { continue }
+                view.clearSelection()
+            }
+        }
         panel.contentView = selectionView
         return panel
     }
@@ -206,6 +215,9 @@ private final class RegionSelectionPanel: NSPanel {
 
 private final class RegionSelectionView: NSView {
     var onComplete: ((CGRect?) -> Void)?
+    /// A selection is confined to one display, so starting a new area on this
+    /// display must clear a restored or partial area shown on any other one.
+    var onBeginSelection: (() -> Void)?
 
     private let pointPixelScale: CGFloat
     private let instructions = NSTextField(labelWithString: "Drag to select a recording area")
@@ -308,6 +320,7 @@ private final class RegionSelectionView: NSView {
         guard let selection else {
             dragMode = .create(origin: point)
             self.selection = CGRect(origin: point, size: .zero)
+            onBeginSelection?()
             updateControls()
             needsDisplay = true
             return
@@ -320,6 +333,7 @@ private final class RegionSelectionView: NSView {
         } else {
             dragMode = .create(origin: point)
             self.selection = CGRect(origin: point, size: .zero)
+            onBeginSelection?()
         }
     }
 
@@ -394,6 +408,14 @@ private final class RegionSelectionView: NSView {
 
     @objc private func cancelSelection() {
         onComplete?(nil)
+    }
+
+    func clearSelection() {
+        guard selection != nil else { return }
+        selection = nil
+        dragMode = nil
+        updateControls()
+        needsDisplay = true
     }
 
     private func updateControls() {
