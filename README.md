@@ -6,7 +6,7 @@ Reccy is a native screen recorder and non-destructive multitrack editor for macO
 
 ## Capture the right thing
 
-Choose an entire display, every window from one application, or one specific window through Apple's private system picker. For application capture, select the application and then use the purple Share button supplied by macOS. Portion capture uses a direct QuickTime-style overlay across connected displays and a one-time approval that macOS describes as bypassing the private window picker. Reccy keeps the approved source obvious in the workspace and draws a local capture boundary that never appears in the recorded video.
+Choose an entire display, every window from one application, or one specific window through Apple's private system picker. For application capture, select the application and then use the purple Share button supplied by macOS. Portion capture uses a direct QuickTime-style overlay across connected displays that reopens on your last accepted area, and a one-time approval that macOS describes as bypassing the private window picker. Reccy keeps the approved source obvious in the workspace and draws a local capture boundary that never appears in the recorded video.
 
 Every mode preserves its approved geometry end to end: displays keep their full extent, applications fit their visible-window envelope, individual windows retain their native aspect, and portions use the exact selected rectangle. Monitor, screenshots, source recordings, Library, Editor, mouse-follow zoom, and exports all consume that same source shape.
 
